@@ -6,6 +6,7 @@ from pocketsat.targets.base import (
     TargetCapabilities,
     TargetFault,
     TestTarget,
+    UnsupportedFaultError,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "TargetCapabilities",
     "TargetFault",
     "TestTarget",
+    "UnsupportedFaultError",
 ]
