@@ -27,7 +27,7 @@ class FakeSnapshot(SubsystemSnapshot):
 class FakeSubsystem:
     """Counts steps and sunlit time, and draws noise from its own named stream."""
 
-    def __init__(self, name: str = "fake", log: list[str] | None = None) -> None:
+    def __init__(self, name: str = "fake", log: list[tuple[str, str]] | None = None) -> None:
         self.name = name
         self._log = log
         self._rng = Random(0)
@@ -37,6 +37,8 @@ class FakeSubsystem:
         self._noise = 0.0
 
     def reset(self, rng: RngFactory) -> None:
+        if self._log is not None:
+            self._log.append(("reset", self.name))
         self._rng = rng.stream(f"spacecraft.{self.name}.noise")
         self._elapsed_us = 0
         self._steps = 0
@@ -45,7 +47,7 @@ class FakeSubsystem:
 
     def step(self, dt_us: int, env: EnvironmentState) -> None:
         if self._log is not None:
-            self._log.append(self.name)
+            self._log.append(("step", self.name))
         self._elapsed_us += dt_us
         self._steps += 1
         self._sunlit_steps += env.sunlit
@@ -96,34 +98,48 @@ def test_step_order_is_documented_constant() -> None:
     assert STEP_ORDER == ("power", "thermal", "attitude", "payload", "comms")
 
 
+# Supplied in neither step order nor alphabetical order. Step order is
+# power, attitude, comms; alphabetical would be attitude, comms, power.
+MIXED_ORDER = ("comms", "power", "attitude")
+EXPECTED_ORDER = ["power", "attitude", "comms"]
+
+
 def test_stack_steps_in_fixed_order_regardless_of_input_order() -> None:
-    log: list[str] = []
-    subsystems = [FakeSubsystem(name, log) for name in ("comms", "power", "attitude")]
-    stack = SubsystemStack(subsystems)
-    assert stack.names == ("power", "attitude", "comms")
+    log: list[tuple[str, str]] = []
+    stack = SubsystemStack([FakeSubsystem(name, log) for name in MIXED_ORDER])
+    assert stack.names == tuple(EXPECTED_ORDER)
     stack.reset(RngFactory(1))
+    log.clear()
     stack.step(100_000, SUNLIT)
     stack.step(100_000, SUNLIT)
-    assert log == ["power", "attitude", "comms"] * 2
+    assert log == [("step", name) for name in EXPECTED_ORDER] * 2
+
+
+def test_stack_resets_in_fixed_order() -> None:
+    log: list[tuple[str, str]] = []
+    stack = SubsystemStack([FakeSubsystem(name, log) for name in MIXED_ORDER])
+    stack.reset(RngFactory(1))
+    assert log == [("reset", name) for name in EXPECTED_ORDER]
 
 
 def test_stack_accepts_custom_order_for_tests() -> None:
-    log: list[str] = []
-    stack = SubsystemStack([FakeSubsystem("b", log), FakeSubsystem("a", log)], order=("a", "b"))
+    log: list[tuple[str, str]] = []
+    stack = SubsystemStack([FakeSubsystem("a", log), FakeSubsystem("b", log)], order=("b", "a"))
     stack.reset(RngFactory(1))
     stack.step(1, SUNLIT)
-    assert log == ["a", "b"]
+    assert log == [("reset", "b"), ("reset", "a"), ("step", "b"), ("step", "a")]
 
 
-def test_spacecraft_state_aggregates_snapshots_in_order() -> None:
-    stack = SubsystemStack([FakeSubsystem("thermal"), FakeSubsystem("power")])
+def test_spacecraft_state_aggregates_snapshots_in_step_order() -> None:
+    stack = SubsystemStack([FakeSubsystem(name) for name in MIXED_ORDER])
     stack.reset(RngFactory(7))
     stack.step(250_000, ECLIPSE)
     state = stack.snapshot()
     assert isinstance(state, SpacecraftState)
-    assert list(state.subsystems) == ["power", "thermal"]
+    assert list(state.subsystems) == EXPECTED_ORDER
+    assert list(state.subsystems) != sorted(state.subsystems)  # guards against sorting
     assert state.get("power", FakeSnapshot).elapsed_us == 250_000
-    assert state.get("thermal", FakeSnapshot).sunlit_steps == 0
+    assert state.get("comms", FakeSnapshot).sunlit_steps == 0
 
 
 def test_spacecraft_state_is_immutable() -> None:
