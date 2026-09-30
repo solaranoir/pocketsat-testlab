@@ -20,26 +20,30 @@ The product is the **test infrastructure**: scenario definition, orchestration, 
 
 ```mermaid
 flowchart TB
-    SC[Scenario YAML] --> ORCH[Test Orchestrator]
-    ORCH -->|commands, clock control| GS[Ground Station]
+    SC[Scenario YAML] --> ORCH[Test Orchestrator<br/>owns SimClock and RngFactory]
+    ORCH -->|step each tick| ENV[Environment Model]
+    ENV -->|EnvironmentState| ORCH
+    ORCH -->|scheduled Commands| GS[Ground Station]
     ORCH -->|fault schedule| FI[Fault Injector]
-    ORCH -->|reset, seed, advance| TGT{{TestTarget interface}}
+    ORCH -->|"connect, reset(seed), apply_environment(EnvironmentState),<br/>inject(TargetFault), advance(dt_us), close"| TGT{{TestTarget interface}}
 
-    GS -->|uplink packets| RF[RF Channel Model]
-    RF -->|uplink packets| TGT
-    TGT -->|downlink packets| RF
-    RF -->|downlink packets| GS
-    GS -->|decoded telemetry, logs| ORCH
+    GS -->|uplink Packet| RF[RF Channel Model]
+    RF -->|"send(frame bytes)"| TGT
+    TGT -->|"receive(): frame bytes"| RF
+    RF -->|downlink Packet| GS
+    GS -->|decoded Telemetry, events| ORCH
 
-    TGT --- SIL[SIL: Python Spacecraft Sim]
-    TGT --- HIL[HIL: MCU Flight Software]
+    TGT --- SIL[SIL: Python spacecraft model]
+    TGT --- HIL[HIL: bridge to MCU flight software]
 
     FI -.-> RF
     FI -.-> GS
-    FI -.-> TGT
+    FI -.->|"TargetFault via inject()"| TGT
 
-    ORCH --> REP[Results, Logs, Reports]
+    ORCH --> REP[Reporting: results, telemetry, run.json]
 ```
+
+Typed messages (`Command`, `Telemetry`, `Packet`, `EnvironmentState`, `TargetFault`) flow between components. Only raw frame bytes cross the TestTarget boundary: the RF channel unwraps a `Packet` to its frame before `send()`, and wraps each frame from `receive()` in a new `Packet`.
 
 The **TestTarget boundary** is the only place where SIL and HIL differ. Everything above it (orchestrator, ground station, RF channel, fault injection, reporting) is shared.
 
@@ -77,10 +81,12 @@ flowchart LR
 
 | Component | Responsibilities | Explicitly not responsible for |
 |---|---|---|
-| **Test Orchestrator** | Load scenarios, own the clock and the environment model, drive the run loop, apply the fault schedule, evaluate assertions, record seeds and run IDs, emit results | Spacecraft behavior, RF math, packet decoding |
+| **Test Orchestrator** | Load scenarios, own the simulated clock and the RNG factory, step the environment model, drive the run loop in the fixed per-tick order, apply the fault schedule, evaluate assertions, record seeds and run IDs, emit results | Spacecraft behavior, RF math, packet decoding, environment physics |
+| **Environment Model** | Produce an `EnvironmentState` each tick from the scenario, simulated time, and its seeded random streams: sunlit or eclipse, thermal input, sensor noise or bias, battery-condition overrides | How the spacecraft responds to the environment, RF link effects, delivering state to the target (the orchestrator calls `apply_environment()`) |
 | **TestTarget** | Uniform bytes-in/bytes-out interface to the spacecraft-under-test: reset, accept frames, produce frames, accept environment state and target faults, advance time, declare capabilities | Knowing about scenarios, ground station, or RF |
-| **SIL target** | Python spacecraft model: Power, Thermal, Attitude, Payload, Comms, Flight Computer; modes BOOT, NOMINAL, SCIENCE, DOWNLINK, SAFE, FAULT | Link quality, pass geometry |
-| **HIL target** | Bridge to an MCU over serial/USB: framing, sensor-input and test-control channels, flashing hooks, physical reset line, watchdog observation | Mission logic (that lives in firmware) |
+| **SIL target (spacecraft model)** | Python spacecraft model: Power, Thermal, Attitude, Payload, Comms, Flight Computer; modes BOOT, NOMINAL, SCIENCE, DOWNLINK, SAFE, FAULT. Decodes uplink frames, encodes downlink frames, steps instantly on `advance()` | Link quality, pass geometry, generating its own environment |
+| **HIL target (bridge)** | Bridge to an MCU over serial/USB: carries RF-path frames, serializes `EnvironmentState` onto the sensor-input channel, delivers faults on the test-control channel or the physical reset line, paces `advance()` in real time, flashing hooks, watchdog observation | Mission logic (that lives in firmware) |
+| **MCU flight software (HIL spacecraft)** | Mission logic on real hardware: modes, command handling, telemetry, framing and CRC, watchdog, safe mode, reset recovery; reads sensor inputs and test-control messages from the bridge | Physics and environment (supplied by the bridge), link effects, knowing it is under test beyond the test-control channel |
 | **RF Channel Model** | Attach link state to each packet (elevation, range, Doppler, SNR, loss probability, latency); drop, delay, or corrupt packets accordingly | Decoding, spacecraft state |
 | **Ground Station** | Pass state (AOS/LOS), radio control, command uplink, packet decoding, station identity, console output | Orbital truth, fault scheduling |
 | **Fault Injector** | Apply reusable faults at defined hook points on schedule | Deciding expected behavior (scenarios assert that) |
