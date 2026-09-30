@@ -23,7 +23,8 @@ seeded test campaigns, and CI.
 > boundaries and data flow.
 
 Design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/). The wire format is
-described in [`docs/protocol.md`](docs/protocol.md).
+described in [`docs/protocol.md`](docs/protocol.md), and the phase plan in
+[`docs/roadmap.md`](docs/roadmap.md).
 
 ## Development
 
