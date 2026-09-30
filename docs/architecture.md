@@ -176,6 +176,8 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 |---|---|
 | Orchestrator | `pocketsat.orchestrator` |
 | TestTarget, SIL, HIL | `pocketsat.targets` |
+| Message types (`Command`, `Telemetry`, `Packet`) | `pocketsat.messages` |
+| Frame encode/decode, CRC | `pocketsat.frame` |
 | Spacecraft model | `pocketsat.spacecraft` |
 | Ground station | `pocketsat.groundstation` |
 | RF channel | `pocketsat.rf` |

@@ -1,0 +1,119 @@
+{
+  "description": "PocketSat frame test vectors (ADR-0002). Shared by Python and firmware tests. See README.md in this directory.",
+  "crc16_ccitt_false": [
+    {
+      "name": "check_value",
+      "input_hex": "313233343536373839",
+      "crc": 10673
+    },
+    {
+      "name": "empty",
+      "input_hex": "",
+      "crc": 65535
+    },
+    {
+      "name": "single_zero",
+      "input_hex": "00",
+      "crc": 57840
+    }
+  ],
+  "valid_frames": [
+    {
+      "name": "command_empty_payload",
+      "version": 1,
+      "type": "COMMAND",
+      "sequence": 0,
+      "payload_hex": "",
+      "crc": 57825,
+      "frame_hex": "a55a010100000000e1e1"
+    },
+    {
+      "name": "command_with_payload",
+      "version": 1,
+      "type": "COMMAND",
+      "sequence": 1,
+      "payload_hex": "0102",
+      "crc": 6606,
+      "frame_hex": "a55a010100010002010219ce"
+    },
+    {
+      "name": "telemetry_uptime",
+      "version": 1,
+      "type": "TELEMETRY",
+      "sequence": 4660,
+      "payload_hex": "00003039",
+      "crc": 18859,
+      "frame_hex": "a55a0102123400040000303949ab"
+    },
+    {
+      "name": "ack_max_sequence",
+      "version": 1,
+      "type": "ACK",
+      "sequence": 65535,
+      "payload_hex": "",
+      "crc": 8610,
+      "frame_hex": "a55a0103ffff000021a2"
+    },
+    {
+      "name": "payload_contains_sync_bytes",
+      "version": 1,
+      "type": "COMMAND",
+      "sequence": 7,
+      "payload_hex": "a55a00ff",
+      "crc": 9425,
+      "frame_hex": "a55a010100070004a55a00ff24d1"
+    }
+  ],
+  "invalid_frames": [
+    {
+      "name": "empty",
+      "frame_hex": "",
+      "error": "sync"
+    },
+    {
+      "name": "bad_sync",
+      "frame_hex": "a45a010100010002010219ce",
+      "error": "sync"
+    },
+    {
+      "name": "truncated_header",
+      "frame_hex": "a55a010100",
+      "error": "length"
+    },
+    {
+      "name": "length_field_too_large",
+      "frame_hex": "a55a01010001000301022efe",
+      "error": "length"
+    },
+    {
+      "name": "length_field_too_small",
+      "frame_hex": "a55a0101000100010102409e",
+      "error": "length"
+    },
+    {
+      "name": "trailing_byte",
+      "frame_hex": "a55a010100010002010219ce00",
+      "error": "length"
+    },
+    {
+      "name": "payload_bit_flip",
+      "frame_hex": "a55a010100010002000219ce",
+      "error": "crc"
+    },
+    {
+      "name": "crc_bit_flip",
+      "frame_hex": "a55a010100010002010219cf",
+      "error": "crc"
+    },
+    {
+      "name": "header_sequence_bit_flip",
+      "frame_hex": "a55a010100000002010219ce",
+      "error": "crc"
+    },
+    {
+      "name": "unknown_type",
+      "frame_hex": "a55a017f0001000004ff",
+      "error": "type"
+    }
+  ]
+}
