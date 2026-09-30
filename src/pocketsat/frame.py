@@ -167,7 +167,9 @@ def decode_frame(data: bytes) -> Frame:
     received_crc = int.from_bytes(data[-CRC_SIZE:], "big")
     computed_crc = crc16_ccitt_false(data[2:-CRC_SIZE])
     if received_crc != computed_crc:
-        raise FrameCrcError(f"bad CRC: frame has 0x{received_crc:04X}, computed 0x{computed_crc:04X}")
+        raise FrameCrcError(
+            f"bad CRC: frame has 0x{received_crc:04X}, computed 0x{computed_crc:04X}"
+        )
 
     try:
         frame_type = FrameType(type_code)
