@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Draft for Phase 0, updated to reflect ADR-0002. Decisions marked **(ADR-000N)** are finalized in the named ADR.
+Status: Phase 0, reflects ADR-0002 (TestTarget) and ADR-0003 (time and determinism). Decisions marked **(ADR-000N)** are recorded in the named ADR.
 
 ## 1. Purpose
 
@@ -43,6 +43,36 @@ flowchart TB
 
 The **TestTarget boundary** is the only place where SIL and HIL differ. Everything above it (orchestrator, ground station, RF channel, fault injection, reporting) is shared.
 
+### 3.1 SIL and HIL paths
+
+Below the boundary, the two targets differ only in how they implement `TestTarget`:
+
+```mermaid
+flowchart LR
+    SHARED["Shared: Orchestrator,<br/>Ground Station, RF Channel"] --> TT{{TestTarget}}
+    TT --> SILT[SilTarget]
+    TT --> HILT[HilTarget bridge]
+
+    subgraph SILPATH [SIL path: in-process, simulated time]
+        SILT --> SIM["Python spacecraft sim<br/>Power, Thermal, Attitude,<br/>Payload, Comms, Flight Computer"]
+    end
+
+    subgraph HILPATH [HIL path: real hardware, real time]
+        HILT -->|RF-path frames over serial| MCU["MCU flight software"]
+        HILT -->|sensor-input channel| MCU
+        HILT -->|test-control channel| MCU
+        HILT -->|reset line| MCU
+    end
+```
+
+| | SIL | HIL |
+|---|---|---|
+| Spacecraft model | Python subsystems | Firmware on the MCU |
+| Environment input | Subsystems read `EnvironmentState` directly | Bridge serializes it onto the sensor-input channel |
+| Target faults | Handled inside the simulation | Test-control channel; physical reset line for MCU reset |
+| Time | Simulated, instant | Real time, deadline-paced |
+| Determinism | Bit-for-bit reproducible | Repeatable, not deterministic |
+
 ## 4. Components
 
 | Component | Responsibilities | Explicitly not responsible for |
@@ -69,7 +99,7 @@ Typed, immutable messages cross every boundary except the target boundary, which
 
 ## 6. The TestTarget interface
 
-Defined in ADR-0002:
+Defined in ADR-0002, with the `advance` signature amended by ADR-0003:
 
 ```python
 @dataclass(frozen=True)
@@ -87,7 +117,7 @@ class TestTarget(Protocol):
     def receive(self) -> list[bytes]: ...                   # downlink frames produced since last call
     def apply_environment(self, env: EnvironmentState) -> None: ...
     def inject(self, fault: TargetFault) -> None: ...
-    def advance(self, dt: float) -> None: ...
+    def advance(self, dt_us: int) -> None: ...              # integer microseconds (ADR-0003)
     def close(self) -> None: ...
 ```
 
@@ -97,14 +127,16 @@ Notes:
 - **Bytes at the boundary.** The target sees only frames. This keeps HIL honest (it is a wire) and makes byte-level corruption faults meaningful.
 - **Environment.** The environment model lives on the orchestrator side. In SIL the subsystems read `EnvironmentState` directly. In HIL the bridge serializes it into sensor-input frames on a dedicated channel to the MCU.
 - **Target faults.** Delivered through `inject()`. In HIL they travel over a test-control channel separate from the RF-path command stream, and MCU reset uses a physical reset line. Each target declares supported fault types in `capabilities`; a scenario requesting an unsupported fault fails up front unless the fault is marked `optional`.
-- **No receive timeout.** `receive()` drains frames produced so far. In HIL, `advance(dt)` waits real time and drains the serial buffer.
+- **No receive timeout.** `receive()` drains frames produced so far. In HIL, `advance(dt_us)` waits real time and drains the serial buffer.
 
 ## 7. Time and determinism (ADR-0003)
 
-- The orchestrator owns a **simulated clock**. No simulation code reads wall-clock time.
-- **SIL:** `advance(dt)` steps the model instantly. Runs are fast and reproducible.
-- **HIL:** the MCU runs in real time, so `advance(dt)` blocks for `dt` of real time. HIL runs are repeatable but not bit-for-bit deterministic, and the docs say so plainly.
-- Randomness comes from injected, seeded generators. Every run records `scenario`, `seed`, `run_id`, and code version, so any failure can be replayed.
+- **Fixed-tick lockstep.** The orchestrator runs a fixed-tick loop. Simulated time is an integer number of microseconds held by a `SimClock`; there is no floating-point time in the simulation. The default tick is 100 ms and is overridable per scenario. Scheduled events are quantized to tick boundaries when a scenario loads.
+- **Fixed step order.** Every tick runs the same ten steps in the same order (see section 8). Changing that order changes recorded behavior and requires a new ADR.
+- **Named random streams.** Each run has one master seed. Every random consumer (`rf.loss`, `rf.jitter`, `env.sensor_noise`, and so on) requests a named stream from an `RngFactory`, seeded from the master seed and the stream name. Adding a new consumer does not change the values seen by existing ones. Run *i* of a campaign gets its own derived seed, so one failure can be replayed without rerunning the campaign.
+- **No wall-clock in the simulation.** Wall-clock time appears only in the run record's metadata (`run_id`, `started_utc`).
+- **Run record.** Every run writes a `run.json` containing the scenario name and hash, master and per-stream seeds, tick size, target and capabilities, git SHA with a dirty flag, and a dependency lock hash. `pocketsat replay run.json` reruns a recorded SIL run and checks for identical results.
+- **SIL vs HIL.** SIL steps the model instantly and is bit-for-bit reproducible. HIL paces each tick against a real-time deadline; it is repeatable but not deterministic, so HIL also logs measured tick jitter and raw serial timestamps.
 
 ## 8. Run lifecycle
 
@@ -115,22 +147,24 @@ sequenceDiagram
     participant R as RF Channel
     participant T as TestTarget
 
-    O->>O: Load scenario YAML, resolve seed, create run_id
+    O->>O: Load scenario YAML, quantize events to ticks, resolve seed, create run_id
     O->>T: connect()
     O->>T: reset(seed)
     loop each tick until scenario end
-        O->>O: Apply scheduled faults (inject() for target faults)
-        O->>G: Issue scheduled commands
-        G->>R: Uplink packet
-        R->>T: send(frame) after link effects
-        O->>T: apply_environment(env)
-        O->>T: advance(dt)
-        T->>R: receive() downlink frames
-        R->>G: Packets with link effects
-        G->>O: Decoded telemetry and events
+        O->>O: 1. Activate or expire scheduled faults (inject() for target faults)
+        O->>O: 2. Step environment model
+        O->>G: 3. Issue scheduled commands
+        G->>R: Encoded uplink frames
+        R->>T: 4. send(frame) for due uplink packets
+        O->>T: 5. apply_environment(env)
+        O->>T: 6. advance(dt_us)
+        T->>R: 7. receive() downlink frames
+        R->>G: 8. Deliver due downlink packets
+        G->>O: 9. Decoded telemetry and events
+        O->>O: 10. Evaluate due assertions, record tick
     end
     O->>O: Evaluate assertions
-    O->>O: Persist results, telemetry, seed, run_id
+    O->>O: Write run.json and telemetry artifacts
     O->>T: close()
 ```
 
@@ -175,17 +209,17 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Component | Package |
 |---|---|
 | Orchestrator | `pocketsat.orchestrator` |
-| Simulated clock, seeded random streams | `pocketsat.core` |
 | TestTarget, SIL, HIL | `pocketsat.targets` |
 | Message types (`Command`, `Telemetry`, `Packet`) | `pocketsat.messages` |
 | Frame encode/decode, CRC | `pocketsat.frame` |
+| `SimClock`, `RngFactory` | `pocketsat.core` |
 | Spacecraft model | `pocketsat.spacecraft` |
 | Ground station | `pocketsat.groundstation` |
 | RF channel | `pocketsat.rf` |
 | Fault injection | `pocketsat.faults` |
 | Scenario DSL | `pocketsat.scenarios` |
 | Campaigns | `pocketsat.campaigns` |
-| Reporting, run record (`run.json`) | `pocketsat.reporting` |
+| Reporting, run record | `pocketsat.reporting` |
 
 ## 12. Decisions
 
@@ -194,8 +228,8 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Does the HIL environment/sensor feed live inside `TestTarget` or a separate interface? | Decided in ADR-0002: separate `Environment` model, delivered via `apply_environment()` |
 | Packet wire format shared by Python and firmware | Decided in ADR-0002: fixed header, CRC-16/CCITT-FALSE |
 | How target-side faults are delivered | Decided in ADR-0002: `inject()` with declared capabilities; HIL uses a test-control channel and a reset line |
-| Tick size and scheduling model for the run loop | Open, ADR-0003 |
-| Run ID and seed record format | Open, ADR-0003 |
+| Tick size and scheduling model for the run loop | Decided in ADR-0003: fixed 100 ms default tick, integer microsecond time, fixed ten-step order |
+| Run ID and seed record format | Decided in ADR-0003: `run.json` with named, derived seed streams |
 
 ## 13. Out of scope for v1
 
