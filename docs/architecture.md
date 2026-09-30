@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Draft for Phase 0. Decisions marked **(ADR-000N)** are to be finalized in the named ADR.
+Status: Draft for Phase 0, updated to reflect ADR-0002. Decisions marked **(ADR-000N)** are finalized in the named ADR.
 
 ## 1. Purpose
 
@@ -47,10 +47,10 @@ The **TestTarget boundary** is the only place where SIL and HIL differ. Everythi
 
 | Component | Responsibilities | Explicitly not responsible for |
 |---|---|---|
-| **Test Orchestrator** | Load scenarios, own the clock, drive the run loop, apply the fault schedule, evaluate assertions, record seeds and run IDs, emit results | Spacecraft behavior, RF math, packet decoding |
-| **TestTarget** | Uniform interface to the spacecraft-under-test: reset, accept packets, produce packets, advance time | Knowing about scenarios, ground station, or RF |
+| **Test Orchestrator** | Load scenarios, own the clock and the environment model, drive the run loop, apply the fault schedule, evaluate assertions, record seeds and run IDs, emit results | Spacecraft behavior, RF math, packet decoding |
+| **TestTarget** | Uniform bytes-in/bytes-out interface to the spacecraft-under-test: reset, accept frames, produce frames, accept environment state and target faults, advance time, declare capabilities | Knowing about scenarios, ground station, or RF |
 | **SIL target** | Python spacecraft model: Power, Thermal, Attitude, Payload, Comms, Flight Computer; modes BOOT, NOMINAL, SCIENCE, DOWNLINK, SAFE, FAULT | Link quality, pass geometry |
-| **HIL target** | Bridge to an MCU over serial/USB: framing, flashing hooks, reset control, watchdog observation | Mission logic (that lives in firmware) |
+| **HIL target** | Bridge to an MCU over serial/USB: framing, sensor-input and test-control channels, flashing hooks, physical reset line, watchdog observation | Mission logic (that lives in firmware) |
 | **RF Channel Model** | Attach link state to each packet (elevation, range, Doppler, SNR, loss probability, latency); drop, delay, or corrupt packets accordingly | Decoding, spacecraft state |
 | **Ground Station** | Pass state (AOS/LOS), radio control, command uplink, packet decoding, station identity, console output | Orbital truth, fault scheduling |
 | **Fault Injector** | Apply reusable faults at defined hook points on schedule | Deciding expected behavior (scenarios assert that) |
@@ -58,33 +58,46 @@ The **TestTarget boundary** is the only place where SIL and HIL differ. Everythi
 
 ## 5. Message types
 
-Typed, immutable messages cross every boundary.
+Typed, immutable messages cross every boundary except the target boundary, which carries raw bytes (see section 6).
 
-- **Command** — ground-originated request (`PING`, `SET_MODE`, `BEGIN_DOWNLINK`, `ENTER_SAFE_MODE`, `RESET`) with ID, payload, and sim timestamp.
-- **Telemetry** — timestamped spacecraft state: mode, power, thermal, attitude, payload status, counters.
-- **Packet** — the on-the-wire unit. Wraps a Command or Telemetry frame, and carries link-state attributes once it passes through the RF channel.
-
-Packets are the contract between ground station, RF channel, and target. A wire format suitable for both Python and MCU firmware (fixed header, length, payload, CRC) is defined in ADR-0002.
+- **Command** — ground-originated request (`PING`, `SET_MODE`, `BEGIN_DOWNLINK`, `ENTER_SAFE_MODE`, `RESET`) with ID and payload. Encoded into a frame by the ground station.
+- **Telemetry** — timestamped spacecraft state: mode, power, thermal, attitude, payload status, counters. Decoded from a frame by the ground station.
+- **Frame** — the encoded wire unit (`bytes`): sync, version, type, sequence, length, payload, CRC-16. The same format is implemented in Python and in MCU firmware. See ADR-0002 and `docs/protocol.md`.
+- **Packet** — a frame plus link-state attributes (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. Corruption faults mutate the frame bytes, and the CRC catches them in real code paths.
+- **EnvironmentState** — per-tick inputs produced by the orchestrator-side environment model (sunlit or eclipse, thermal input, sensor noise or bias, battery-condition overrides).
+- **TargetFault** — a fault delivered to the target (type, parameters, duration).
 
 ## 6. The TestTarget interface
 
-Initial shape (finalized in ADR-0002):
+Defined in ADR-0002:
 
 ```python
+@dataclass(frozen=True)
+class TargetCapabilities:
+    deterministic: bool              # SIL True, HIL False
+    real_time: bool                  # SIL False, HIL True
+    supported_faults: frozenset[str]
+
 class TestTarget(Protocol):
+    capabilities: TargetCapabilities
+
     def connect(self) -> None: ...
     def reset(self, seed: int) -> None: ...
-    def send(self, packet: Packet) -> None: ...            # uplink into the target
-    def receive(self, timeout: float) -> list[Packet]: ... # downlink out of the target
-    def advance(self, dt: float) -> None: ...              # move target time forward
+    def send(self, frame: bytes) -> None: ...               # uplink into target
+    def receive(self) -> list[bytes]: ...                   # downlink frames produced since last call
+    def apply_environment(self, env: EnvironmentState) -> None: ...
+    def inject(self, fault: TargetFault) -> None: ...
+    def advance(self, dt: float) -> None: ...
     def close(self) -> None: ...
 ```
 
 Notes:
 
 - **Scope of "target."** The target is the spacecraft side only. The ground station and RF channel are shared infrastructure, which is why the same scenario can run on SIL or HIL.
-- **HIL environment feed.** In HIL, the MCU hosts flight software, while environment and sensor models (battery, temperature, attitude inputs) may remain in Python and be fed to the MCU. Whether that feed is part of `TestTarget` or a separate `Environment` interface is an open question for ADR-0002.
-- **Fault hooks.** Target-side faults (MCU reset, sensor freeze, radio reset) reach the target through a defined fault-hook method or a control command, not by reaching into internals. The exact mechanism is decided in ADR-0002.
+- **Bytes at the boundary.** The target sees only frames. This keeps HIL honest (it is a wire) and makes byte-level corruption faults meaningful.
+- **Environment.** The environment model lives on the orchestrator side. In SIL the subsystems read `EnvironmentState` directly. In HIL the bridge serializes it into sensor-input frames on a dedicated channel to the MCU.
+- **Target faults.** Delivered through `inject()`. In HIL they travel over a test-control channel separate from the RF-path command stream, and MCU reset uses a physical reset line. Each target declares supported fault types in `capabilities`; a scenario requesting an unsupported fault fails up front unless the fault is marked `optional`.
+- **No receive timeout.** `receive()` drains frames produced so far. In HIL, `advance(dt)` waits real time and drains the serial buffer.
 
 ## 7. Time and determinism (ADR-0003)
 
@@ -106,12 +119,13 @@ sequenceDiagram
     O->>T: connect()
     O->>T: reset(seed)
     loop each tick until scenario end
-        O->>O: Apply scheduled faults
+        O->>O: Apply scheduled faults (inject() for target faults)
         O->>G: Issue scheduled commands
         G->>R: Uplink packet
-        R->>T: send(packet) with link effects
+        R->>T: send(frame) after link effects
+        O->>T: apply_environment(env)
         O->>T: advance(dt)
-        T->>R: receive() downlink packets
+        T->>R: receive() downlink frames
         R->>G: Packets with link effects
         G->>O: Decoded telemetry and events
     end
@@ -170,15 +184,15 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Campaigns | `pocketsat.campaigns` |
 | Reporting | `pocketsat.reporting` |
 
-## 12. Open decisions
+## 12. Decisions
 
-| Question | Resolved in |
+| Question | Status |
 |---|---|
-| Does the HIL environment/sensor feed live inside `TestTarget` or a separate interface? | ADR-0002 |
-| Packet wire format shared by Python and firmware | ADR-0002 |
-| How target-side faults are delivered (hook method vs control command) | ADR-0002 |
-| Tick size and scheduling model for the run loop | ADR-0003 |
-| Run ID and seed record format | ADR-0003 |
+| Does the HIL environment/sensor feed live inside `TestTarget` or a separate interface? | Decided in ADR-0002: separate `Environment` model, delivered via `apply_environment()` |
+| Packet wire format shared by Python and firmware | Decided in ADR-0002: fixed header, CRC-16/CCITT-FALSE |
+| How target-side faults are delivered | Decided in ADR-0002: `inject()` with declared capabilities; HIL uses a test-control channel and a reset line |
+| Tick size and scheduling model for the run loop | Open, ADR-0003 |
+| Run ID and seed record format | Open, ADR-0003 |
 
 ## 13. Out of scope for v1
 
