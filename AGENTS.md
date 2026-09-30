@@ -34,6 +34,7 @@ pocketsat-test-lab/
 ├── scenarios/                   # YAML scenario library
 ├── tests/
 │   ├── unit/
+│   ├── contract/                # TestTarget contract suite, run against every target
 │   ├── sil/
 │   └── scenarios/
 └── .github/

@@ -13,6 +13,16 @@ FaultParam = bool | int | float | str
 """Allowed value types for :attr:`TargetFault.params`."""
 
 
+class UnsupportedFaultError(ValueError):
+    """Raised by :meth:`TestTarget.inject` for a fault type the target does not support."""
+
+    def __init__(self, fault_type: str, supported: frozenset[str]) -> None:
+        self.fault_type = fault_type
+        self.supported = supported
+        listed = ", ".join(sorted(supported)) or "none"
+        super().__init__(f"unsupported fault type {fault_type!r}; target supports: {listed}")
+
+
 @dataclass(frozen=True)
 class TargetCapabilities:
     """What a target can do, declared up front so scenarios can be checked before a run.
@@ -96,7 +106,12 @@ class TestTarget(Protocol):
         ...
 
     def inject(self, fault: TargetFault) -> None:
-        """Apply a fault. ``fault.fault_type`` must be in ``capabilities.supported_faults``."""
+        """Apply a fault.
+
+        Raises:
+            UnsupportedFaultError: ``fault.fault_type`` is not in
+                ``capabilities.supported_faults``.
+        """
         ...
 
     def advance(self, dt: float) -> None:
