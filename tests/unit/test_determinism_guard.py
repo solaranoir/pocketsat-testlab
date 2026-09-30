@@ -69,7 +69,14 @@ def _simulation_modules() -> list[Path]:
 
 def test_scan_covers_simulation_code() -> None:
     names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
-    assert {"core/clock.py", "core/rng.py", "targets/echo.py"} <= names
+    assert {
+        "core/clock.py",
+        "core/rng.py",
+        "environment/nominal.py",
+        "spacecraft/base.py",
+        "targets/base.py",
+        "targets/echo.py",
+    } <= names
     assert not any(name.startswith("reporting/") for name in names)
 
 
