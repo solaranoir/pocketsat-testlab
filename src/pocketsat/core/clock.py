@@ -58,6 +58,26 @@ def seconds_to_ticks(seconds: Seconds, tick_us: int = DEFAULT_TICK_US) -> int:
     return math.ceil(_exact_seconds(seconds) * US_PER_S / tick_us)
 
 
+def check_us(name: str, value: int) -> None:
+    """Validate a non-negative integer number of microseconds.
+
+    Simulation time is never a float (ADR-0003), so floats are rejected rather than
+    rounded.
+
+    Args:
+        name: Parameter name, used in the error message.
+        value: The value to check.
+
+    Raises:
+        TypeError: ``value`` is not an int (bools are rejected too).
+        ValueError: ``value`` is negative.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int number of microseconds, got {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+
+
 def _check_tick_us(tick_us: int) -> None:
     if isinstance(tick_us, bool) or not isinstance(tick_us, int):
         raise TypeError(f"tick_us must be an int, got {type(tick_us).__name__}")

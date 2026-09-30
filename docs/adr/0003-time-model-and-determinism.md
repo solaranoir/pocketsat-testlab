@@ -95,7 +95,8 @@ Every run writes a `run.json` with:
 
 - Amend ADR-0002 and issue #6 so `advance` takes `dt_us: int`.
   - **Done** for ADR-0002 (#25: "Amended by" header and interface note). Issue #6 was already closed, so it was not changed.
-  - **Open:** the code still takes `advance(dt: float)`. Tracked in #26.
+  - **Done** in code by #26: `TestTarget.advance(dt_us: int)`, `EchoTarget`, and the contract suite all use integer microseconds.
+  - **Clarification (#26):** following §1's "no floating-point time" rule, `TargetFault.duration_s: float` became `duration_us: int | None`. Scenario durations written in seconds are converted to integer microseconds when the scenario is loaded, like every other scheduled time.
 - Create a Phase 0 issue for `SimClock`, `RngFactory`, and the `run.json` schema (with tests for stream independence and seed derivation).
   - **Done:** #19, implemented in #22.
 - Update `docs/architecture.md` sections 7 and 8 to reference the step order above.

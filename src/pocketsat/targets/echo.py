@@ -4,6 +4,7 @@
 contract suite and, later, orchestrator plumbing without a real simulator.
 """
 
+from pocketsat.core.clock import check_us
 from pocketsat.targets.base import (
     EnvironmentState,
     TargetCapabilities,
@@ -32,7 +33,7 @@ class EchoTarget:
     def __init__(self) -> None:
         self._pending: list[bytes] = []
         self._outbox: list[bytes] = []
-        self._mute_remaining_s: float | None = None
+        self._mute_remaining_us: int | None = None
         self._muted = False
         self.environment: EnvironmentState | None = None
         """The last environment applied, or ``None`` since the last reset."""
@@ -48,7 +49,7 @@ class EchoTarget:
         self._pending.clear()
         self._outbox.clear()
         self._muted = False
-        self._mute_remaining_s = None
+        self._mute_remaining_us = None
         self.environment = None
 
     def send(self, frame: bytes) -> None:
@@ -65,7 +66,7 @@ class EchoTarget:
         self.environment = env
 
     def inject(self, fault: TargetFault) -> None:
-        """Apply a ``mute`` fault for ``fault.duration_s`` seconds, or until reset if ``None``.
+        """Mute for ``fault.duration_us`` microseconds, or until reset if it is ``None``.
 
         Raises:
             UnsupportedFaultError: The fault type is not ``mute``.
@@ -73,24 +74,24 @@ class EchoTarget:
         if fault.fault_type not in self.capabilities.supported_faults:
             raise UnsupportedFaultError(fault.fault_type, self.capabilities.supported_faults)
         self._muted = True
-        self._mute_remaining_s = fault.duration_s
+        self._mute_remaining_us = fault.duration_us
 
-    def advance(self, dt: float) -> None:
-        """Echo queued frames (unless muted), then advance fault timers by ``dt`` seconds.
+    def advance(self, dt_us: int) -> None:
+        """Echo queued frames (unless muted), then advance fault timers by ``dt_us``.
 
         Raises:
-            ValueError: ``dt`` is negative.
+            TypeError: ``dt_us`` is not an int.
+            ValueError: ``dt_us`` is negative.
         """
-        if dt < 0:
-            raise ValueError(f"dt must be non-negative, got {dt}")
+        check_us("dt_us", dt_us)
         if not self._muted:
             self._outbox.extend(self._pending)
         self._pending.clear()
-        if self._muted and self._mute_remaining_s is not None:
-            self._mute_remaining_s -= dt
-            if self._mute_remaining_s <= 0:
+        if self._muted and self._mute_remaining_us is not None:
+            self._mute_remaining_us -= dt_us
+            if self._mute_remaining_us <= 0:
                 self._muted = False
-                self._mute_remaining_s = None
+                self._mute_remaining_us = None
 
     def close(self) -> None:
         """Discard queued frames."""

@@ -37,7 +37,7 @@ TargetCase(
         base.TargetFault(fault_type="mcu_reset"),
         base.TargetFault(fault_type="sensor_freeze", params={"sensor": "battery"}),
     ),
-    response_steps=1,                     # advance(STEP_S) calls before a response is due
+    response_steps=1,                     # advance(STEP_US) calls before a response is due
 ),
 ```
 
@@ -52,9 +52,9 @@ The `target` fixture (in `conftest.py`) builds the target, calls `connect()` and
 
 ## Time step
 
-`STEP_S` in `contract_support.py` is the `advance()` step in seconds. ADR-0003 proposes
-changing `advance(dt: float)` to `advance(dt_us: int)`; when that lands, only `STEP_S`
-and the `advance` calls change.
+`STEP_US` in `contract_support.py` is the `advance(dt_us)` step: one default tick
+(100 ms), in integer microseconds as ADR-0003 requires. Fault durations in
+`sample_faults` are integer microseconds too (`duration_us`).
 
 Target-specific behavior (for example, how `EchoTarget` handles its `mute` fault) is
 tested in `tests/unit/`, not here.
