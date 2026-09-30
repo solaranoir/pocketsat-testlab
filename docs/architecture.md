@@ -112,7 +112,7 @@ Typed, immutable messages cross every boundary except the target boundary, which
 - **Telemetry** — timestamped spacecraft state: mode, power, thermal, attitude, payload status, counters. Decoded from a frame by the ground station.
 - **Frame** — the encoded wire unit (`bytes`): sync, version, type, sequence, length, payload, CRC-16. The same format is implemented in Python and in MCU firmware. See ADR-0002 and `docs/protocol.md`.
 - **Packet** — a frame plus link-state attributes (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. Corruption faults mutate the frame bytes, and the CRC catches them in real code paths.
-- **EnvironmentState** — per-tick inputs produced by the orchestrator-side environment model (sunlit or eclipse, thermal input, sensor noise or bias, battery-condition overrides).
+- **EnvironmentState** — per-tick inputs produced by the orchestrator-side environment model (`pocketsat.environment`): `sunlit` (bool, default `True`), `ambient_temp_c` (default 20.0), `sensor_noise_scale` (multiplier on each subsystem's nominal sensor noise, default 1.0), and `battery_soc_override` (0..1, default `None`). The defaults describe a nominal environment. `NominalEnvironment` produces a repeatable sunlit/eclipse cycle from simulated time, with orbit period and eclipse fraction as parameters.
 - **TargetFault** — a fault delivered to the target (type, parameters, duration).
 
 ## 6. The TestTarget interface
@@ -231,6 +231,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Message types (`Command`, `Telemetry`, `Packet`) | `pocketsat.messages` |
 | Frame encode/decode, CRC | `pocketsat.frame` |
 | `SimClock`, `RngFactory` | `pocketsat.core` |
+| Environment model (`NominalEnvironment`) | `pocketsat.environment` |
 | Spacecraft model | `pocketsat.spacecraft` |
 | Ground station | `pocketsat.groundstation` |
 | RF channel | `pocketsat.rf` |

@@ -22,6 +22,7 @@ pocketsat-test-lab/
 │   └── adr/                     # architecture decision records (NNNN-title.md)
 ├── src/pocketsat/
 │   ├── core/                    # SimClock, RngFactory (determinism foundations)
+│   ├── environment/             # environment models producing EnvironmentState
 │   ├── targets/                 # TestTarget protocol, SilTarget, HilTarget
 │   ├── spacecraft/              # power, thermal, attitude, payload, comms, flight computer
 │   ├── groundstation/           # pass state, radio control, uplink, decoding
