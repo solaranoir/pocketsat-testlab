@@ -175,6 +175,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Component | Package |
 |---|---|
 | Orchestrator | `pocketsat.orchestrator` |
+| Simulated clock, seeded random streams | `pocketsat.core` |
 | TestTarget, SIL, HIL | `pocketsat.targets` |
 | Message types (`Command`, `Telemetry`, `Packet`) | `pocketsat.messages` |
 | Frame encode/decode, CRC | `pocketsat.frame` |
@@ -184,7 +185,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Fault injection | `pocketsat.faults` |
 | Scenario DSL | `pocketsat.scenarios` |
 | Campaigns | `pocketsat.campaigns` |
-| Reporting | `pocketsat.reporting` |
+| Reporting, run record (`run.json`) | `pocketsat.reporting` |
 
 ## 12. Decisions
 
