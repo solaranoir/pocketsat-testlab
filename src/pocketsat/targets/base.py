@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
+from pocketsat.core.clock import check_us
+
 FaultParam = bool | int | float | str
 """Allowed value types for :attr:`TargetFault.params`."""
 
@@ -29,7 +31,7 @@ class TargetCapabilities:
 
     Attributes:
         deterministic: Same scenario and seed give bit-for-bit identical runs (SIL: True).
-        real_time: ``advance(dt)`` takes ``dt`` of wall-clock time (HIL: True).
+        real_time: ``advance(dt_us)`` takes ``dt_us`` of wall-clock time (HIL: True).
         supported_faults: Fault types accepted by :meth:`TestTarget.inject`.
     """
 
@@ -60,15 +62,22 @@ class TargetFault:
         fault_type: Fault type name; must be in the target's
             ``capabilities.supported_faults``.
         params: Fault-specific parameters. Stored as a read-only mapping.
-        duration_s: How long the fault lasts in simulated seconds, or ``None`` for a
-            fault that persists until reset.
+        duration_us: How long the fault lasts in simulated microseconds, or ``None`` for
+            a fault that persists until reset. Scenario durations in seconds are converted
+            when the scenario loads (see :func:`pocketsat.core.clock.seconds_to_ticks`).
+
+    Raises:
+        TypeError: ``duration_us`` is not an int or ``None``.
+        ValueError: ``duration_us`` is negative.
     """
 
     fault_type: str
     params: Mapping[str, FaultParam] = field(default_factory=dict)
-    duration_s: float | None = None
+    duration_us: int | None = None
 
     def __post_init__(self) -> None:
+        if self.duration_us is not None:
+            check_us("duration_us", self.duration_us)
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
 
 
@@ -114,8 +123,11 @@ class TestTarget(Protocol):
         """
         ...
 
-    def advance(self, dt: float) -> None:
-        """Advance target time by ``dt`` seconds (instantly in SIL, in real time in HIL)."""
+    def advance(self, dt_us: int) -> None:
+        """Advance target time by ``dt_us`` microseconds (ADR-0003).
+
+        Instant in SIL; in HIL, blocks until ``dt_us`` of real time has passed.
+        """
         ...
 
     def close(self) -> None:

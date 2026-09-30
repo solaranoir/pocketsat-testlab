@@ -34,7 +34,7 @@ def test_packet_link_state_defaults_to_none() -> None:
 
 def test_target_fault_params_are_read_only_copy() -> None:
     params: dict[str, base.FaultParam] = {"sensor": "battery"}
-    fault = base.TargetFault(fault_type="sensor_freeze", params=params, duration_s=10.0)
+    fault = base.TargetFault(fault_type="sensor_freeze", params=params, duration_us=10_000_000)
     params["sensor"] = "thermal"
     assert fault.params["sensor"] == "battery"
     with pytest.raises(TypeError):
@@ -62,7 +62,7 @@ class _MinimalTarget:
 
     def apply_environment(self, env: base.EnvironmentState) -> None: ...
     def inject(self, fault: base.TargetFault) -> None: ...
-    def advance(self, dt: float) -> None: ...
+    def advance(self, dt_us: int) -> None: ...
     def close(self) -> None: ...
 
 
@@ -77,3 +77,19 @@ def test_missing_method_does_not_conform() -> None:
         def connect(self) -> None: ...
 
     assert not isinstance(Incomplete(), base.TestTarget)
+
+
+@pytest.mark.parametrize("duration_us", [0, 1, 10_000_000, None])
+def test_target_fault_accepts_integer_microseconds(duration_us: int | None) -> None:
+    assert base.TargetFault(fault_type="mute", duration_us=duration_us).duration_us == duration_us
+
+
+@pytest.mark.parametrize(
+    ("duration_us", "error"),
+    [(0.5, TypeError), (1.0, TypeError), (True, TypeError), ("10", TypeError), (-1, ValueError)],
+)
+def test_target_fault_rejects_non_integer_or_negative_duration(
+    duration_us: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error):
+        base.TargetFault(fault_type="mute", duration_us=duration_us)  # type: ignore[arg-type]

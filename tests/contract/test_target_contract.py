@@ -5,7 +5,7 @@ so the same suite applies to EchoTarget, SilTarget, and HilTarget.
 """
 
 import pytest
-from contract_support import STEP_S, TargetCase
+from contract_support import STEP_US, TargetCase
 
 from pocketsat.frame import decode_frame
 from pocketsat.targets import base
@@ -15,7 +15,7 @@ def _stimulate(target: base.TestTarget, case: TargetCase) -> list[bytes]:
     """Send the case's stimulus, advance until a response is due, and drain output."""
     target.send(case.stimulus)
     for _ in range(case.response_steps):
-        target.advance(STEP_S)
+        target.advance(STEP_US)
     return target.receive()
 
 
@@ -73,17 +73,17 @@ def test_apply_environment_accepted_in_any_state_after_reset(
     target.apply_environment(eclipse)  # repeated with no step in between
     target.send(target_case.stimulus)
     target.apply_environment(sunlit)  # with uplink pending
-    target.advance(STEP_S)
+    target.advance(STEP_US)
     target.apply_environment(eclipse)  # with downlink not yet drained
     target.receive()
     target.apply_environment(sunlit)  # after draining
     for fault in target_case.sample_faults:
         target.inject(fault)
         target.apply_environment(eclipse)  # with a fault active
-        target.advance(STEP_S)
+        target.advance(STEP_US)
     target.reset(seed=1)
     target.apply_environment(sunlit)  # after a second reset
-    target.advance(STEP_S)
+    target.advance(STEP_US)
 
 
 # --- receive() ------------------------------------------------------------------------
@@ -108,7 +108,7 @@ def test_receive_returns_only_frames_since_previous_call(
     assert first
     assert target.receive() == []  # already drained; no time has passed
 
-    target.advance(STEP_S)
+    target.advance(STEP_US)
     target.receive()  # drain anything produced during the idle step
     second = _stimulate(target, target_case)
     assert second
@@ -117,7 +117,7 @@ def test_receive_returns_only_frames_since_previous_call(
 
 def test_reset_discards_undrained_output(target: base.TestTarget, target_case: TargetCase) -> None:
     target.send(target_case.stimulus)
-    target.advance(STEP_S)
+    target.advance(STEP_US)
     target.reset(seed=0)
     assert target.receive() == []
 

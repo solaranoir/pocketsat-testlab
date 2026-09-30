@@ -9,12 +9,13 @@ from dataclasses import dataclass
 
 import pytest
 
+from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.frame import Frame, FrameType, encode_frame
 from pocketsat.targets import base
 from pocketsat.targets.echo import MUTE_FAULT, EchoTarget
 
-STEP_S = 0.1
-"""Simulated time passed to ``advance()`` per step, in seconds."""
+STEP_US = DEFAULT_TICK_US
+"""Simulated time passed to ``advance()`` per step, in integer microseconds (one 100 ms tick)."""
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class TargetCase:
         name: Test ID suffix, e.g. ``"echo"``, ``"sil"``, ``"hil"``.
         factory: Returns a new, unconnected target.
         stimulus: An encoded uplink frame that makes the target produce at least one
-            downlink frame within ``response_steps`` calls to ``advance(STEP_S)``.
+            downlink frame within ``response_steps`` calls to ``advance(STEP_US)``.
         sample_faults: One valid fault per entry in ``capabilities.supported_faults``.
         response_steps: Steps to advance after sending ``stimulus``.
         marks: Extra pytest marks for this target (e.g. a HIL hardware marker).
@@ -46,6 +47,6 @@ TARGET_CASES: list[TargetCase] = [
         name="echo",
         factory=EchoTarget,
         stimulus=PING_FRAME,
-        sample_faults=(base.TargetFault(fault_type=MUTE_FAULT, duration_s=1.0),),
+        sample_faults=(base.TargetFault(fault_type=MUTE_FAULT, duration_us=1_000_000),),
     ),
 ]

@@ -5,7 +5,7 @@ from fractions import Fraction
 
 import pytest
 
-from pocketsat.core.clock import DEFAULT_TICK_US, SimClock, seconds_to_ticks
+from pocketsat.core.clock import DEFAULT_TICK_US, SimClock, check_us, seconds_to_ticks
 
 
 def test_starts_at_zero_with_default_tick() -> None:
@@ -87,3 +87,17 @@ def test_seconds_to_ticks_rejects_invalid(seconds: object) -> None:
 def test_seconds_to_ticks_rejects_bool() -> None:
     with pytest.raises(TypeError):
         seconds_to_ticks(True)
+
+
+@pytest.mark.parametrize("value", [0, 1, 100_000, 10**15])
+def test_check_us_accepts_non_negative_ints(value: int) -> None:
+    check_us("x", value)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [(-1, ValueError), (0.1, TypeError), (1.0, TypeError), (True, TypeError), ("1", TypeError)],
+)
+def test_check_us_rejects_floats_bools_and_negatives(value: object, error: type[Exception]) -> None:
+    with pytest.raises(error, match="dt_us"):
+        check_us("dt_us", value)  # type: ignore[arg-type]
