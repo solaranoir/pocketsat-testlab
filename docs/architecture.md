@@ -92,6 +92,18 @@ flowchart LR
 | **Fault Injector** | Apply reusable faults at defined hook points on schedule | Deciding expected behavior (scenarios assert that) |
 | **Reporting** | Persist telemetry, logs, per-run results, campaign summaries | Execution |
 
+### 4.1 Spacecraft subsystems (SIL)
+
+Each subsystem of the Python spacecraft model implements the `Subsystem` protocol in `pocketsat.spacecraft.base`: `reset(rng)` with the run's `RngFactory` (subsystems request their own named streams, such as `spacecraft.power.noise`), `step(dt_us, env)` in integer microseconds, and `snapshot()` returning a frozen dataclass. A `SubsystemStack` steps them in one fixed order, defined only in `STEP_ORDER`:
+
+1. **Power**: bus state first; every other subsystem runs on it.
+2. **Thermal**: heat from this tick's electrical loads and the environment.
+3. **Attitude**: pointing, which the payload and radio depend on.
+4. **Payload**: collects data given the current pointing and power.
+5. **Comms**: last, so it can transmit what earlier subsystems produced this tick.
+
+The stack's `snapshot()` returns a `SpacecraftState` holding every subsystem's snapshot in that order, for telemetry and for other subsystems to read. Changing the order changes recorded behavior and requires a new ADR (ADR-0003 §2).
+
 ## 5. Message types
 
 Typed, immutable messages cross every boundary except the target boundary, which carries raw bytes (see section 6).
