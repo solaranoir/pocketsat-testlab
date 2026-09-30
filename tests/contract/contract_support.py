@@ -40,6 +40,23 @@ class TargetCase:
     marks: tuple[pytest.MarkDecorator, ...] = ()
 
 
+CONTRACT_ENVIRONMENTS: dict[str, base.EnvironmentState] = {
+    "nominal": base.EnvironmentState(),
+    "eclipse": base.EnvironmentState(sunlit=False),
+    "cold": base.EnvironmentState(ambient_temp_c=-150.0),
+    "hot": base.EnvironmentState(ambient_temp_c=120.0),
+    "noiseless": base.EnvironmentState(sensor_noise_scale=0.0),
+    "noisy": base.EnvironmentState(sensor_noise_scale=5.0),
+    "battery_empty": base.EnvironmentState(battery_soc_override=0.0),
+    "battery_full": base.EnvironmentState(battery_soc_override=1.0),
+    "worst_case": base.EnvironmentState(
+        sunlit=False, ambient_temp_c=-150.0, sensor_noise_scale=5.0, battery_soc_override=0.05
+    ),
+}
+"""Valid environments covering every ``EnvironmentState`` field at nominal and extreme
+values. Every target must accept all of them in any state after ``reset()``."""
+
+
 PING_FRAME = encode_frame(Frame(frame_type=FrameType.COMMAND, sequence=1, payload=b"\x01"))
 
 TARGET_CASES: list[TargetCase] = [

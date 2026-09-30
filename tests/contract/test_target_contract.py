@@ -5,7 +5,7 @@ so the same suite applies to EchoTarget, SilTarget, and HilTarget.
 """
 
 import pytest
-from contract_support import STEP_US, TargetCase
+from contract_support import CONTRACT_ENVIRONMENTS, STEP_US, TargetCase
 
 from pocketsat.frame import decode_frame
 from pocketsat.targets import base
@@ -63,27 +63,43 @@ def test_inject_unsupported_fault_raises_clear_error(target: base.TestTarget) ->
 # --- Environment ----------------------------------------------------------------------
 
 
-def test_apply_environment_accepted_in_any_state_after_reset(
-    target: base.TestTarget, target_case: TargetCase
-) -> None:
-    sunlit = base.EnvironmentState(sunlit=True)
-    eclipse = base.EnvironmentState(sunlit=False)
+ENV_IDS = list(CONTRACT_ENVIRONMENTS)
 
-    target.apply_environment(sunlit)  # immediately after reset
-    target.apply_environment(eclipse)  # repeated with no step in between
+
+@pytest.mark.parametrize("env", CONTRACT_ENVIRONMENTS.values(), ids=ENV_IDS)
+def test_apply_environment_accepted_in_any_state_after_reset(
+    target: base.TestTarget, target_case: TargetCase, env: base.EnvironmentState
+) -> None:
+    nominal = CONTRACT_ENVIRONMENTS["nominal"]
+
+    target.apply_environment(env)  # immediately after reset
+    target.apply_environment(nominal)  # repeated with no step in between
     target.send(target_case.stimulus)
-    target.apply_environment(sunlit)  # with uplink pending
+    target.apply_environment(env)  # with uplink pending
     target.advance(STEP_US)
-    target.apply_environment(eclipse)  # with downlink not yet drained
+    target.apply_environment(nominal)  # with downlink not yet drained
     target.receive()
-    target.apply_environment(sunlit)  # after draining
+    target.apply_environment(env)  # after draining
     for fault in target_case.sample_faults:
         target.inject(fault)
-        target.apply_environment(eclipse)  # with a fault active
+        target.apply_environment(env)  # with a fault active
         target.advance(STEP_US)
     target.reset(seed=1)
-    target.apply_environment(sunlit)  # after a second reset
+    target.apply_environment(env)  # after a second reset
     target.advance(STEP_US)
+
+
+@pytest.mark.parametrize("env", CONTRACT_ENVIRONMENTS.values(), ids=ENV_IDS)
+def test_target_keeps_operating_under_any_valid_environment(
+    target: base.TestTarget, target_case: TargetCase, env: base.EnvironmentState
+) -> None:
+    # A target may legitimately stop transmitting (for example with an empty battery),
+    # so only require that it keeps stepping and that anything it sends is valid.
+    target.apply_environment(env)
+    for _ in range(3):
+        for frame in _stimulate(target, target_case):
+            assert isinstance(frame, bytes)
+            decode_frame(frame)
 
 
 # --- receive() ------------------------------------------------------------------------
@@ -133,8 +149,10 @@ def test_deterministic_target_repeats_output_for_same_seed(
 
     def run() -> list[list[bytes]]:
         target.reset(seed=42)
-        target.apply_environment(base.EnvironmentState(sunlit=True))
-        outputs = [_stimulate(target, target_case)]
+        outputs = []
+        for env in CONTRACT_ENVIRONMENTS.values():
+            target.apply_environment(env)
+            outputs.append(_stimulate(target, target_case))
         for fault in target_case.sample_faults:
             target.inject(fault)
             outputs.append(_stimulate(target, target_case))

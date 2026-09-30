@@ -19,10 +19,10 @@ Each test runs once per registered target, with IDs like `[echo]`, `[sil]`, `[hi
 | Interface | The target satisfies the `TestTarget` protocol. |
 | Capabilities | `capabilities` is a `TargetCapabilities` with bool flags and a `frozenset[str]` of fault types. |
 | Faults | Every supported fault is accepted by `inject()`. An unsupported fault type raises `UnsupportedFaultError` naming the fault. |
-| Environment | `apply_environment()` is accepted in any state after `reset()`: right after reset, with uplink pending, with downlink undrained, after draining, with a fault active, and after a second reset. |
+| Environment | `apply_environment()` is accepted in any state after `reset()`: right after reset, with uplink pending, with downlink undrained, after draining, with a fault active, and after a second reset. This runs for every environment in `CONTRACT_ENVIRONMENTS`, which covers each `EnvironmentState` field at nominal and extreme values (eclipse, -150 °C and 120 °C, zero and 5x sensor noise, battery override at 0 and 1, and a combined worst case). Under each one the target keeps stepping, and any frames it sends decode as valid frames; it may send none, for example with an empty battery. |
 | `receive()` | Returns `[]` before time advances. Returns only frames produced since the previous call, so a second call with no `advance()` in between returns `[]`. Every frame decodes as a valid wire frame. |
 | `reset()` | Discards output that was produced but not yet received. |
-| Determinism | If `capabilities.deterministic` is true, the same seed and inputs produce identical output. Skipped for non-deterministic targets (HIL). |
+| Determinism | If `capabilities.deterministic` is true, the same seed and inputs, including a sequence through every contract environment, produce identical output. Skipped for non-deterministic targets (HIL). |
 
 ## Adding a target
 
