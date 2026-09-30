@@ -1,8 +1,9 @@
 # ADR-0002: TestTarget abstraction, wire format, environment feed, and fault delivery
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Phase:** 0
 - **Amends:** `docs/architecture.md` sections 5 and 6
+- **Amended by:** ADR-0003 (`advance(dt: float)` becomes `advance(dt_us: int)`)
 
 ## Context
 
@@ -38,6 +39,8 @@ class TestTarget(Protocol):
     def advance(self, dt: float) -> None: ...
     def close(self) -> None: ...
 ```
+
+> **Amended by ADR-0003:** `advance(dt: float)` is replaced by `advance(dt_us: int)`, with time in integer microseconds. The rest of the interface is unchanged.
 
 Changes from the draft in `architecture.md`:
 
@@ -82,6 +85,9 @@ This keeps `TestTarget` as one interface, keeps physics models out of the firmwa
 
 ## Alternatives considered
 
+- **Separate SIL and HIL interfaces, or separate runners.** Each target would get an API suited to it, and the orchestrator or the scenarios would branch on target type. This breaks the core promise that one scenario runs unchanged on both, and the two paths would drift apart over time. Rejected in favor of one `TestTarget` interface with declared `capabilities` for the real differences.
+- **HIL only, against an MCU emulator instead of a Python SIL.** An emulator runs the real firmware binary without hardware, but it makes all testing wait for firmware (Phase 7), slows iteration, and makes seeded, deterministic fault injection harder. Rejected for v1. An emulator could later be added as another target behind the same interface.
+- **Boundary at the serial byte stream.** SIL would emulate a UART stream, including resynchronization. That is the most faithful to HIL, but it adds stream framing and resync to every SIL test while the frame-level boundary already makes corruption faults meaningful. Rejected; stream handling lives in the HIL bridge.
 - **Command/telemetry objects at the boundary.** Easier to write for SIL, but hides the wire format, makes byte-level corruption awkward, and forces HIL to hide a serialization layer inside the target. Rejected.
 - **Environment inside `TestTarget` only.** Would make the HIL bridge own sensor modeling, duplicating physics in two places. Rejected.
 - **Faults as ad hoc target methods** (`target.reset_mcu()`, `target.freeze_sensor()`). Couples scenarios to specific targets and doesn't scale. Rejected.

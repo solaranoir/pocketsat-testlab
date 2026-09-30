@@ -18,6 +18,11 @@ We record significant architecture decisions as Architecture Decision Records (A
 - **When to write one:** a choice that affects more than one component, changes a public interface, constrains future phases, or that a future reader would reasonably ask "why did we do it this way?" about.
 - **Process:** an ADR is proposed in a pull request. It is merged as Accepted by the maintainer. Agents must read the ADRs in `docs/adr/` before working on architecture-affecting issues and must write an ADR if an issue forces a design choice.
 
+## Alternatives considered
+
+- **Decisions only in pull request descriptions and issues.** The reasoning is scattered, not versioned with the code, and hard for agents to find. Rejected.
+- **Decisions only in `docs/architecture.md`.** That document describes the current design, but it loses the reasoning and the rejected options, and later edits silently overwrite earlier decisions. Rejected; `architecture.md` summarizes the current design and links to the ADRs.
+
 ## Consequences
 
 - Decisions and their reasoning live next to the code and are reviewed like code.
