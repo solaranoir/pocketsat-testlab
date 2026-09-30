@@ -104,7 +104,12 @@ This keeps `TestTarget` as one interface, keeps physics models out of the firmwa
 ## Follow-ups
 
 - Update `docs/architecture.md` sections 5 and 6 to match the interface above.
+  - **Done** in #13, and kept current in #23 and #24.
 - Update issue #6 (TestTarget protocol and core message types) to add `apply_environment`, `inject`, `capabilities`, `EnvironmentState`, `TargetFault`, and frame encode/decode with CRC.
+  - **Done:** issue #6 was updated before implementation and closed by #15.
 - Add shared CRC/frame test vectors, used by both Python tests and (later) firmware tests.
+  - **Done** in #15: `tests/vectors/frames.json`.
 - Create Phase 7a and Phase 7b milestones in place of a single Phase 7 milestone, and note the revised estimate in the roadmap.
+  - **Done:** the milestones were created for #9, and `docs/roadmap.md` records the split and that 7a and 7b still need a revised estimate.
 - ADR-0003 settles tick size and how `advance(dt)` is scheduled relative to `apply_environment`.
+  - **Done:** ADR-0003 (Accepted) sets a 100 ms default tick and a fixed per-tick order with `apply_environment` before `advance(dt_us)`.

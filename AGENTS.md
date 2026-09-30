@@ -18,6 +18,7 @@ pocketsat-test-lab/
 ├── pyproject.toml
 ├── docs/
 │   ├── architecture.md          # component boundaries, data flow
+│   ├── roadmap.md               # phase plan, milestones, v1 scope
 │   └── adr/                     # architecture decision records (NNNN-title.md)
 ├── src/pocketsat/
 │   ├── core/                    # SimClock, RngFactory (determinism foundations)
@@ -87,4 +88,4 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run
 
 ## Scope reminder
 
-Version 1 is the 10-week plan: SIL + MCU HIL, scenario DSL, fault injection, seeded campaigns, CI. Deferred to v2: SDR, extensive physical sensors, sophisticated orbital mechanics, real-satellite validation, Kubernetes, anomaly detection. A finished, documented SIL/HIL platform beats a sprawling unfinished lab.
+Version 1 is the 10-week plan in `docs/roadmap.md`: SIL + MCU HIL, scenario DSL, fault injection, seeded campaigns, CI. Deferred to v2: SDR, extensive physical sensors, sophisticated orbital mechanics, real-satellite validation, Kubernetes, anomaly detection. A finished, documented SIL/HIL platform beats a sprawling unfinished lab.
