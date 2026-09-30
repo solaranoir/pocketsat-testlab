@@ -1,6 +1,6 @@
 # ADR-0003: Time model, tick scheduling, seeding, and run records
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Phase:** 0
 - **Amends:** ADR-0002 (`advance` signature)
 
@@ -94,5 +94,9 @@ Every run writes a `run.json` with:
 ## Follow-ups
 
 - Amend ADR-0002 and issue #6 so `advance` takes `dt_us: int`.
+  - **Done** for ADR-0002 (#25: "Amended by" header and interface note). Issue #6 was already closed, so it was not changed.
+  - **Open:** the code still takes `advance(dt: float)`. Tracked in #26.
 - Create a Phase 0 issue for `SimClock`, `RngFactory`, and the `run.json` schema (with tests for stream independence and seed derivation).
+  - **Done:** #19, implemented in #22.
 - Update `docs/architecture.md` sections 7 and 8 to reference the step order above.
+  - **Done** in #23.
