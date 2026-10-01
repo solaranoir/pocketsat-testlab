@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from itertools import pairwise
 from typing import Any
 
+import pytest
+
 from pocketsat.core.clock import SimClock
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment import NominalEnvironment
@@ -31,6 +33,10 @@ from pocketsat.spacecraft import (
     SubsystemStack,
 )
 from pocketsat.spacecraft.fakes import FakeSubsystem, fake_subsystems
+
+# Multi-orbit story runs: skipped by a plain `pytest`, run with `pytest -m slow`.
+pytestmark = pytest.mark.slow
+
 
 ORBITS = 3
 CONFIG = NOMINAL_CONFIG.power
