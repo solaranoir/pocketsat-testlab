@@ -1,4 +1,7 @@
-"""Tests for the lumped thermal model and the battery survival heater (#38)."""
+"""Tests for the lumped thermal model and the battery survival heater (#38).
+
+The sensors and limit flags (#39) are tested in ``test_thermal_flags_noise.py``.
+"""
 
 import dataclasses
 import itertools
@@ -47,9 +50,8 @@ ON_C = CONFIG.heater_on_setpoint_c
 OFF_C = CONFIG.heater_off_setpoint_c
 
 HOLD_MARGIN_C = 2.0
-"""The cold-ambient test asserts the battery stays at or above ``ON_C - HOLD_MARGIN_C``.
-The under-temperature threshold itself is defined by #39, which relates it to the heater
-setpoints."""
+"""The cold-ambient test asserts the battery stays at or above ``ON_C - HOLD_MARGIN_C``,
+well above the battery's under-temperature threshold (#39, at least 5 °C below ON)."""
 
 
 def _power_fake(
@@ -231,6 +233,7 @@ def test_step_rejects_bad_dt(dt_us: Any, error: type[Exception]) -> None:
 
 def test_longest_step_is_accepted_and_monotone() -> None:
     thermal = Thermal(CONFIG, ThermalInitial(battery_c=40.0, electronics_c=40.0))
+    thermal.reset(RngFactory(1))
     thermal.step(thermal.max_step_us, WARM, CONTROLS)
     truth = thermal.snapshot().truth
     assert 20.0 <= truth.battery_c <= 40.0
@@ -273,6 +276,7 @@ def test_cools_at_idle() -> None:
 
 def test_without_reader_there_is_no_electrical_heating() -> None:
     thermal = Thermal(CONFIG, ThermalInitial(battery_c=20.0, electronics_c=20.0))
+    thermal.reset(RngFactory(1))
     for _ in range(1000):
         thermal.step(TICK_US, WARM, CONTROLS)
     truth = thermal.snapshot().truth
@@ -282,7 +286,14 @@ def test_without_reader_there_is_no_electrical_heating() -> None:
 
 def test_reader_without_power_raises() -> None:
     thermal = Thermal(CONFIG, ThermalInitial(), reader=SnapshotBoard())
+    thermal.reset(RngFactory(1))
     with pytest.raises(KeyError):
+        thermal.step(TICK_US, WARM, CONTROLS)
+
+
+def test_step_before_reset_raises() -> None:
+    thermal = Thermal(CONFIG, ThermalInitial())
+    with pytest.raises(RuntimeError):
         thermal.step(TICK_US, WARM, CONTROLS)
 
 
@@ -457,16 +468,18 @@ def test_heater_is_not_commandable() -> None:
     for _ in range(3600):
         stack_a.step(SECOND_US, COLD, CONTROLS)
         stack_b.step(SECOND_US, COLD, everything_off)
-        assert a.snapshot() == b.snapshot()
+        # The freeze holds b's readings (#39); the heater and the physics are unchanged.
+        assert a.snapshot().truth == b.snapshot().truth
 
 
 # --- Readings and snapshot ------------------------------------------------------------
 
 
-def test_readings_report_true_temperatures_without_flags() -> None:
+def test_readings_without_noise_report_true_temperatures_without_flags() -> None:
+    quiet_cold = EnvironmentState(sunlit=False, ambient_temp_c=-20.0, sensor_noise_scale=0.0)
     stack, thermal = _stack(4.0)
     for _ in range(3600):
-        stack.step(SECOND_US, COLD, CONTROLS)
+        stack.step(SECOND_US, quiet_cold, CONTROLS)
         truth = thermal.snapshot().truth
         readings = thermal.snapshot().readings
         assert readings.battery_c == truth.battery_c
