@@ -51,8 +51,50 @@ def _require_records(owner: object, **kinds: type) -> None:
 
 @dataclass(frozen=True)
 class PowerConfig:
-    """Power settings. Fields are added by the battery and solar model (#35) and the
-    power loads task (#36)."""
+    """Power settings for the battery and solar model (#35).
+
+    The power loads task (#36) adds its fields here. Every default is provisional: the
+    power and thermal budget (#72) calibrates them. The defaults describe a small
+    2S lithium-ion battery charged by a body-mounted array.
+
+    Attributes:
+        battery_capacity_wh: Usable battery energy from empty (SOC 0) to full (SOC 1),
+            watt-hours. Positive. Default 20.0.
+        solar_array_w: Solar array output at ideal pointing (pointing error 0°) in
+            sunlight, watts. Non-negative. Default 8.0.
+        base_load_w: Always-on electrical load (avionics, receiver), watts.
+            Non-negative. Default 2.0. #36 adds the per-subsystem draws on top.
+        battery_empty_v: Bus voltage at SOC 0, volts. Positive. Default 6.0.
+        battery_full_v: Bus voltage at SOC 1, volts. Above ``battery_empty_v``.
+            Default 8.4. Bus voltage is linear in SOC between the two.
+
+    Raises:
+        TypeError: A field is not a number.
+        ValueError: A field is not finite or is out of range.
+    """
+
+    battery_capacity_wh: float = 20.0
+    solar_array_w: float = 8.0
+    base_load_w: float = 2.0
+    battery_empty_v: float = 6.0
+    battery_full_v: float = 8.4
+
+    def __post_init__(self) -> None:
+        if _require_number("battery_capacity_wh", self.battery_capacity_wh) <= 0:
+            raise ValueError(
+                f"battery_capacity_wh must be positive, got {self.battery_capacity_wh}"
+            )
+        for name in ("solar_array_w", "base_load_w"):
+            if _require_number(name, getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        empty_v = _require_number("battery_empty_v", self.battery_empty_v)
+        full_v = _require_number("battery_full_v", self.battery_full_v)
+        if empty_v <= 0:
+            raise ValueError(f"battery_empty_v must be positive, got {empty_v}")
+        if full_v <= empty_v:
+            raise ValueError(
+                f"battery_full_v must be above battery_empty_v ({empty_v}), got {full_v}"
+            )
 
 
 @dataclass(frozen=True)

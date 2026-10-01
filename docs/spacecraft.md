@@ -73,6 +73,15 @@ The flight computer is not in `STEP_ORDER`: it runs after every subsystem, so it
 
 Telemetry (#54) encodes readings records only.
 
+## Power (#35)
+
+`pocketsat.spacecraft.Power` is built as `Power(config.power, initial.power, reader=board)`. Each tick it computes solar generation (`PowerConfig.solar_array_w` × `portable_cos_deg` of attitude's true pointing error, previous tick; zero in eclipse and at or beyond 90°), a total load of `base_load_w` plus `controls.extra_load_w`, integrates net power over `dt_us` into the SOC (clamped to 0..1), and derives the bus voltage linearly from the SOC between `battery_empty_v` and `battery_full_v`. Battery current is net power divided by bus voltage, positive while charging.
+
+- The reader is optional. Without one, pointing is taken as ideal (factor 1.0). With one, attitude must be published on it, or `step()` raises the board's `KeyError`.
+- `EnvironmentState.battery_soc_override` pins the SOC (and so the bus voltage) while set, even with `extra_load_w` active; the drain still shows in `total_load_w` and the battery current (ADR-0004 §11). When the override clears, integration resumes from the pinned value.
+- Until #36, `PowerReadings` reports the true bus voltage, current, and SOC, with both flags `False`; #36 adds the per-subsystem loads, sensor noise, the SOC estimate, `frozen_sensors`, and the flags.
+- `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V) are provisional; #72 calibrates them.
+
 ## Shared test fakes
 
 `pocketsat.spacecraft.fakes` provides fakes that every test directory can import, following `EchoTarget`'s precedent. Subsystem tickets test against fakes of the subsystems they read, so none waits for another's implementation.

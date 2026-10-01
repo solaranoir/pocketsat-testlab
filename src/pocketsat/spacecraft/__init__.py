@@ -32,6 +32,7 @@ from pocketsat.spacecraft.controls import (
     RadioMode,
     SpacecraftControls,
 )
+from pocketsat.spacecraft.power import Power
 from pocketsat.spacecraft.snapshots import (
     READINGS_FLAGS,
     SNAPSHOT_TYPES,
@@ -81,6 +82,7 @@ __all__ = [
     "PayloadSnapshot",
     "PayloadState",
     "PayloadTruth",
+    "Power",
     "PowerConfig",
     "PowerInitial",
     "PowerReadings",
