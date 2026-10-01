@@ -94,7 +94,7 @@ flowchart LR
 
 ### 4.1 Spacecraft subsystems (SIL)
 
-Each subsystem of the Python spacecraft model implements the `Subsystem` protocol in `pocketsat.spacecraft.base`: `reset(rng)` with the run's `RngFactory` (subsystems request their own named streams, such as `spacecraft.power.noise`), `step(dt_us, env)` in integer microseconds, and `snapshot()` returning a frozen dataclass. A `SubsystemStack` steps them in one fixed order, defined only in `STEP_ORDER`:
+Each subsystem of the Python spacecraft model implements the `Subsystem` protocol in `pocketsat.spacecraft.base`: `reset(rng)` with the run's `RngFactory` (subsystems request their own named streams, such as `spacecraft.power.noise`), `step(dt_us, env, controls)` in integer microseconds, and `snapshot()` returning a frozen dataclass. A `SubsystemStack` steps them in one fixed order, defined only in `STEP_ORDER`:
 
 1. **Power**: bus state first; every other subsystem runs on it.
 2. **Thermal**: heat from this tick's electrical loads and the environment.
@@ -103,6 +103,38 @@ Each subsystem of the Python spacecraft model implements the `Subsystem` protoco
 5. **Comms**: last, so it can transmit what earlier subsystems produced this tick.
 
 The stack's `snapshot()` returns a `SpacecraftState` holding every subsystem's snapshot in that order, for telemetry and for other subsystems to read. Changing the order changes recorded behavior and requires a new ADR (ADR-0003 §2).
+
+#### Controls from the flight computer (ADR-0004)
+
+The flight computer commands subsystems through one frozen `SpacecraftControls` record per tick (`pocketsat.spacecraft.controls`), which `SubsystemStack.step` passes to every subsystem. It is built from per-subsystem records plus fault overrides:
+
+| Record or field | Read by | Meaning |
+|---|---|---|
+| `PayloadControls(enabled, release_through_chunk_id)` | Payload | Acquisition on/off; release stored chunks up to an ID |
+| `RadioControls(mode)` | Comms | `OFF`, `RX_ONLY`, or `RX_TX` (full duplex) |
+| `AttitudeControls(enabled)` | Attitude | Attitude control on/off |
+| `frozen_sensors` | Power, thermal, attitude | Fault override from `sensor_freeze` |
+| `extra_load_w` | Power | Fault override from `battery_drain` |
+
+The defaults (payload off, radio `RX_TX`, attitude control on, no overrides) are a test convenience; after a reset, the flight computer's BOOT controls apply to tick 0. Subsystems never read the mode, and each reads only its own record and the overrides that concern it. `SilTarget` merges fault overrides into the controls in one place, with precedence fault > flight computer.
+
+**The flight computer is not part of `STEP_ORDER`.** It always runs after all subsystems. ADR-0003's step 6, `advance(dt_us)`, expands to:
+
+- a. Merge the flight computer's tick N-1 controls with the active fault overrides.
+- b. Subsystems step in `STEP_ORDER` with the merged controls.
+- c. The flight computer decodes queued uplink, executes commands, and sends ACK/NACK.
+- d. The flight computer evaluates flags and state and updates the mode.
+- e. The flight computer emits telemetry if due.
+- f. The flight computer produces controls for tick N+1.
+
+So commands act one tick later and faults act on the same tick. Telemetry at tick N can show a new mode alongside subsystem state produced under the previous controls; that one-frame lag is correct.
+
+| Chain | Latency (100 ms default tick) |
+|---|---|
+| Command → ACK | same tick |
+| Command → physical effect | +1 tick |
+| Effect → power sees the draw | +1 tick (downstream read) |
+| Fault → effect | 0 ticks |
 
 ## 5. Message types
 
@@ -176,6 +208,7 @@ sequenceDiagram
         R->>T: 4. send(frame) for due uplink packets
         O->>T: 5. apply_environment(env)
         O->>T: 6. advance(dt_us)
+        Note over T: Step 6 expands to steps a to f (ADR-0004, section 4.1)
         T->>R: 7. receive() downlink frames
         R->>G: 8. Deliver due downlink packets
         G->>O: 9. Decoded telemetry and events

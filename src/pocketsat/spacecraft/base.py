@@ -3,7 +3,8 @@
 Every spacecraft subsystem (power, thermal, attitude, payload, communications)
 implements :class:`Subsystem`. A :class:`SubsystemStack` resets and steps them in the
 fixed order :data:`STEP_ORDER` and aggregates their snapshots into a
-:class:`SpacecraftState` for telemetry and for other subsystems to read.
+:class:`SpacecraftState` for telemetry and for other subsystems to read. Each tick,
+every subsystem receives the same :class:`SpacecraftControls` (ADR-0004).
 
 Time is integer microseconds and randomness comes only from named ``RngFactory``
 streams (ADR-0003).
@@ -16,6 +17,7 @@ from typing import Final, Protocol, runtime_checkable
 
 from pocketsat.core.clock import check_us
 from pocketsat.core.rng import RngFactory
+from pocketsat.spacecraft.controls import SpacecraftControls
 from pocketsat.targets.base import EnvironmentState
 
 STEP_ORDER: Final[tuple[str, ...]] = ("power", "thermal", "attitude", "payload", "comms")
@@ -28,6 +30,10 @@ STEP_ORDER: Final[tuple[str, ...]] = ("power", "thermal", "attitude", "payload",
 5. ``comms``: last, so it can transmit what earlier subsystems produced this tick.
 
 Changing this order changes recorded behavior, so it requires a new ADR (ADR-0003 §2).
+
+The flight computer is not part of ``STEP_ORDER``. It always runs after all
+subsystems, within ``advance()`` steps c to f, and the controls it produces take
+effect in the next tick (ADR-0004 §2).
 """
 
 
@@ -60,8 +66,15 @@ class Subsystem(Protocol):
         """
         ...
 
-    def step(self, dt_us: int, env: EnvironmentState) -> None:
-        """Advance the subsystem by ``dt_us`` microseconds under ``env``."""
+    def step(self, dt_us: int, env: EnvironmentState, controls: SpacecraftControls) -> None:
+        """Advance the subsystem by ``dt_us`` microseconds under ``env``.
+
+        Args:
+            dt_us: Time step in integer microseconds.
+            env: Environment for this tick.
+            controls: This tick's controls (ADR-0004). Read only this subsystem's own
+                record and the fault overrides that concern it.
+        """
         ...
 
     def snapshot(self) -> SubsystemSnapshot:
@@ -140,16 +153,21 @@ class SubsystemStack:
         for subsystem in self._subsystems:
             subsystem.reset(rng)
 
-    def step(self, dt_us: int, env: EnvironmentState) -> None:
+    def step(self, dt_us: int, env: EnvironmentState, controls: SpacecraftControls) -> None:
         """Step every subsystem by ``dt_us`` microseconds, in step order.
 
+        Every subsystem receives the same ``controls`` object (ADR-0004 §1).
+
         Raises:
-            TypeError: ``dt_us`` is not an int.
+            TypeError: ``dt_us`` is not an int, or ``controls`` is not a
+                :class:`SpacecraftControls`.
             ValueError: ``dt_us`` is negative.
         """
         check_us("dt_us", dt_us)
+        if not isinstance(controls, SpacecraftControls):
+            raise TypeError(f"controls must be SpacecraftControls, got {type(controls).__name__}")
         for subsystem in self._subsystems:
-            subsystem.step(dt_us, env)
+            subsystem.step(dt_us, env, controls)
 
     def snapshot(self) -> SpacecraftState:
         """Collect every subsystem's snapshot, in step order."""

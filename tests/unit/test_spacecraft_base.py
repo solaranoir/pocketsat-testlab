@@ -13,6 +13,7 @@ from pocketsat.spacecraft.base import (
     SubsystemSnapshot,
     SubsystemStack,
 )
+from pocketsat.spacecraft.controls import SpacecraftControls
 from pocketsat.targets.base import EnvironmentState
 
 
@@ -45,7 +46,7 @@ class FakeSubsystem:
         self._sunlit_steps = 0
         self._noise = 0.0
 
-    def step(self, dt_us: int, env: EnvironmentState) -> None:
+    def step(self, dt_us: int, env: EnvironmentState, controls: SpacecraftControls) -> None:
         if self._log is not None:
             self._log.append(("step", self.name))
         self._elapsed_us += dt_us
@@ -62,6 +63,7 @@ class FakeSubsystem:
         )
 
 
+NOMINAL = SpacecraftControls()
 SUNLIT = EnvironmentState(sunlit=True)
 ECLIPSE = EnvironmentState(sunlit=False)
 
@@ -73,8 +75,8 @@ def test_fake_subsystem_satisfies_protocol() -> None:
 def test_fake_subsystem_steps_and_snapshots() -> None:
     fake = FakeSubsystem()
     fake.reset(RngFactory(42))
-    fake.step(100_000, SUNLIT)
-    fake.step(100_000, ECLIPSE)
+    fake.step(100_000, SUNLIT, NOMINAL)
+    fake.step(100_000, ECLIPSE, NOMINAL)
     snap = fake.snapshot()
     assert (snap.elapsed_us, snap.steps, snap.sunlit_steps) == (200_000, 2, 1)
     assert type(snap.elapsed_us) is int
@@ -110,8 +112,8 @@ def test_stack_steps_in_fixed_order_regardless_of_input_order() -> None:
     assert stack.names == tuple(EXPECTED_ORDER)
     stack.reset(RngFactory(1))
     log.clear()
-    stack.step(100_000, SUNLIT)
-    stack.step(100_000, SUNLIT)
+    stack.step(100_000, SUNLIT, NOMINAL)
+    stack.step(100_000, SUNLIT, NOMINAL)
     assert log == [("step", name) for name in EXPECTED_ORDER] * 2
 
 
@@ -126,14 +128,14 @@ def test_stack_accepts_custom_order_for_tests() -> None:
     log: list[tuple[str, str]] = []
     stack = SubsystemStack([FakeSubsystem("a", log), FakeSubsystem("b", log)], order=("b", "a"))
     stack.reset(RngFactory(1))
-    stack.step(1, SUNLIT)
+    stack.step(1, SUNLIT, NOMINAL)
     assert log == [("reset", "b"), ("reset", "a"), ("step", "b"), ("step", "a")]
 
 
 def test_spacecraft_state_aggregates_snapshots_in_step_order() -> None:
     stack = SubsystemStack([FakeSubsystem(name) for name in MIXED_ORDER])
     stack.reset(RngFactory(7))
-    stack.step(250_000, ECLIPSE)
+    stack.step(250_000, ECLIPSE, NOMINAL)
     state = stack.snapshot()
     assert isinstance(state, SpacecraftState)
     assert list(state.subsystems) == EXPECTED_ORDER
@@ -173,7 +175,7 @@ def test_stack_is_deterministic_for_same_seed() -> None:
         stack.reset(RngFactory(seed))
         states = []
         for i in range(50):
-            stack.step(100_000, SUNLIT if i % 3 else ECLIPSE)
+            stack.step(100_000, SUNLIT if i % 3 else ECLIPSE, NOMINAL)
             states.append(stack.snapshot())
         return states
 
@@ -184,13 +186,13 @@ def test_stack_is_deterministic_for_same_seed() -> None:
 def test_subsystems_use_independent_named_streams() -> None:
     stack = SubsystemStack([FakeSubsystem("power"), FakeSubsystem("thermal")])
     stack.reset(RngFactory(42))
-    stack.step(1, SUNLIT)
+    stack.step(1, SUNLIT, NOMINAL)
     state = stack.snapshot()
     assert state.get("power", FakeSnapshot).noise != state.get("thermal", FakeSnapshot).noise
 
     alone = SubsystemStack([FakeSubsystem("power")])
     alone.reset(RngFactory(42))
-    alone.step(1, SUNLIT)
+    alone.step(1, SUNLIT, NOMINAL)
     # Adding the thermal subsystem did not change power's random values.
     assert (
         alone.snapshot().get("power", FakeSnapshot).noise == state.get("power", FakeSnapshot).noise
@@ -200,7 +202,7 @@ def test_subsystems_use_independent_named_streams() -> None:
 def _run_steps(stack: SubsystemStack, n: int) -> list[SpacecraftState]:
     states = []
     for _ in range(n):
-        stack.step(10, SUNLIT)
+        stack.step(10, SUNLIT, NOMINAL)
         states.append(stack.snapshot())
     return states
 
@@ -238,11 +240,11 @@ def test_stack_step_requires_integer_microseconds(dt_us: object, error: type[Exc
     stack = SubsystemStack([FakeSubsystem("power")])
     stack.reset(RngFactory(0))
     with pytest.raises(error):
-        stack.step(dt_us, SUNLIT)  # type: ignore[arg-type]
+        stack.step(dt_us, SUNLIT, NOMINAL)  # type: ignore[arg-type]
 
 
 def test_empty_stack_is_allowed() -> None:
     stack = SubsystemStack([])
     stack.reset(RngFactory(0))
-    stack.step(100_000, SUNLIT)
+    stack.step(100_000, SUNLIT, NOMINAL)
     assert stack.snapshot().subsystems == {}
