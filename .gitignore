@@ -30,6 +30,8 @@ coverage.xml
 # Editors and OS
 .vscode/
 .idea/
+# Claude Code local data (agent worktrees, local settings)
+.claude/
 *.swp
 .DS_Store
 Thumbs.db
