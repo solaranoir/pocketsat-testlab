@@ -63,6 +63,7 @@ from pocketsat.spacecraft.snapshots import (
     ThermalSnapshot,
     ThermalTruth,
 )
+from pocketsat.spacecraft.thermal import Thermal
 
 __all__ = [
     "CHUNK_ID_SIZE_BYTES",
@@ -112,6 +113,7 @@ __all__ = [
     "Subsystem",
     "SubsystemSnapshot",
     "SubsystemStack",
+    "Thermal",
     "ThermalConfig",
     "ThermalInitial",
     "ThermalReadings",

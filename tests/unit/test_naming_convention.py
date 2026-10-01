@@ -55,6 +55,7 @@ FRACTIONS = frozenset(
         "low_battery_clear_soc",
         "critical_battery_soc",
         "critical_battery_clear_soc",
+        "battery_dissipation_fraction",
     }
 )
 """Named fractions, kept in 0..1."""

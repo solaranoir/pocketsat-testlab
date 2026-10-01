@@ -149,8 +149,79 @@ class PowerConfig:
 
 @dataclass(frozen=True)
 class ThermalConfig:
-    """Thermal settings. Fields are added by the thermal model (#38) and the thermal
-    limit flags task (#39)."""
+    """Thermal settings: the two-node lumped model and the battery survival heater (#38).
+
+    The model is described in :mod:`pocketsat.spacecraft.thermal`. Every default is
+    provisional: the power and thermal budget (#72) calibrates them. The defaults are
+    chosen so that, with about 4 W of electrical load, the battery sits near 29 °C and
+    the electronics near 32 °C in the nominal 20 °C sunlit ambient, and so that the
+    survival heater cycles about three times in each nominal eclipse at the -20 °C
+    eclipse ambient (#73): without the heater the battery would settle near -11 °C
+    there, with the heater on near +9 °C, so it switches between its setpoints. The
+    sensor noise and the ``over_temp``/``under_temp`` thresholds are added by #39.
+
+    Attributes:
+        battery_heat_capacity_j_per_c: Battery node heat capacity, joules per °C.
+            Positive. Default 80.0 (roughly a 100 g lithium-ion pack).
+        electronics_heat_capacity_j_per_c: Electronics node heat capacity, joules per
+            °C. Positive. Default 300.0.
+        battery_conductance_w_per_c: Thermal conductance from the battery node to the
+            ambient, watts per °C. Positive, so the battery always cools toward the
+            ambient. Default 0.12 (the battery sits inside the structure).
+        electronics_conductance_w_per_c: Thermal conductance from the electronics node
+            to the ambient, watts per °C. Positive. Default 0.25.
+        coupling_conductance_w_per_c: Thermal conductance between the battery and the
+            electronics nodes, watts per °C. Non-negative; 0 decouples them.
+            Default 0.04.
+        battery_dissipation_fraction: Fraction of the electrical dissipation (power's
+            total load, less the survival heater, whose heat all goes to the battery)
+            that heats the battery node, 0..1; the rest heats the electronics node.
+            Default 0.25.
+        heater_power_w: Survival heater power while on, watts. Non-negative. Default
+            3.0.
+        heater_on_setpoint_c: The heater switches on when the true battery temperature
+            falls below this, °C. Default 0.0.
+        heater_off_setpoint_c: The heater switches off when the true battery
+            temperature rises above this, °C. Above ``heater_on_setpoint_c``.
+            Default 4.0.
+
+    Raises:
+        TypeError: A field is not a number.
+        ValueError: A field is not finite or is out of range, or the setpoints are out
+            of order.
+    """
+
+    battery_heat_capacity_j_per_c: float = 80.0
+    electronics_heat_capacity_j_per_c: float = 300.0
+    battery_conductance_w_per_c: float = 0.12
+    electronics_conductance_w_per_c: float = 0.25
+    coupling_conductance_w_per_c: float = 0.04
+    battery_dissipation_fraction: float = 0.25
+    heater_power_w: float = 3.0
+    heater_on_setpoint_c: float = 0.0
+    heater_off_setpoint_c: float = 4.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "battery_heat_capacity_j_per_c",
+            "electronics_heat_capacity_j_per_c",
+            "battery_conductance_w_per_c",
+            "electronics_conductance_w_per_c",
+        ):
+            if _require_number(name, getattr(self, name)) <= 0:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+        for name in ("coupling_conductance_w_per_c", "heater_power_w"):
+            if _require_number(name, getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        _require_in_range("battery_dissipation_fraction", self.battery_dissipation_fraction, 0, 1)
+        for name in ("heater_on_setpoint_c", "heater_off_setpoint_c"):
+            if _require_number(name, getattr(self, name)) <= ABSOLUTE_ZERO_C:
+                raise ValueError(f"{name} must be above absolute zero, got {getattr(self, name)}")
+        if self.heater_off_setpoint_c <= self.heater_on_setpoint_c:
+            raise ValueError(
+                f"heater_off_setpoint_c must be above heater_on_setpoint_c "
+                f"({self.heater_on_setpoint_c}), got {self.heater_off_setpoint_c}"
+            )
 
 
 @dataclass(frozen=True)
@@ -390,7 +461,9 @@ class ThermalInitial:
         electronics_c: Electronics temperature, °C.
 
     Both defaults equal the nominal sunlit ambient (20 °C) and are provisional; the
-    power and thermal budget (#72) sets the final values.
+    power and thermal budget (#72) sets the final values. The survival heater starts
+    on if ``battery_c`` is below ``ThermalConfig.heater_on_setpoint_c`` and off
+    otherwise (#38).
 
     Raises:
         TypeError: A temperature is not a number.
