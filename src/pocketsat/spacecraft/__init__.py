@@ -1,5 +1,6 @@
 """SIL spacecraft model: subsystems stepped in simulated time."""
 
+from pocketsat.spacecraft.attitude import Attitude
 from pocketsat.spacecraft.base import (
     STEP_ORDER,
     SnapshotBoard,
@@ -73,6 +74,7 @@ __all__ = [
     "SENSOR_SUBSYSTEMS",
     "SNAPSHOT_TYPES",
     "STEP_ORDER",
+    "Attitude",
     "AttitudeConfig",
     "AttitudeControls",
     "AttitudeInitial",
