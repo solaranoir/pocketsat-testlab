@@ -18,9 +18,36 @@ seeded test campaigns, and CI.
 
 ## Architecture
 
-> **Diagram placeholder.** A rendered architecture diagram will go here.
-> Until then, see [`docs/architecture.md`](docs/architecture.md) for component
-> boundaries and data flow.
+```mermaid
+flowchart TB
+    SC[Scenario YAML] --> ORCH["Test Orchestrator<br/>owns SimClock and RngFactory"]
+    ORCH -->|results| REP["Reporting<br/>run.json, telemetry"]
+    ORCH <-->|"step each tick /<br/>EnvironmentState"| ENV[Environment Model]
+    ORCH -->|scheduled Commands| GS[Ground Station]
+    GS -->|decoded Telemetry| ORCH
+    ORCH -->|fault schedule| FI[Fault Injector]
+
+    GS <-->|"uplink / downlink Packets"| RF[RF Channel Model]
+    RF <-->|"raw frame bytes<br/>send() / receive()"| TGT{{TestTarget interface}}
+    ORCH -->|"reset, apply_environment,<br/>inject, advance"| TGT
+
+    FI -.->|fault| GS
+    FI -.->|fault| RF
+    FI -.->|TargetFault| TGT
+
+    TGT --- SIM
+    TGT --- BRIDGE
+    subgraph SIL [SIL target]
+        SIM["Python spacecraft:<br/>Power, Thermal, Attitude,<br/>Payload, Comms<br/>+ Flight Computer"]
+    end
+    subgraph HIL [HIL target]
+        direction LR
+        BRIDGE[HIL bridge] -->|serial| MCU[MCU flight software]
+    end
+```
+
+See [`docs/architecture.md`](docs/architecture.md) for component boundaries, data
+flow, and the run lifecycle.
 
 Design decisions are recorded as ADRs in [`docs/adr/`](docs/adr/). The wire format is
 described in [`docs/protocol.md`](docs/protocol.md), and the phase plan in
