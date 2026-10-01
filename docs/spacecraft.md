@@ -105,6 +105,44 @@ Telemetry (#54) encodes readings records only.
 
 All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V, the noise levels, and the flag thresholds) are provisional; #72 calibrates them. With the defaults and the shared fakes' draws (attitude control 0.5 W, transmit 1.0 W), a nominal 92-minute orbit with 35% eclipse is net positive (about +2.6 Wh per orbit), which the story-level test (`tests/sil/test_power_story.py`) checks over three orbits. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
+## Thermal (#38)
+
+`pocketsat.spacecraft.Thermal` is built as `Thermal(config.thermal, initial.thermal, reader=board)`. It is a lumped model with two temperature nodes, the **battery** (`B`) and the **electronics** (`E`), integrated step by step with forward Euler and portable arithmetic only (ADR-0006, no `exp`). Each tick, with `dt` in seconds (`dt_us / 1_000_000`) and `T_amb` = `EnvironmentState.ambient_temp_c`:
+
+1. **Electrical dissipation** `P`. All electrical load becomes heat. Thermal reads power's *true* `PowerTruth.total_load_w` through the reader; power steps first, so this is the current tick (see the cross-read table). Power's total load already includes the survival heater draw thermal published in the previous tick, which is exactly the heater power applied this tick, so thermal subtracts it: `P = max(0, total_load_w - H)`. The heater's heat is counted once, in the battery.
+2. **Heater** `H` = `heater_power_w` while the heater is on, else 0. The on/off state is the one decided at the end of the previous tick (or at reset), which is also what power drew this tick.
+3. **Integration**, with `f` = `battery_dissipation_fraction`, `G_B`, `G_E` the conductances to the ambient, `G_BE` the coupling conductance, and `C_B`, `C_E` the heat capacities:
+
+   ```
+   Q_BE = G_BE * (T_B - T_E)
+   T_B += (f * P + H - G_B * (T_B - T_amb) - Q_BE) * dt / C_B
+   T_E += ((1 - f) * P - G_E * (T_E - T_amb) + Q_BE) * dt / C_E
+   ```
+
+   Both nodes cool (or warm) toward the ambient and exchange heat through the coupling. The **environment** acts only through `ambient_temp_c`, the effective sink temperature, which already includes solar heating (`NominalEnvironment`: 20 °C sunlit, -20 °C eclipse, #73); there is no separate solar term. The steady state is linear in `T_amb`, so a change in ambient moves both steady-state temperatures by the same amount.
+4. **Survival heater thermostat** (ADR-0004 §12): a mechanical thermostat on the battery node reads the *true* battery temperature after integration. An off heater switches on below `heater_on_setpoint_c`; an on heater switches off above `heater_off_setpoint_c`; between the two it keeps its state (hysteresis, so no chatter). It has no control field and no mode can switch it off. `ThermalTruth.heater_on` and `heater_power_w` report it; power (#36) adds `heater_power_w` to the total load one tick later, the tick in which thermal heats the battery with it.
+
+- **The reader is optional.** Without one (`reader=None`) there is no electrical heating, only the environment and the heater. With one, power must be published on it, or `step()` raises the board's `KeyError`.
+- **Step size.** Forward Euler is monotone (no overshoot or oscillation) while `dt <= C / (sum of the node's conductances)` for both nodes. `Thermal.max_step_us` is that limit (500 s with the defaults); `step()` raises `ValueError` beyond it.
+- **Reset.** `reset(rng)` returns to `ThermalInitial` (provisional 20 °C / 20 °C until #72). The heater starts on if the starting battery temperature is below the ON setpoint. Thermal uses no randomness and needs no reset before its first step.
+- **Readings (#39).** In #38, `ThermalReadings` reports the true temperatures exactly, with `over_temp` and `under_temp` always `False`, and `frozen_sensors` has no effect. #39 adds the sensor noise, the freeze, the two flags and their thresholds, and relates its `under_temp` threshold to the heater setpoints.
+
+**Settings** (`ThermalConfig`; every default is provisional, #72 calibrates them):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `battery_heat_capacity_j_per_c` | 80.0 | battery heat capacity, J/°C (about a 100 g lithium-ion pack) |
+| `electronics_heat_capacity_j_per_c` | 300.0 | electronics heat capacity, J/°C |
+| `battery_conductance_w_per_c` | 0.12 | battery to ambient, W/°C (positive) |
+| `electronics_conductance_w_per_c` | 0.25 | electronics to ambient, W/°C (positive) |
+| `coupling_conductance_w_per_c` | 0.04 | battery to electronics, W/°C (0 decouples) |
+| `battery_dissipation_fraction` | 0.25 | share of the electrical dissipation (heater excluded) heating the battery; the rest heats the electronics |
+| `heater_power_w` | 3.0 | survival heater power while on, W |
+| `heater_on_setpoint_c` | 0.0 | heater switches on below this battery temperature, °C |
+| `heater_off_setpoint_c` | 4.0 | heater switches off above this battery temperature, °C; above the ON setpoint |
+
+With these defaults, the real power subsystem, and the shared fakes' draws (3.5 W of load), the battery peaks near 28 °C and the electronics near 30 °C in a nominal orbit's sunlight. In the -20 °C eclipse the battery would settle near -11 °C without the heater and near +9 °C with it on, so the heater cycles between its setpoints, three times per nominal eclipse (about 12 minutes on in total), and at 1 s ticks the battery never falls more than a few hundredths of a degree below the ON setpoint. The values were chosen for that #73 behavior: heater power and battery isolation sized so the heater-on steady state is well above the OFF setpoint. `step()` plus `snapshot()` costs about 4 µs on a developer laptop.
+
 ## Attitude (#41)
 
 `pocketsat.spacecraft.Attitude` is built as `Attitude(config.attitude, initial.attitude)` and reads nothing from other subsystems. It models two damped scalars integrated step by step with portable arithmetic only (ADR-0006): the pointing error from the sun-optimal attitude (degrees, 0..180; at 0° the solar arrays point at the sun) and the angular rate magnitude (°/s). Each tick, with `dt` in seconds (`dt_us / 1_000_000`):
