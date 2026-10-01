@@ -145,6 +145,42 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 | Effect → power sees the draw | +1 tick (downstream read) |
 | Fault → effect | 0 ticks |
 
+#### Snapshot contracts (#76)
+
+Every subsystem's snapshot is defined up front in `pocketsat.spacecraft.snapshots`, so subsystems depend on the contract and not on each other's implementation. Following ADR-0004 §7, each snapshot (`PowerSnapshot`, `ThermalSnapshot`, `AttitudeSnapshot`, `PayloadSnapshot`, `CommsSnapshot`) holds a **truth** record (`PowerTruth`, ...) that physics reads and a **readings** record (`PowerReadings`, ...) that decisions and telemetry read. Payload and comms have no sensors, so their readings always equal their truth. Subsystems read each other only through `SpacecraftState`: one earlier in `STEP_ORDER` as of the current tick, one later as of the previous tick (#36). The fields, the table of cross-subsystem reads, and the shared test fakes (`pocketsat.spacecraft.fakes`) are described in [spacecraft.md](spacecraft.md). A subsystem ticket adds fields only by extending the contract in the same change.
+
+#### Naming and units convention
+
+This convention applies to every record dataclass in `pocketsat`: snapshots, controls, settings and starting state, `EnvironmentState`, and the Phase 0 message types. Existing Phase 0 field names are kept as they are. A test (`tests/unit/test_naming_convention.py`) checks every numeric (`int` or `float`) field of every record dataclass; non-numeric fields (booleans, enums, bytes, strings, collections, nested records) are exempt. Adding a suffix or an allowlist entry means updating this section in the same change.
+
+- **Names** are snake_case and end in a unit suffix:
+
+  | Suffix | Unit |
+  |---|---|
+  | `_v` | volts |
+  | `_a` | amperes |
+  | `_w` | watts (power) |
+  | `_wh` | watt-hours (energy) |
+  | `_c` | degrees Celsius |
+  | `_deg` | degrees (angle) |
+  | `_dps` | degrees per second |
+  | `_bytes` | bytes |
+  | `_us` | microseconds |
+  | `_ms` | milliseconds |
+  | `_s` | seconds |
+  | `_km` | kilometres |
+  | `_hz` | hertz |
+  | `_db` | decibels |
+
+- **Numbers without a unit** are IDs (`_id`), counts (`_count`), or on the allowlist:
+  - named fractions, kept in 0..1: `soc`, `buffer_fill`, `sensor_noise_scale`, `battery_soc_override`, `loss_probability`
+  - existing unitless numbers: `sequence`, `version`, `schema_version`, `master_seed`
+- **Fractions** are named for what they are and kept in 0..1 (for example `soc`, `buffer_fill`), never percentages.
+- **Flags** are `bool` and live only on readings records. Their names are the `TelemetryFlags` member names (#54): `low_battery`, `critical_battery`, `over_temp`, `under_temp`. The contract owns the names (`READINGS_FLAGS`) and #54's enum matches them; adding a readings flag means reserving a bit in #54's flag table in the same change (in #54's issue text until #54 is implemented, then in `docs/protocol.md`). A boolean that describes equipment rather than a decision (for example `heater_on`, `receiver_on`) is a physical state, not a flag, and may sit on a truth record.
+- **States** are `enum.Enum` types defined in the contract (`AttitudeState`, `PayloadState`; the radio mode reuses `RadioMode` from the controls).
+- **Power draws** that another subsystem reads are `_w` fields on the truth record.
+- **Sign conventions:** battery current is positive when charging; power draws (`_w` loads) are never negative; solar generation is never negative; net battery power is generation minus total load (`PowerTruth.net_power_w`).
+
 ## 5. Message types
 
 Typed, immutable messages cross every boundary except the target boundary, which carries raw bytes (see section 6).
