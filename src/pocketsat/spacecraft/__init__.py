@@ -7,5 +7,25 @@ from pocketsat.spacecraft.base import (
     SubsystemSnapshot,
     SubsystemStack,
 )
+from pocketsat.spacecraft.controls import (
+    SENSOR_SUBSYSTEMS,
+    AttitudeControls,
+    PayloadControls,
+    RadioControls,
+    RadioMode,
+    SpacecraftControls,
+)
 
-__all__ = ["STEP_ORDER", "SpacecraftState", "Subsystem", "SubsystemSnapshot", "SubsystemStack"]
+__all__ = [
+    "SENSOR_SUBSYSTEMS",
+    "STEP_ORDER",
+    "AttitudeControls",
+    "PayloadControls",
+    "RadioControls",
+    "RadioMode",
+    "SpacecraftControls",
+    "SpacecraftState",
+    "Subsystem",
+    "SubsystemSnapshot",
+    "SubsystemStack",
+]
