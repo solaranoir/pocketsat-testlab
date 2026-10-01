@@ -57,7 +57,7 @@ Latency of the main chains, at the 100 ms default tick:
 
 ### 3. Cross-subsystem reads go only through `SpacecraftState`
 
-Subsystems never hold references to each other. Cross-subsystem reads go only through `SpacecraftState`, using the rule defined in #36: a subsystem earlier in `STEP_ORDER` is read as of the current tick, and a later one as of the previous tick. For example, thermal reads power's dissipation from the current tick, and power reads the heater, payload, attitude-control, and transmit draws one tick late. The mechanism itself is implemented in #36.
+Subsystems never hold references to each other. Cross-subsystem reads go only through `SpacecraftState`, using the rule defined in #36: a subsystem earlier in `STEP_ORDER` is read as of the current tick, and a later one as of the previous tick. For example, thermal reads power's dissipation from the current tick, and power reads the heater, payload, attitude-control, and transmit draws one tick late. The mechanism itself is the `SnapshotBoard` (#85): the stack publishes each subsystem's snapshot right after it steps, so the rule follows from `STEP_ORDER` without special cases.
 
 ### 4. Power does not read the mode
 

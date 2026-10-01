@@ -2,6 +2,8 @@
 
 from pocketsat.spacecraft.base import (
     STEP_ORDER,
+    SnapshotBoard,
+    SnapshotReader,
     SpacecraftState,
     Subsystem,
     SubsystemSnapshot,
@@ -86,6 +88,8 @@ __all__ = [
     "PowerTruth",
     "RadioControls",
     "RadioMode",
+    "SnapshotBoard",
+    "SnapshotReader",
     "SpacecraftConfig",
     "SpacecraftControls",
     "SpacecraftInitialState",
