@@ -105,6 +105,13 @@ rather than requiring Python for every campaign.
 
 **Milestone:** another engineer could author a mission test from documented YAML.
 
+Planning note: scenarios supply a whole `SpacecraftConfig` and `SpacecraftInitialState`
+when the target is created (ADR-0005, #74). The DSL also needs a way to override single
+settings or starting values (for example "battery capacity -20%") on top of a named
+configuration. The settings are frozen dataclasses, so `dataclasses.replace()` already
+does this in Python; Phase 5 decides how scenarios express it in YAML and how invalid
+overrides are reported.
+
 ### Phase 6 — Deterministic Chaos Campaigns
 
 Add seeded variability across SNR, latency, packet loss, pass geometry, sensor noise,
@@ -116,6 +123,12 @@ exactly.
 
 Builds on: named RNG streams, campaign run seeds, and `run.json` (ADR-0003). The
 `pocketsat replay` command lands here.
+
+Planning note: once campaigns vary settings and starting conditions, `run.json` must
+record the `SpacecraftConfig` and `SpacecraftInitialState` each run used, so a failed
+run can be replayed from its record alone (ADR-0005, #74). That needs a new run-record
+schema version (`docs/run-record.md`). Until then, a run's configuration is fixed by its
+code version, which `run.json` already records.
 
 ### Phase 7 — Hardware-in-the-Loop (split into 7a and 7b)
 
