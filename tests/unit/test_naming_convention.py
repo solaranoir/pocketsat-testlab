@@ -45,7 +45,17 @@ UNITLESS_SUFFIXES = ("_id", "_count")
 """IDs and counts."""
 
 FRACTIONS = frozenset(
-    {"soc", "buffer_fill", "sensor_noise_scale", "battery_soc_override", "loss_probability"}
+    {
+        "soc",
+        "buffer_fill",
+        "sensor_noise_scale",
+        "battery_soc_override",
+        "loss_probability",
+        "low_battery_soc",
+        "low_battery_clear_soc",
+        "critical_battery_soc",
+        "critical_battery_clear_soc",
+    }
 )
 """Named fractions, kept in 0..1."""
 

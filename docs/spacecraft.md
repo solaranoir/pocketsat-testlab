@@ -75,14 +75,35 @@ The flight computer is not in `STEP_ORDER`: it runs after every subsystem, so it
 
 Telemetry (#54) encodes readings records only.
 
-## Power (#35)
+## Power (#35, #36)
 
-`pocketsat.spacecraft.Power` is built as `Power(config.power, initial.power, reader=board)`. Each tick it computes solar generation (`PowerConfig.solar_array_w` × `portable_cos_deg` of attitude's true pointing error, previous tick; zero in eclipse and at or beyond 90°), a total load of `base_load_w` plus `controls.extra_load_w`, integrates net power over `dt_us` into the SOC (clamped to 0..1), and derives the bus voltage linearly from the SOC between `battery_empty_v` and `battery_full_v`. Battery current is net power divided by bus voltage, positive while charging.
+`pocketsat.spacecraft.Power` is built as `Power(config.power, initial.power, reader=board)`. Each tick it:
 
-- The reader is optional. Without one, pointing is taken as ideal (factor 1.0). With one, attitude must be published on it, or `step()` raises the board's `KeyError`.
+1. computes solar generation: `PowerConfig.solar_array_w` × `portable_cos_deg` of attitude's true pointing error (previous tick); zero in eclipse and at or beyond 90°;
+2. sums the total load, in this order: `base_load_w` + payload draw (`PayloadTruth.power_w`) + attitude-control draw (`AttitudeTruth.control_power_w`) + transmit draw (`CommsTruth.transmit_power_w`) + survival heater draw (`ThermalTruth.heater_power_w`) + `controls.extra_load_w` (the `battery_drain` override). Every draw comes from a truth record of a subsystem that steps after power, so power sees it one tick late (see the cross-read table). Power never reads the mode or the subsystem commands (ADR-0004 §4);
+3. integrates net power (generation minus load) over `dt_us` into the SOC, clamped to 0..1, using true values only;
+4. derives the bus voltage linearly from the SOC between `battery_empty_v` and `battery_full_v`, and the battery current as net power divided by bus voltage, positive while charging;
+5. updates the readings (below).
+
+- **The reader is optional.** Without one (`reader=None`), pointing is ideal (factor 1.0) and there are no per-subsystem draws; only `base_load_w` and `extra_load_w` count. With one, attitude, thermal, payload, and comms must all be published on it, or `step()` raises the board's `KeyError`; tests use `fake_subsystems()` for the four others.
+- `reset(rng)` must be called before the first `step()` (it requests the noise stream); otherwise `step()` raises `RuntimeError`.
 - `EnvironmentState.battery_soc_override` pins the SOC (and so the bus voltage) while set, even with `extra_load_w` active; the drain still shows in `total_load_w` and the battery current (ADR-0004 §11). When the override clears, integration resumes from the pinned value.
-- Until #36, `PowerReadings` reports the true bus voltage, current, and SOC, with both flags `False`; #36 adds the per-subsystem loads, sensor noise, the SOC estimate, `frozen_sensors`, and the flags.
-- `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V) are provisional; #72 calibrates them.
+
+**Readings.** `PowerReadings` holds the reported values and flags (ADR-0004 §6 to §8):
+
+- **Noise.** Reported bus voltage and battery current are the true values plus noise from `portable_normal` on the stream `spacecraft.power.noise`, with standard deviations `voltage_noise_v` (default 0.008 V) and `current_noise_a` (default 0.01 A), each times `EnvironmentState.sensor_noise_scale` (0.0 gives the true values exactly). Two draws (voltage, then current) are taken every tick, frozen or not, so a freeze does not shift the noise that follows it. `portable_normal` is bounded at ±6σ.
+- **SOC estimate.** `soc` inverts the voltage curve on the *reported* voltage, `(bus_v - battery_empty_v) / (battery_full_v - battery_empty_v)`, clamped to 0..1, so noise and freezes carry through. At nominal noise it is within ±`6 × voltage_noise_v / 2.4 V` = **±0.02** of the true SOC (a hard bound, because the noise is bounded).
+- **Flags with hysteresis**, computed from the SOC estimate:
+
+  | Flag | Sets when the estimate falls below | Clears when the estimate rises above |
+  |---|---|---|
+  | `low_battery` | `low_battery_soc` = 0.30 | `low_battery_clear_soc` = 0.35 |
+  | `critical_battery` | `critical_battery_soc` = 0.15 | `critical_battery_clear_soc` = 0.20 |
+
+  Between the two thresholds a flag keeps its previous value. The hysteresis band (0.05) is wider than the estimate's full noise spread at nominal noise (0.04), so a steady true SOC near a threshold cannot make a flag flap; at `sensor_noise_scale` above 1.25 it can, while the true SOC stays within the band. `PowerConfig` validates that each clear threshold is above its set threshold and that critical's thresholds are at or below low's, so `critical_battery` is only ever set together with `low_battery`. After a reset each flag is set if the starting SOC is below its set threshold, and the readings equal the truth.
+- **`sensor_freeze`.** While `"power"` is in `controls.frozen_sensors`, the whole readings record (voltage, current, SOC estimate, and flags) holds exactly its last pre-freeze value with no noise, while the truth keeps evolving; a real threshold crossing during a freeze is hidden from the flags. On release, live readings resume and the flags continue from their pre-freeze state.
+
+All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V, the noise levels, and the flag thresholds) are provisional; #72 calibrates them. With the defaults and the shared fakes' draws (attitude control 0.5 W, transmit 1.0 W), a nominal 92-minute orbit with 35% eclipse is net positive (about +2.6 Wh per orbit), which the story-level test (`tests/sil/test_power_story.py`) checks over three orbits. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
 ## Attitude (#41)
 

@@ -174,7 +174,7 @@ This convention applies to every record dataclass in `pocketsat`: snapshots, con
 
 - **Rates** combine a unit with `_per_s` and so end in `_s` (for example `data_rate_bytes_per_s`, bytes per second).
 - **Numbers without a unit** are IDs (`_id`), counts (`_count`), or on the allowlist:
-  - named fractions, kept in 0..1: `soc`, `buffer_fill`, `sensor_noise_scale`, `battery_soc_override`, `loss_probability`
+  - named fractions, kept in 0..1: `soc`, `buffer_fill`, `sensor_noise_scale`, `battery_soc_override`, `loss_probability`, and the power flag thresholds `low_battery_soc`, `low_battery_clear_soc`, `critical_battery_soc`, `critical_battery_clear_soc` (#36)
   - existing unitless numbers: `sequence`, `version`, `schema_version`, `master_seed`
 - **Fractions** are named for what they are and kept in 0..1 (for example `soc`, `buffer_fill`), never percentages.
 - **Flags** are `bool` and live only on readings records. Their names are the `TelemetryFlags` member names (#54): `low_battery`, `critical_battery`, `over_temp`, `under_temp`. The contract owns the names (`READINGS_FLAGS`) and #54's enum matches them; adding a readings flag means reserving a bit in #54's flag table in the same change (in #54's issue text until #54 is implemented, then in `docs/protocol.md`). A boolean that describes equipment rather than a decision (for example `heater_on`, `receiver_on`) is a physical state, not a flag, and may sit on a truth record.
