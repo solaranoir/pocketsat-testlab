@@ -53,11 +53,11 @@ def _require_records(owner: object, **kinds: type) -> None:
 
 @dataclass(frozen=True)
 class PowerConfig:
-    """Power settings for the battery and solar model (#35).
+    """Power settings: battery and solar model (#35), sensors and flags (#36).
 
-    The power loads task (#36) adds its fields here. Every default is provisional: the
-    power and thermal budget (#72) calibrates them. The defaults describe a small
-    2S lithium-ion battery charged by a body-mounted array.
+    Every default is provisional: the power and thermal budget (#72) calibrates them.
+    The defaults describe a small 2S lithium-ion battery charged by a body-mounted
+    array.
 
     Attributes:
         battery_capacity_wh: Usable battery energy from empty (SOC 0) to full (SOC 1),
@@ -65,10 +65,28 @@ class PowerConfig:
         solar_array_w: Solar array output at ideal pointing (pointing error 0°) in
             sunlight, watts. Non-negative. Default 8.0.
         base_load_w: Always-on electrical load (avionics, receiver), watts.
-            Non-negative. Default 2.0. #36 adds the per-subsystem draws on top.
+            Non-negative. Default 2.0. The per-subsystem draws are added on top.
         battery_empty_v: Bus voltage at SOC 0, volts. Positive. Default 6.0.
         battery_full_v: Bus voltage at SOC 1, volts. Above ``battery_empty_v``.
             Default 8.4. Bus voltage is linear in SOC between the two.
+        voltage_noise_v: Standard deviation of the reported bus voltage's noise at
+            ``sensor_noise_scale`` 1.0, volts. Non-negative. Default 0.008, which puts
+            the SOC estimate within ±0.02 of true SOC (the noise is bounded at 6 sigma,
+            and 6 * 0.008 / 2.4 = 0.02).
+        current_noise_a: Standard deviation of the reported battery current's noise at
+            ``sensor_noise_scale`` 1.0, amperes. Non-negative. Default 0.01.
+        low_battery_soc: ``low_battery`` sets when the SOC estimate falls below this
+            fraction. Default 0.30.
+        low_battery_clear_soc: ``low_battery`` clears when the SOC estimate rises
+            above this fraction. Above ``low_battery_soc``; at most 1. Default 0.35.
+        critical_battery_soc: ``critical_battery`` sets when the SOC estimate falls
+            below this fraction. At most ``low_battery_soc``. Default 0.15.
+        critical_battery_clear_soc: ``critical_battery`` clears when the SOC estimate
+            rises above this fraction. Above ``critical_battery_soc`` and at most
+            ``low_battery_clear_soc``. Default 0.20.
+
+    The two orderings (critical at or below low, for both setting and clearing) mean
+    ``critical_battery`` is only ever set while ``low_battery`` is set.
 
     Raises:
         TypeError: A field is not a number.
@@ -80,13 +98,19 @@ class PowerConfig:
     base_load_w: float = 2.0
     battery_empty_v: float = 6.0
     battery_full_v: float = 8.4
+    voltage_noise_v: float = 0.008
+    current_noise_a: float = 0.01
+    low_battery_soc: float = 0.30
+    low_battery_clear_soc: float = 0.35
+    critical_battery_soc: float = 0.15
+    critical_battery_clear_soc: float = 0.20
 
     def __post_init__(self) -> None:
         if _require_number("battery_capacity_wh", self.battery_capacity_wh) <= 0:
             raise ValueError(
                 f"battery_capacity_wh must be positive, got {self.battery_capacity_wh}"
             )
-        for name in ("solar_array_w", "base_load_w"):
+        for name in ("solar_array_w", "base_load_w", "voltage_noise_v", "current_noise_a"):
             if _require_number(name, getattr(self, name)) < 0:
                 raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
         empty_v = _require_number("battery_empty_v", self.battery_empty_v)
@@ -96,6 +120,30 @@ class PowerConfig:
         if full_v <= empty_v:
             raise ValueError(
                 f"battery_full_v must be above battery_empty_v ({empty_v}), got {full_v}"
+            )
+        for name in (
+            "low_battery_soc",
+            "low_battery_clear_soc",
+            "critical_battery_soc",
+            "critical_battery_clear_soc",
+        ):
+            _require_in_range(name, getattr(self, name), 0.0, 1.0)
+        for flag in ("low_battery", "critical_battery"):
+            set_soc = getattr(self, f"{flag}_soc")
+            clear_soc = getattr(self, f"{flag}_clear_soc")
+            if clear_soc <= set_soc:
+                raise ValueError(
+                    f"{flag}_clear_soc must be above {flag}_soc ({set_soc}), got {clear_soc}"
+                )
+        if self.critical_battery_soc > self.low_battery_soc:
+            raise ValueError(
+                f"critical_battery_soc must be at most low_battery_soc "
+                f"({self.low_battery_soc}), got {self.critical_battery_soc}"
+            )
+        if self.critical_battery_clear_soc > self.low_battery_clear_soc:
+            raise ValueError(
+                f"critical_battery_clear_soc must be at most low_battery_clear_soc "
+                f"({self.low_battery_clear_soc}), got {self.critical_battery_clear_soc}"
             )
 
 

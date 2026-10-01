@@ -1,8 +1,10 @@
-"""Tests for the battery and solar power model (#35)."""
+"""Tests for the power subsystem: battery and solar model (#35), loads, sensors, and
+flags (#36)."""
 
 import dataclasses
 import math
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
@@ -14,7 +16,6 @@ from pocketsat.spacecraft import (
     Power,
     PowerConfig,
     PowerInitial,
-    PowerReadings,
     PowerSnapshot,
     PowerTruth,
     SnapshotBoard,
@@ -22,7 +23,12 @@ from pocketsat.spacecraft import (
     Subsystem,
     SubsystemStack,
 )
-from pocketsat.spacecraft.fakes import FakeSubsystem, default_snapshot, replace_truth
+from pocketsat.spacecraft.fakes import (
+    FakeSubsystem,
+    default_snapshot,
+    fake_subsystems,
+    replace_truth,
+)
 from pocketsat.targets.base import EnvironmentState
 
 TICK_US = 100_000
@@ -59,14 +65,28 @@ def _attitude(pointing_error_deg: float) -> AttitudeSnapshot:
     return snap
 
 
+def _others(**overrides: FakeSubsystem[Any]) -> list[FakeSubsystem[Any]]:
+    """Fakes of the four subsystems power reads, holding the defaults unless overridden."""
+    return [f for f in fake_subsystems(overrides) if f.name != "power"]
+
+
+def _stack(
+    fakes: list[FakeSubsystem[Any]],
+    soc: float = 0.5,
+    config: PowerConfig = CONFIG,
+    seed: int = 1,
+) -> tuple[SubsystemStack, Power]:
+    board = SnapshotBoard()
+    power = Power(config, PowerInitial(soc=soc), reader=board)
+    stack = SubsystemStack([power, *fakes], board=board)
+    stack.reset(RngFactory(seed))
+    return stack, power
+
+
 def _stack_with_attitude(
     attitude: FakeSubsystem[AttitudeSnapshot], soc: float = 0.5
 ) -> tuple[SubsystemStack, Power]:
-    board = SnapshotBoard()
-    power = Power(CONFIG, PowerInitial(soc=soc), reader=board)
-    stack = SubsystemStack([power, attitude], board=board)
-    stack.reset(RngFactory(1))
-    return stack, power
+    return _stack(_others(attitude=attitude), soc=soc)
 
 
 # --- Construction, configuration, reset ------------------------------------------------
@@ -85,6 +105,12 @@ def test_config_defaults_are_documented_values() -> None:
         base_load_w=2.0,
         battery_empty_v=6.0,
         battery_full_v=8.4,
+        voltage_noise_v=0.008,
+        current_noise_a=0.01,
+        low_battery_soc=0.30,
+        low_battery_clear_soc=0.35,
+        critical_battery_soc=0.15,
+        critical_battery_clear_soc=0.20,
     )
 
 
@@ -100,6 +126,15 @@ def test_config_defaults_are_documented_values() -> None:
         (lambda: PowerConfig(battery_full_v=6.0), ValueError),
         (lambda: PowerConfig(solar_array_w=True), TypeError),
         (lambda: PowerConfig(battery_capacity_wh="20"), TypeError),  # type: ignore[arg-type]
+        (lambda: PowerConfig(voltage_noise_v=-0.001), ValueError),
+        (lambda: PowerConfig(current_noise_a=float("inf")), ValueError),
+        (lambda: PowerConfig(low_battery_soc=-0.1), ValueError),
+        (lambda: PowerConfig(low_battery_clear_soc=1.1), ValueError),
+        (lambda: PowerConfig(low_battery_clear_soc=0.30), ValueError),
+        (lambda: PowerConfig(critical_battery_clear_soc=0.15), ValueError),
+        (lambda: PowerConfig(critical_battery_soc=0.31), ValueError),
+        (lambda: PowerConfig(critical_battery_clear_soc=0.36), ValueError),
+        (lambda: PowerConfig(low_battery_soc=True), TypeError),
     ],
 )
 def test_invalid_config_rejected(build: Callable[[], object], error: type[Exception]) -> None:
@@ -317,12 +352,11 @@ def test_without_reader_pointing_is_ideal() -> None:
     assert _truth(power).generation_w == 8.0
 
 
-def test_reader_without_attitude_raises() -> None:
-    board = SnapshotBoard()
-    power = Power(CONFIG, PowerInitial(), reader=board)
-    stack = SubsystemStack([power], board=board)
-    stack.reset(RngFactory(1))
-    with pytest.raises(KeyError, match="attitude"):
+@pytest.mark.parametrize("missing", ["thermal", "attitude", "payload", "comms"])
+def test_reader_missing_a_subsystem_raises(missing: str) -> None:
+    fakes = [f for f in _others() if f.name != missing]
+    stack, _ = _stack(fakes)
+    with pytest.raises(KeyError, match=missing):
         stack.step(TICK_US, SUN, CONTROLS)
 
 
@@ -360,7 +394,7 @@ def test_override_cleared_resumes_from_pinned_value() -> None:
 def test_override_beats_extra_load() -> None:
     power = _power(soc=0.8)
     drain = SpacecraftControls(extra_load_w=10.0)
-    pinned = EnvironmentState(sunlit=False, battery_soc_override=0.6)
+    pinned = EnvironmentState(sunlit=False, battery_soc_override=0.6, sensor_noise_scale=0.0)
     for _ in range(100):
         power.step(TICK_US, pinned, drain)
         truth = _truth(power)
@@ -382,20 +416,6 @@ def test_starting_charge_is_not_an_override() -> None:
 
 
 # --- Snapshot --------------------------------------------------------------------------
-
-
-def test_readings_report_truth_with_flags_clear_until_36() -> None:
-    power = _power(soc=0.05)
-    power.step(TICK_US, ECLIPSE, CONTROLS)
-    snap = power.snapshot()
-    assert isinstance(snap, PowerSnapshot)
-    assert snap.readings == PowerReadings(
-        bus_v=snap.truth.bus_v,
-        battery_current_a=snap.truth.battery_current_a,
-        soc=snap.truth.soc,
-        low_battery=False,
-        critical_battery=False,
-    )
 
 
 def test_snapshot_is_built_once_per_step() -> None:
