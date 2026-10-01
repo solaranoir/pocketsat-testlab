@@ -42,4 +42,7 @@ files = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-ra", "--strict-markers"]
+addopts = ["-ra", "--strict-markers", "-m", "not slow"]
+markers = [
+    "slow: multi-orbit story and integration tests; skipped by default, run with `pytest -m slow` (CI runs them in a separate job)",
+]

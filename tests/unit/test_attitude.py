@@ -506,6 +506,7 @@ def story_default() -> dict[str, object]:
     return _story_run(DEFAULT_INITIAL_STATE.attitude, seed=40)
 
 
+@pytest.mark.slow
 def test_story_reaches_and_stays_stabilized(story_default: dict[str, object]) -> None:
     assert story_default["ticks"] == STORY_ORBITS * 92 * TICKS_PER_MINUTE
     first = story_default["first_stabilized"]
@@ -514,6 +515,7 @@ def test_story_reaches_and_stays_stabilized(story_default: dict[str, object]) ->
     assert story_default["left_stabilized"] is False
 
 
+@pytest.mark.slow
 def test_story_is_deterministic(story_default: dict[str, object]) -> None:
     again = _story_run(DEFAULT_INITIAL_STATE.attitude, seed=40)
     assert again["digest"] == story_default["digest"]
@@ -523,6 +525,7 @@ def test_story_is_deterministic(story_default: dict[str, object]) -> None:
     assert other["reported_first_orbit"] != story_default["reported_first_orbit"]
 
 
+@pytest.mark.slow
 def test_story_solar_generation_follows_pointing() -> None:
     # Start with a high rate and the arrays facing away from the sun, in sunlight. One
     # orbit is enough to see the drop and the recovery; the three-orbit run above

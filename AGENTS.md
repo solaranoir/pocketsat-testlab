@@ -69,6 +69,8 @@ Before opening a PR, run:
 uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest
 ```
 
+Multi-orbit story and integration tests are marked `@pytest.mark.slow` and skipped by a plain `pytest` run. If your change touches simulation behavior, also run `uv run pytest -m slow`; CI runs them on every PR in a separate job. Mark any test that takes more than about a second `slow`.
+
 ## Workflow
 
 - **One issue per PR.** Branch name: `phase-N/short-description` (e.g. `phase-0/test-target-interface`).
