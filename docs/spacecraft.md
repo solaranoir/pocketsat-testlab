@@ -27,6 +27,8 @@ States are enums defined in the contract: `AttitudeState` (`TUMBLING`, `DETUMBLI
 
 The payload owns stored data and comms holds none (ADR-0004 §13): comms exposes only how much it may send this tick, and the flight computer (#56) moves chunks from the payload into DATA frames within that capacity.
 
+**Payload chunk store (#43).** The payload (`pocketsat.spacecraft.payload.Payload`) stores data as fixed-size chunks (`PayloadConfig.chunk_size_bytes`, at most `MAX_CHUNK_SIZE_BYTES` = 65 531, so a chunk plus its 4-byte ID fits in one DATA frame payload). Chunks are created in ID order and released as a prefix through `controls.payload.release_through_chunk_id`, so the stored chunks are exactly the IDs `oldest_unreleased_chunk_id` to `next_chunk_id - 1`, plus a partial chunk still accumulating. A chunk's content is a pure function of its ID, `chunk_content(chunk_id, chunk_size_bytes)` (documented and pinned in that module), which #56's DATA frames and the receiver share. At every tick `total_produced_bytes == buffered_bytes + total_released_bytes`. The payload acquires only while `controls.payload.enabled` is set and none of its inhibits (the payload rows of the table below) applies.
+
 ## Cross-subsystem reads
 
 Subsystems never hold references to each other; they read each other's snapshots through `SpacecraftState` (ADR-0004 §3). The timing rule, from #36: a subsystem earlier in `STEP_ORDER` is read as of the current tick, and a later one as of the previous tick.

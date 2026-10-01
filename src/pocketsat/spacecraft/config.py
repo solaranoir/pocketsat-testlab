@@ -19,7 +19,9 @@ pass them in.
 
 import math
 from dataclasses import dataclass, field
+from typing import Final
 
+from pocketsat.frame import MAX_PAYLOAD_SIZE
 from pocketsat.targets.base import ABSOLUTE_ZERO_C
 
 # --- Validation helpers ----------------------------------------------------------------
@@ -108,9 +110,69 @@ class AttitudeConfig:
     """Attitude settings. Fields are added by the attitude model (#41)."""
 
 
+CHUNK_ID_SIZE_BYTES: Final = 4
+"""Size of the chunk ID (uint32, big-endian) at the start of a DATA frame payload
+(#56)."""
+
+MAX_CHUNK_SIZE_BYTES: Final = MAX_PAYLOAD_SIZE - CHUNK_ID_SIZE_BYTES
+"""Largest allowed chunk, bytes: a chunk's content must fit in one DATA frame payload
+after the chunk ID. ``MAX_PAYLOAD_SIZE`` (65 535, the frame length field's limit,
+:mod:`pocketsat.frame`) minus :data:`CHUNK_ID_SIZE_BYTES`, so 65 531."""
+
+
 @dataclass(frozen=True)
 class PayloadConfig:
-    """Payload settings. Fields are added by the payload subsystem (#43)."""
+    """Payload settings (#43).
+
+    The defaults are provisional: illustrative values sized so a chunk's DATA frame
+    fits in a tick's nominal transmit capacity. The power and thermal budget (#72)
+    finalizes the power draws.
+
+    Attributes:
+        buffer_capacity_bytes: Buffer capacity, bytes. A positive whole number of
+            chunks (a multiple of ``chunk_size_bytes``), so the buffer fills exactly
+            on a chunk boundary.
+        chunk_size_bytes: Size of every chunk, bytes. Positive and at most
+            :data:`MAX_CHUNK_SIZE_BYTES`, so a chunk fits in one DATA frame (#56).
+        data_rate_bytes_per_s: True acquisition data rate while acquiring, bytes per
+            second. Non-negative.
+        idle_power_w: Draw while commanded on but not acquiring, watts. Non-negative.
+        acquiring_power_w: Draw while acquiring, watts. Non-negative.
+
+    Raises:
+        TypeError: A byte field is not an int, or a power field is not a number.
+        ValueError: A field is out of range, or the capacity is not a whole number of
+            chunks.
+    """
+
+    buffer_capacity_bytes: int = 65_536
+    chunk_size_bytes: int = 64
+    data_rate_bytes_per_s: int = 100
+    idle_power_w: float = 0.5
+    acquiring_power_w: float = 2.0
+
+    def __post_init__(self) -> None:
+        for name in ("buffer_capacity_bytes", "chunk_size_bytes", "data_rate_bytes_per_s"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+        if not 0 < self.chunk_size_bytes <= MAX_CHUNK_SIZE_BYTES:
+            raise ValueError(
+                f"chunk_size_bytes must be in 1..{MAX_CHUNK_SIZE_BYTES}, "
+                f"got {self.chunk_size_bytes}"
+            )
+        if self.buffer_capacity_bytes <= 0 or self.buffer_capacity_bytes % self.chunk_size_bytes:
+            raise ValueError(
+                "buffer_capacity_bytes must be a positive multiple of chunk_size_bytes "
+                f"({self.chunk_size_bytes}), got {self.buffer_capacity_bytes}"
+            )
+        if self.data_rate_bytes_per_s < 0:
+            raise ValueError(
+                f"data_rate_bytes_per_s must be non-negative, got {self.data_rate_bytes_per_s}"
+            )
+        for name in ("idle_power_w", "acquiring_power_w"):
+            if _require_number(name, getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
 
 
 @dataclass(frozen=True)
@@ -237,7 +299,9 @@ class PayloadInitial:
 
     Attributes:
         buffer_fill: Fraction of buffer capacity already filled, 0..1. Defaults to
-            empty. Chunk IDs always start at 0 (#43).
+            empty. Chunk IDs always start at 0 (#43): a non-empty start holds
+            ``floor(buffer_fill * buffer_capacity_bytes)`` bytes, stored as whole
+            chunks with IDs from 0 plus any partial chunk, and counted as produced.
 
     Raises:
         TypeError: ``buffer_fill`` is not a number.
