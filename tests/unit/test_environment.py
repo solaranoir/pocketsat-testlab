@@ -8,6 +8,7 @@ import pytest
 
 from pocketsat.core.clock import SimClock
 from pocketsat.environment import (
+    DEFAULT_ECLIPSE_AMBIENT_TEMP_C,
     DEFAULT_ECLIPSE_FRACTION,
     DEFAULT_ORBIT_PERIOD_US,
     EnvironmentModel,
@@ -117,13 +118,88 @@ def test_repeatable_across_instances() -> None:
 
 
 def test_other_fields_are_constant_and_configurable() -> None:
-    env = NominalEnvironment(orbit_period_us=100, eclipse_fraction=0.5, ambient_temp_c=-10.0)
+    env = NominalEnvironment(
+        orbit_period_us=100,
+        eclipse_fraction=0.5,
+        ambient_temp_c=-10.0,
+        eclipse_ambient_temp_c=-30.0,
+        sensor_noise_scale=2.0,
+    )
+    assert env.state_at(0).ambient_temp_c == -10.0  # sunlit
+    assert env.state_at(60).ambient_temp_c == -30.0  # eclipse
     for t in (0, 60):
         state = env.state_at(t)
-        assert state.ambient_temp_c == -10.0
-        assert state.sensor_noise_scale == 1.0
+        assert state.sensor_noise_scale == 2.0
         assert state.battery_soc_override is None
     assert NominalEnvironment().state_at(0) == EnvironmentState()
+
+
+# --- Eclipse ambient temperature (#73) ------------------------------------------------
+
+
+def test_default_eclipse_ambient() -> None:
+    assert DEFAULT_ECLIPSE_AMBIENT_TEMP_C == -20.0
+    env = NominalEnvironment()
+    assert env.state_at(0).ambient_temp_c == 20.0
+    assert env.state_at(env.sunlit_us).ambient_temp_c == -20.0
+
+
+def test_ambient_switches_exactly_at_boundaries() -> None:
+    env = NominalEnvironment(
+        orbit_period_us=1_000, eclipse_fraction=0.25, eclipse_ambient_temp_c=-40.0
+    )
+    expected = [
+        (0, 20.0),
+        (749, 20.0),  # last sunlit microsecond
+        (750, -40.0),  # first eclipse microsecond
+        (999, -40.0),  # last eclipse microsecond
+        (1_000, 20.0),  # next orbit, sunlit again
+        (1_750, -40.0),
+    ]
+    for now_us, ambient in expected:
+        state = env.state_at(now_us)
+        assert state.ambient_temp_c == ambient, now_us
+        assert state.sunlit is (ambient == 20.0)
+
+
+def test_eclipse_ambient_on_every_eclipse_tick_over_several_orbits() -> None:
+    env = NominalEnvironment(eclipse_ambient_temp_c=-25.0)  # 92 min orbit, 35% eclipse
+    clock = SimClock()  # 100 ms ticks
+    ticks = 3 * env.orbit_period_us // clock.tick_us
+    eclipse_ticks = 0
+    for _ in range(ticks):
+        state = env.sample(clock)
+        assert state.ambient_temp_c == (20.0 if state.sunlit else -25.0)
+        eclipse_ticks += not state.sunlit
+        clock.advance_one_tick()
+    assert eclipse_ticks == 3 * 19_320
+
+
+def test_eclipse_ambient_with_extreme_fractions() -> None:
+    always_dark = NominalEnvironment(
+        orbit_period_us=1_000, eclipse_fraction=1, eclipse_ambient_temp_c=-60.0
+    )
+    never_dark = NominalEnvironment(
+        orbit_period_us=1_000, eclipse_fraction=0, eclipse_ambient_temp_c=-60.0
+    )
+    assert {always_dark.state_at(t).ambient_temp_c for t in range(0, 3_000, 7)} == {-60.0}
+    assert {never_dark.state_at(t).ambient_temp_c for t in range(0, 3_000, 7)} == {20.0}
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (-273.15, ValueError),
+        (-300.0, ValueError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        ("-20", TypeError),
+        (True, TypeError),
+    ],
+)
+def test_invalid_eclipse_ambient_rejected(value: object, error: type[Exception]) -> None:
+    with pytest.raises(error, match="eclipse_ambient_temp_c"):
+        NominalEnvironment(eclipse_ambient_temp_c=value)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(("fraction", "always_sunlit"), [(0, True), (0.0, True), (1, False)])
