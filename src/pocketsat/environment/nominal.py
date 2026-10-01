@@ -5,18 +5,26 @@ The environment model runs on the orchestrator side and produces an
 function of simulated time, so the same time always gives the same state.
 """
 
+import math
 from decimal import Decimal
 from fractions import Fraction
 from typing import Final, Protocol, runtime_checkable
 
 from pocketsat.core.clock import SimClock, check_us
-from pocketsat.targets.base import EnvironmentState
+from pocketsat.targets.base import ABSOLUTE_ZERO_C, EnvironmentState
 
 DEFAULT_ORBIT_PERIOD_US: Final = 92 * 60 * 1_000_000
 """Default orbit period: 92 minutes, typical of low Earth orbit."""
 
 DEFAULT_ECLIPSE_FRACTION: Final = 0.35
 """Default fraction of each orbit spent in eclipse, typical of low Earth orbit."""
+
+DEFAULT_ECLIPSE_AMBIENT_TEMP_C: Final = -20.0
+"""Default effective ambient temperature during eclipse, °C.
+
+Chosen as a starting point so the battery survival heater (#38) cycles a few times per
+nominal eclipse. Provisional: the power and thermal budget (#72) sets the final value.
+"""
 
 
 @runtime_checkable
@@ -29,7 +37,7 @@ class EnvironmentModel(Protocol):
 
 
 class NominalEnvironment:
-    """A circular orbit with a fixed eclipse, and otherwise constant nominal conditions.
+    """A circular orbit with a fixed eclipse and a sunlit/eclipse ambient temperature.
 
     Each orbit starts in sunlight at ``now_us = 0`` (mod the period) and ends in
     eclipse. With period ``P`` and eclipse length ``E``:
@@ -40,6 +48,11 @@ class NominalEnvironment:
     ``E`` is ``eclipse_fraction * P`` rounded to the nearest microsecond. It is computed
     once, exactly (floats are read via their decimal form), so the cycle has no
     floating-point time and never drifts.
+
+    The ambient temperature is ``ambient_temp_c`` in sunlight and
+    ``eclipse_ambient_temp_c`` in eclipse, switching exactly at those boundaries. It is
+    a step change on purpose: the thermal model's time constant does the smoothing, so
+    the environment stays a pure function of time. The sensor noise scale is constant.
     """
 
     def __init__(
@@ -48,6 +61,7 @@ class NominalEnvironment:
         eclipse_fraction: float | Fraction = DEFAULT_ECLIPSE_FRACTION,
         *,
         ambient_temp_c: float = EnvironmentState.ambient_temp_c,
+        eclipse_ambient_temp_c: float = DEFAULT_ECLIPSE_AMBIENT_TEMP_C,
         sensor_noise_scale: float = EnvironmentState.sensor_noise_scale,
     ) -> None:
         """Create the model.
@@ -56,7 +70,9 @@ class NominalEnvironment:
             orbit_period_us: Orbit period in microseconds (default 92 minutes).
             eclipse_fraction: Fraction of each orbit in eclipse, ``0`` (always sunlit)
                 to ``1`` (always in eclipse). Default 0.35.
-            ambient_temp_c: Ambient temperature reported in every state.
+            ambient_temp_c: Ambient temperature in sunlight, °C (default 20).
+            eclipse_ambient_temp_c: Ambient temperature in eclipse, °C (default -20,
+                provisional until #72). Must be finite and above absolute zero.
             sensor_noise_scale: Sensor noise scale reported in every state.
 
         Raises:
@@ -67,6 +83,7 @@ class NominalEnvironment:
         check_us("orbit_period_us", orbit_period_us)
         if orbit_period_us == 0:
             raise ValueError("orbit_period_us must be positive")
+        _check_temperature("eclipse_ambient_temp_c", eclipse_ambient_temp_c)
         fraction = _exact_fraction(eclipse_fraction)
         if not 0 <= fraction <= 1:
             raise ValueError(f"eclipse_fraction must be in 0..1, got {eclipse_fraction}")
@@ -77,7 +94,9 @@ class NominalEnvironment:
             sunlit=True, ambient_temp_c=ambient_temp_c, sensor_noise_scale=sensor_noise_scale
         )
         self._eclipse = EnvironmentState(
-            sunlit=False, ambient_temp_c=ambient_temp_c, sensor_noise_scale=sensor_noise_scale
+            sunlit=False,
+            ambient_temp_c=eclipse_ambient_temp_c,
+            sensor_noise_scale=sensor_noise_scale,
         )
 
     @property
@@ -117,3 +136,12 @@ def _exact_fraction(value: float | Fraction) -> Fraction:
         return Fraction(Decimal(str(value))) if isinstance(value, float) else Fraction(value)
     except (ValueError, OverflowError, ArithmeticError) as exc:
         raise ValueError(f"eclipse_fraction must be finite, got {value}") from exc
+
+
+def _check_temperature(name: str, value: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{name} must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value}")
+    if value <= ABSOLUTE_ZERO_C:
+        raise ValueError(f"{name} must be above absolute zero, got {value}")
