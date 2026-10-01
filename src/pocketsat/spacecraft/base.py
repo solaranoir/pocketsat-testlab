@@ -113,21 +113,111 @@ class SpacecraftState:
         return snap
 
 
+class SnapshotReader(Protocol):
+    """Read-only access to other subsystems' latest published snapshots (#85).
+
+    A subsystem that reads others receives a reader when it is constructed, alongside
+    its settings and starting records (ADR-0005). Subsystems never hold references to
+    each other (ADR-0004 §3).
+    """
+
+    def get[S: SubsystemSnapshot](self, name: str, kind: type[S]) -> S:
+        """Return the named subsystem's latest published snapshot, checked to be ``kind``."""
+        ...
+
+    def state(self) -> SpacecraftState:
+        """Return every published snapshot as a :class:`SpacecraftState`."""
+        ...
+
+
+class SnapshotBoard:
+    """The latest published snapshot of each subsystem (#85).
+
+    :class:`SubsystemStack` publishes a subsystem's snapshot immediately after it is
+    reset and immediately after it steps. A subsystem reading the board during its own
+    step therefore sees:
+
+    - the **current** tick for subsystems earlier in the step order (already stepped),
+    - the **previous** tick for subsystems later in the step order (not yet stepped).
+
+    That is the cross-read rule of ADR-0004 §3, with no special cases. Subsystems see
+    the board only through the read-only :class:`SnapshotReader` interface.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty board."""
+        self._latest: dict[str, SubsystemSnapshot] = {}
+
+    def publish(self, name: str, snapshot: SubsystemSnapshot) -> None:
+        """Record ``snapshot`` as the latest for ``name``. Called by the stack only.
+
+        Raises:
+            TypeError: ``snapshot`` is not a :class:`SubsystemSnapshot`.
+        """
+        if not isinstance(snapshot, SubsystemSnapshot):
+            raise TypeError(
+                f"snapshot for {name!r} must be a SubsystemSnapshot, got {type(snapshot).__name__}"
+            )
+        self._latest[name] = snapshot
+
+    def clear(self) -> None:
+        """Forget every published snapshot. Called by the stack on reset."""
+        self._latest.clear()
+
+    def has(self, name: str) -> bool:
+        """Whether a snapshot has been published for ``name``."""
+        return name in self._latest
+
+    def get[S: SubsystemSnapshot](self, name: str, kind: type[S]) -> S:
+        """Return the named subsystem's latest published snapshot, checked to be ``kind``.
+
+        Raises:
+            KeyError: Nothing has been published for ``name``: it is not in the stack,
+                or the stack has not been reset yet.
+            TypeError: The snapshot is not a ``kind``.
+        """
+        try:
+            snap = self._latest[name]
+        except KeyError:
+            raise KeyError(
+                f"no snapshot published for {name!r}: it is not in the stack, "
+                "or the stack has not been reset"
+            ) from None
+        if not isinstance(snap, kind):
+            raise TypeError(f"snapshot for {name!r} is {type(snap).__name__}, not {kind.__name__}")
+        return snap
+
+    def state(self) -> SpacecraftState:
+        """Return every published snapshot as a :class:`SpacecraftState`."""
+        return SpacecraftState(subsystems=self._latest)
+
+
 class SubsystemStack:
     """Resets and steps a set of subsystems in a fixed order.
 
     Subsystems may be supplied in any order; they always run in ``order``. Not every
     name in ``order`` needs a subsystem, so the spacecraft can be built up one
     subsystem at a time.
+
+    The stack publishes each subsystem's snapshot to its :class:`SnapshotBoard` right
+    after that subsystem is reset or stepped, which is how subsystems read each other
+    (#85). To let subsystems read others, create the board first, pass it (as a
+    :class:`SnapshotReader`) to their constructors, then pass it to the stack.
     """
 
-    def __init__(self, subsystems: Iterable[Subsystem], order: tuple[str, ...] = STEP_ORDER):
+    def __init__(
+        self,
+        subsystems: Iterable[Subsystem],
+        order: tuple[str, ...] = STEP_ORDER,
+        board: SnapshotBoard | None = None,
+    ):
         """Create a stack.
 
         Args:
             subsystems: The subsystems to run.
             order: Step order by name. Defaults to :data:`STEP_ORDER`; tests may pass
                 their own.
+            board: Where snapshots are published. A new board is created if omitted.
 
         Raises:
             ValueError: A name is duplicated, or a subsystem's name is not in ``order``.
@@ -142,6 +232,12 @@ class SubsystemStack:
                 raise ValueError(f"subsystem {subsystem.name!r} is not in the step order {order}")
             by_name[subsystem.name] = subsystem
         self._subsystems = tuple(by_name[name] for name in order if name in by_name)
+        self._board = SnapshotBoard() if board is None else board
+
+    @property
+    def board(self) -> SnapshotBoard:
+        """The board this stack publishes snapshots to."""
+        return self._board
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -149,9 +245,12 @@ class SubsystemStack:
         return tuple(s.name for s in self._subsystems)
 
     def reset(self, rng: RngFactory) -> None:
-        """Reset every subsystem, in step order."""
+        """Reset every subsystem in step order, then publish their snapshots."""
+        self._board.clear()
         for subsystem in self._subsystems:
             subsystem.reset(rng)
+        for subsystem in self._subsystems:
+            self._board.publish(subsystem.name, subsystem.snapshot())
 
     def step(self, dt_us: int, env: EnvironmentState, controls: SpacecraftControls) -> None:
         """Step every subsystem by ``dt_us`` microseconds, in step order.
@@ -168,7 +267,19 @@ class SubsystemStack:
             raise TypeError(f"controls must be SpacecraftControls, got {type(controls).__name__}")
         for subsystem in self._subsystems:
             subsystem.step(dt_us, env, controls)
+            self._board.publish(subsystem.name, subsystem.snapshot())
 
     def snapshot(self) -> SpacecraftState:
-        """Collect every subsystem's snapshot, in step order."""
+        """Return every subsystem's latest snapshot, in step order.
+
+        After :meth:`reset`, this is the published state, so each subsystem's
+        ``snapshot()`` runs once per tick. Before the first reset it collects fresh
+        snapshots.
+        """
+        if all(self._board.has(s.name) for s in self._subsystems):
+            return SpacecraftState(
+                subsystems={
+                    s.name: self._board.get(s.name, SubsystemSnapshot) for s in self._subsystems
+                }
+            )
         return SpacecraftState(subsystems={s.name: s.snapshot() for s in self._subsystems})

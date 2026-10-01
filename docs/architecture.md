@@ -102,7 +102,7 @@ Each subsystem of the Python spacecraft model implements the `Subsystem` protoco
 4. **Payload**: collects data given the current pointing and power.
 5. **Comms**: last, so it can transmit what earlier subsystems produced this tick.
 
-The stack's `snapshot()` returns a `SpacecraftState` holding every subsystem's snapshot in that order, for telemetry and for other subsystems to read. Changing the order changes recorded behavior and requires a new ADR (ADR-0003 §2).
+The stack's `snapshot()` returns a `SpacecraftState` holding every subsystem's snapshot in that order, for telemetry and for other subsystems to read. Subsystems read each other through a `SnapshotBoard` (#85): the stack publishes each subsystem's snapshot immediately after it steps, so an earlier subsystem is read as of the current tick and a later one as of the previous tick (ADR-0004 §3). A reading subsystem receives the board, as the read-only `SnapshotReader`, when it is constructed; the `Subsystem` protocol is unchanged. See `docs/spacecraft.md`. Changing the order changes recorded behavior and requires a new ADR (ADR-0003 §2).
 
 #### Settings and starting state (ADR-0005)
 

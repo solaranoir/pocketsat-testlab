@@ -29,7 +29,15 @@ The payload owns stored data and comms holds none (ADR-0004 §13): comms exposes
 
 ## Cross-subsystem reads
 
-Subsystems never hold references to each other; they read each other's snapshots through `SpacecraftState` (ADR-0004 §3). The read mechanism is implemented in #36. The timing rule, also from #36: a subsystem earlier in `STEP_ORDER` is read as of the current tick, and a later one as of the previous tick.
+Subsystems never hold references to each other; they read each other's snapshots through `SpacecraftState` (ADR-0004 §3). The timing rule, from #36: a subsystem earlier in `STEP_ORDER` is read as of the current tick, and a later one as of the previous tick.
+
+**Mechanism (#85).** A `SnapshotBoard` holds each subsystem's latest snapshot. `SubsystemStack` publishes a subsystem's snapshot immediately after it is reset and immediately after it steps, so a reader automatically sees the current tick for subsystems that already stepped and the previous tick for those that haven't. A subsystem that reads others receives the board, typed as the read-only `SnapshotReader`, when it is constructed (alongside its settings and starting records), and calls `reader.get("power", PowerSnapshot)`. Create the board first, pass it to the subsystems, then to the stack:
+
+```python
+board = SnapshotBoard()
+thermal = Thermal(config.thermal, initial.thermal, reader=board)
+stack = SubsystemStack([power, thermal, ...], board=board)
+```
 
 Physics reads truth records; decisions read readings records. A test (`tests/unit/test_snapshot_contracts.py`) checks every row of these tables against the contract and the timing rule.
 
