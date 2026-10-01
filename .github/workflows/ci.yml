@@ -13,8 +13,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
-    name: Lint, types, tests
+  lint:
+    name: Lint and types
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -38,6 +38,29 @@ jobs:
 
       - name: Mypy
         run: uv run mypy src
+
+  test:
+    # Simulation results must be byte-identical across platforms (ADR-0006), so the
+    # full suite runs on both Linux and macOS.
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+        with:
+          version: "0.12.19"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-python: true
+
+      - name: Install dependencies
+        run: uv sync --locked
 
       - name: Pytest
         run: uv run pytest

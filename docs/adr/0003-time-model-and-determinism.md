@@ -101,3 +101,4 @@ Every run writes a `run.json` with:
   - **Done:** #19, implemented in #22.
 - Update `docs/architecture.md` sections 7 and 8 to reference the step order above.
   - **Done** in #23.
+- **Amended by ADR-0006** (#75): §3's list of stable methods is superseded. `gauss()` calls the platform maths library and is not portable across platforms; consumers use `random()`, `uniform()`, and `portable_normal()`. The original text above stays as written.
