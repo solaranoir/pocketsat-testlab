@@ -107,7 +107,98 @@ class ThermalConfig:
 
 @dataclass(frozen=True)
 class AttitudeConfig:
-    """Attitude settings. Fields are added by the attitude model (#41)."""
+    """Attitude settings for the scalar attitude model (#41, ADR-0006).
+
+    The model keeps two damped scalars, the pointing error and the angular rate
+    magnitude (see :mod:`pocketsat.spacecraft.attitude`). The defaults are illustrative:
+    they detumble the default starting state within a few minutes and hold the pointing
+    error near 2° under the default disturbance. The power and thermal budget (#72)
+    finalizes ``control_power_w``.
+
+    Attributes:
+        rate_damping_per_s: Rate damping while attitude control is on, per second: each
+            tick the rate shrinks by ``rate_damping_per_s * dt``. Non-negative.
+            Default 0.05 (a 20 s time constant).
+        pointing_gain_per_s: Pointing correction while attitude control is on, per
+            second: each tick the pointing error shrinks by ``pointing_gain_per_s * dt``.
+            Non-negative. Default 0.02 (a 50 s time constant).
+        disturbance_mean_dps_per_s: Mean of the disturbance acceleration on the rate
+            magnitude, degrees per second per second. Non-negative: with control off
+            the rate drifts upward toward tumbling. Default 0.002.
+        disturbance_sd_dps_per_s: Spread of the disturbance: the random part of each
+            tick's rate change is ``disturbance_sd_dps_per_s * sqrt(dt) * n`` with
+            ``n`` from ``portable_normal`` (a rate random walk, degrees per second per
+            square-root second). Non-negative. Default 0.002.
+        pointing_noise_deg: Standard deviation of the reported pointing error's noise
+            at ``sensor_noise_scale`` 1.0, degrees. Non-negative. Default 0.5.
+        rate_noise_dps: Standard deviation of the reported rate's noise at
+            ``sensor_noise_scale`` 1.0, degrees per second. Non-negative. Default 0.01.
+        tumbling_enter_rate_dps: Above this rate the state is ``TUMBLING``. Default 2.0.
+        tumbling_exit_rate_dps: ``TUMBLING`` becomes ``DETUMBLING`` once the rate is at
+            or below this with attitude control on. Default 1.5.
+        stabilized_exit_rate_dps: ``STABILIZED`` becomes ``DETUMBLING`` above this rate.
+            Default 0.4.
+        stabilized_enter_rate_dps: ``DETUMBLING`` becomes ``STABILIZED`` below this rate
+            (with the pointing error within ``stabilized_enter_pointing_error_deg``).
+            Default 0.2. The rate thresholds must satisfy ``0 < stabilized_enter <
+            stabilized_exit <= tumbling_exit < tumbling_enter``.
+        stabilized_enter_pointing_error_deg: ``STABILIZED`` requires the pointing error
+            at or below this on entry, degrees. Default 5.0.
+        stabilized_exit_pointing_error_deg: ``STABILIZED`` becomes ``DETUMBLING`` above
+            this pointing error, degrees. Default 10.0. The pointing thresholds must
+            satisfy ``0 <= enter < exit <= 180``.
+        control_power_w: Attitude-control draw while control is on, watts.
+            Non-negative. Default 0.5.
+
+    Raises:
+        TypeError: A field is not a number.
+        ValueError: A field is not finite, is out of range, or the thresholds are out
+            of order.
+    """
+
+    rate_damping_per_s: float = 0.05
+    pointing_gain_per_s: float = 0.02
+    disturbance_mean_dps_per_s: float = 0.002
+    disturbance_sd_dps_per_s: float = 0.002
+    pointing_noise_deg: float = 0.5
+    rate_noise_dps: float = 0.01
+    tumbling_enter_rate_dps: float = 2.0
+    tumbling_exit_rate_dps: float = 1.5
+    stabilized_exit_rate_dps: float = 0.4
+    stabilized_enter_rate_dps: float = 0.2
+    stabilized_enter_pointing_error_deg: float = 5.0
+    stabilized_exit_pointing_error_deg: float = 10.0
+    control_power_w: float = 0.5
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            if _require_number(name, getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+        if not (
+            0
+            < self.stabilized_enter_rate_dps
+            < self.stabilized_exit_rate_dps
+            <= self.tumbling_exit_rate_dps
+            < self.tumbling_enter_rate_dps
+        ):
+            raise ValueError(
+                "rate thresholds must satisfy 0 < stabilized_enter_rate_dps < "
+                "stabilized_exit_rate_dps <= tumbling_exit_rate_dps < "
+                f"tumbling_enter_rate_dps, got {self.stabilized_enter_rate_dps}, "
+                f"{self.stabilized_exit_rate_dps}, {self.tumbling_exit_rate_dps}, "
+                f"{self.tumbling_enter_rate_dps}"
+            )
+        if not (
+            self.stabilized_enter_pointing_error_deg
+            < self.stabilized_exit_pointing_error_deg
+            <= 180.0
+        ):
+            raise ValueError(
+                "pointing thresholds must satisfy 0 <= stabilized_enter_pointing_error_deg "
+                "< stabilized_exit_pointing_error_deg <= 180, got "
+                f"{self.stabilized_enter_pointing_error_deg}, "
+                f"{self.stabilized_exit_pointing_error_deg}"
+            )
 
 
 CHUNK_ID_SIZE_BYTES: Final = 4
@@ -276,16 +367,19 @@ class AttitudeInitial:
         pointing_error_deg: Pointing error from the sun-optimal attitude, 0..180 degrees.
         rate_dps: Angular rate magnitude, degrees per second, non-negative.
 
-    The defaults (stabilized, at rest) are provisional; the attitude model (#41)
-    chooses and documents the final values.
+    The defaults (#41) describe the spacecraft after deployment tip-off has been
+    partly damped: 1.0 °/s (below the default tumbling threshold, so it starts
+    ``DETUMBLING``) and 45° off the sun-optimal attitude. With the default
+    ``AttitudeConfig`` and control on, it reaches ``STABILIZED`` within a few minutes
+    of simulated time, well inside story #40's three-orbit run.
 
     Raises:
         TypeError: A field is not a number.
         ValueError: A field is not finite or is out of range.
     """
 
-    pointing_error_deg: float = 0.0
-    rate_dps: float = 0.0
+    pointing_error_deg: float = 45.0
+    rate_dps: float = 1.0
 
     def __post_init__(self) -> None:
         _require_in_range("pointing_error_deg", self.pointing_error_deg, 0.0, 180.0)

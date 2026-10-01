@@ -84,6 +84,33 @@ Telemetry (#54) encodes readings records only.
 - Until #36, `PowerReadings` reports the true bus voltage, current, and SOC, with both flags `False`; #36 adds the per-subsystem loads, sensor noise, the SOC estimate, `frozen_sensors`, and the flags.
 - `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V) are provisional; #72 calibrates them.
 
+## Attitude (#41)
+
+`pocketsat.spacecraft.Attitude` is built as `Attitude(config.attitude, initial.attitude)` and reads nothing from other subsystems. It models two damped scalars integrated step by step with portable arithmetic only (ADR-0006): the pointing error from the sun-optimal attitude (degrees, 0..180; at 0° the solar arrays point at the sun) and the angular rate magnitude (°/s). Each tick, with `dt` in seconds (`dt_us / 1_000_000`):
+
+1. **Rate.** While attitude control is on, the rate shrinks by `rate_damping_per_s * dt`. The seeded disturbance (stream `spacecraft.attitude.disturbance`, `portable_normal`) adds `disturbance_mean_dps_per_s * dt + disturbance_sd_dps_per_s * sqrt(dt) * n`. The disturbance is true dynamics, so `sensor_noise_scale` does not scale it. Its mean is non-negative, so with `controls.attitude.enabled` off nothing corrects it and the rate drifts up toward `TUMBLING`.
+2. **Pointing.** A rotation phase advances by `rate * dt`; the pointing error is the phase folded into 0..180°, so a tumbling spacecraft sweeps its error from 0° to 180° and back. While control is on, the error then shrinks by `pointing_gain_per_s * dt`; it settles near `rate / pointing_gain_per_s` (about 2° with the defaults).
+3. **State**, from the true rate and pointing error with hysteresis (thresholds in `AttitudeConfig`):
+   - `TUMBLING` whenever the rate is above `tumbling_enter_rate_dps` (2.0 °/s); left for `DETUMBLING` only with control on and the rate at or below `tumbling_exit_rate_dps` (1.5 °/s).
+   - `STABILIZED` once the rate is below `stabilized_enter_rate_dps` (0.2 °/s) and the error is at or below `stabilized_enter_pointing_error_deg` (5°); left for `DETUMBLING` when the rate exceeds `stabilized_exit_rate_dps` (0.4 °/s) or the error exceeds `stabilized_exit_pointing_error_deg` (10°).
+   - `DETUMBLING` otherwise: control is reducing the rate between the two.
+4. **Control draw.** `AttitudeTruth.control_power_w` is `AttitudeConfig.control_power_w` (0.5 W) while control is on and 0 while it is off; power (#36) adds it to the total load.
+
+Readings report the pointing error and rate with noise from the stream `spacecraft.attitude.noise` (standard deviations `pointing_noise_deg`, 0.5°, and `rate_noise_dps`, 0.01 °/s, times `EnvironmentState.sensor_noise_scale`; 0.0 gives the exact true values), clamped to their ranges. The reported state is decided from the reported values with the same rules. While `attitude` is in `controls.frozen_sensors`, the readings record holds exactly its last pre-freeze value while the truth keeps evolving; live readings resume on release. Before the first step the readings equal the truth and the control draw is zero.
+
+**Starting state.** `AttitudeInitial` defaults to 1.0 °/s and 45° of pointing error: deployment tip-off already partly damped, starting `DETUMBLING`. With the default settings and control on it reaches `STABILIZED` within a few minutes of simulated time.
+
+**Causes of tumbling:** the starting rate (`AttitudeInitial`), attitude control switched off (for example during BOOT, #49), and the seeded disturbance. An attitude-control failure fault is a Phase 4 candidate, not part of Phase 1.
+
+**Simplifications (Phase 1):**
+
+- A single scalar pointing error and a single scalar rate magnitude; no 3-D attitude.
+- No actuator saturation and no momentum build-up.
+- No environmental torques beyond the seeded disturbance.
+- Antenna pointing does not affect the link in Phase 1; Phase 3's RF channel may use the true pointing error for antenna gain.
+
+All `AttitudeConfig` defaults are illustrative; the power and thermal budget (#72) finalizes `control_power_w`.
+
 ## Shared test fakes
 
 `pocketsat.spacecraft.fakes` provides fakes that every test directory can import, following `EchoTarget`'s precedent. Subsystem tickets test against fakes of the subsystems they read, so none waits for another's implementation.
