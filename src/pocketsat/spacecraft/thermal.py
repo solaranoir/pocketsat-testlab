@@ -44,19 +44,40 @@ Each tick, with ``T_amb`` = ``EnvironmentState.ambient_temp_c``:
 ``dt <= C / (sum of the node's conductances)`` for both nodes. :attr:`Thermal.max_step_us`
 is that limit (500 s with the defaults); :meth:`Thermal.step` rejects a longer step.
 
-**Readings** (#39 adds the sensors). In #38 ``ThermalReadings`` reports the true
-temperatures exactly, with ``over_temp`` and ``under_temp`` always ``False``, and
-``frozen_sensors`` has no effect. #39 adds the sensor noise, the freeze, the flags, and
-their thresholds, and relates its ``under_temp`` threshold to the heater setpoints.
+**Readings** (:class:`ThermalReadings`, #39, ADR-0004 §6 to §8):
 
-Thermal uses no randomness.
+- The reported battery and electronics temperatures are the true values plus noise
+  drawn with :func:`~pocketsat.core.rng.portable_normal` from the stream
+  ``spacecraft.thermal.noise``, with standard deviation
+  ``ThermalConfig.temperature_noise_c`` times ``EnvironmentState.sensor_noise_scale``;
+  at scale 0.0 the readings equal the truth exactly. Two draws (battery, then
+  electronics) are taken every tick, frozen or not, so the noise in a given tick does
+  not depend on earlier freezes.
+- Each node has its own under- and over-temperature thresholds, each with hysteresis
+  (see :class:`ThermalConfig`), evaluated on that node's *reported* temperature: a
+  condition sets beyond its set threshold, clears beyond its clear threshold, and
+  between the two keeps its previous value. ``under_temp`` is set while the battery's
+  or the electronics' under-temperature condition is set, ``over_temp`` likewise:
+  the flags are OR-ed across the nodes.
+- While ``"thermal"`` is in ``controls.frozen_sensors``, the whole readings record
+  (both temperatures and both flags) holds exactly its last value before the freeze,
+  without noise, while the truth keeps evolving. A real threshold crossing during a
+  freeze is therefore hidden from the flags. On release, live readings resume and each
+  node's conditions continue from their pre-freeze state.
+
+The thermostat and the physics read only true values; the readings never feed back.
+After a reset the readings equal the true starting temperatures exactly (no noise),
+and each condition is set if its node's starting temperature is beyond its set
+threshold. :meth:`Thermal.reset` must be called before the first step (it requests
+the noise stream).
 """
 
 import math
+from random import Random
 from typing import Final
 
 from pocketsat.core.clock import check_us
-from pocketsat.core.rng import RngFactory
+from pocketsat.core.rng import RngFactory, portable_normal
 from pocketsat.spacecraft.base import SnapshotReader
 from pocketsat.spacecraft.config import ThermalConfig, ThermalInitial
 from pocketsat.spacecraft.controls import SpacecraftControls
@@ -68,7 +89,10 @@ from pocketsat.spacecraft.snapshots import (
 )
 from pocketsat.targets.base import EnvironmentState
 
-__all__ = ["Thermal"]
+__all__ = ["NOISE_STREAM", "Thermal"]
+
+NOISE_STREAM: Final = "spacecraft.thermal.noise"
+"""Name of the random stream the thermal sensors' noise is drawn from."""
 
 _US_PER_S: Final = 1_000_000
 
@@ -92,7 +116,8 @@ class Thermal:
         initial: ThermalInitial,
         reader: SnapshotReader | None = None,
     ) -> None:
-        """Create the thermal subsystem, at its starting state.
+        """Create the thermal subsystem, at its starting state. Call :meth:`reset`
+        before stepping.
 
         Args:
             config: Thermal settings.
@@ -122,6 +147,8 @@ class Thermal:
         self._heater_w = float(config.heater_power_w)
         self._on_c = float(config.heater_on_setpoint_c)
         self._off_c = float(config.heater_off_setpoint_c)
+        self._noise_c = float(config.temperature_noise_c)
+        self._noise: Random | None = None
         limit_s = min(
             config.battery_heat_capacity_j_per_c / (self._g_b + self._g_be),
             config.electronics_heat_capacity_j_per_c / (self._g_e + self._g_be),
@@ -136,26 +163,41 @@ class Thermal:
         return self._max_step_us
 
     def _restore(self) -> None:
+        config = self._config
         battery_c = float(self._initial.battery_c)
+        electronics_c = float(self._initial.electronics_c)
         self._battery_c = battery_c
-        self._electronics_c = float(self._initial.electronics_c)
+        self._electronics_c = electronics_c
         self._heater_on = battery_c < self._on_c
+        self._reported_battery_c = battery_c
+        self._reported_electronics_c = electronics_c
+        self._battery_under = battery_c < config.battery_under_temp_c
+        self._battery_over = battery_c > config.battery_over_temp_c
+        self._electronics_under = electronics_c < config.electronics_under_temp_c
+        self._electronics_over = electronics_c > config.electronics_over_temp_c
+        self._readings: ThermalReadings | None = None
         self._snapshot: ThermalSnapshot | None = None
 
     def reset(self, rng: RngFactory) -> None:
-        """Return to the starting temperatures. The heater starts on if the starting
-        battery temperature is below the ON setpoint. Requests no random streams."""
+        """Return to the starting temperatures, with the readings equal to them.
+
+        The heater starts on if the starting battery temperature is below the ON
+        setpoint, and each limit condition is set if its node starts beyond its set
+        threshold. Requests the ``spacecraft.thermal.noise`` stream.
+        """
+        self._noise = rng.stream(NOISE_STREAM)
         self._restore()
 
     def step(self, dt_us: int, env: EnvironmentState, controls: SpacecraftControls) -> None:
         """Advance both temperature nodes and the thermostat by ``dt_us`` microseconds.
 
-        ``controls`` is not read: thermal has no controls record, because the survival
-        heater is hardwired (ADR-0004 §12). #39 reads ``controls.frozen_sensors``.
+        Only ``controls.frozen_sensors`` is read: thermal has no controls record,
+        because the survival heater is hardwired (ADR-0004 §12).
 
         Raises:
             TypeError: ``dt_us`` is not an int.
             ValueError: ``dt_us`` is negative or longer than :attr:`max_step_us`.
+            RuntimeError: :meth:`reset` has not been called.
             KeyError: A reader was given but power is not published on it.
         """
         check_us("dt_us", dt_us)
@@ -163,6 +205,9 @@ class Thermal:
             raise ValueError(
                 f"dt_us must be at most {self._max_step_us} (thermal step limit), got {dt_us}"
             )
+        noise = self._noise
+        if noise is None:
+            raise RuntimeError("Thermal.reset() must be called before step()")
         heater_w = self._heater_w if self._heater_on else 0.0
         reader = self._reader
         if reader is None:
@@ -201,30 +246,68 @@ class Thermal:
             self._heater_on = battery_c < self._on_c
         self._snapshot = None
 
-    def snapshot(self) -> ThermalSnapshot:
-        """Return the thermal snapshot, built once per step.
+        # Readings: noise is drawn every tick, frozen or not.
+        sigma_c = self._noise_c * env.sensor_noise_scale
+        noise_battery_c = portable_normal(noise, 0.0, sigma_c)
+        noise_electronics_c = portable_normal(noise, 0.0, sigma_c)
+        if "thermal" in controls.frozen_sensors:
+            return
+        config = self._config
+        reported_battery_c = battery_c + noise_battery_c
+        reported_electronics_c = electronics_c + noise_electronics_c
+        # Per-node conditions with hysteresis, on the reported temperatures.
+        if self._battery_under:
+            self._battery_under = not reported_battery_c > config.battery_under_temp_clear_c
+        else:
+            self._battery_under = reported_battery_c < config.battery_under_temp_c
+        if self._battery_over:
+            self._battery_over = not reported_battery_c < config.battery_over_temp_clear_c
+        else:
+            self._battery_over = reported_battery_c > config.battery_over_temp_c
+        if self._electronics_under:
+            self._electronics_under = (
+                not reported_electronics_c > config.electronics_under_temp_clear_c
+            )
+        else:
+            self._electronics_under = reported_electronics_c < config.electronics_under_temp_c
+        if self._electronics_over:
+            self._electronics_over = (
+                not reported_electronics_c < config.electronics_over_temp_clear_c
+            )
+        else:
+            self._electronics_over = reported_electronics_c > config.electronics_over_temp_c
+        self._reported_battery_c = reported_battery_c
+        self._reported_electronics_c = reported_electronics_c
+        self._readings = None
 
-        The readings equal the true temperatures and both flags are ``False``; #39 adds
-        noise, the freeze, and the flags.
+    def snapshot(self) -> ThermalSnapshot:
+        """Return the thermal snapshot.
+
+        The truth record holds the true values; the readings record holds the reported
+        temperatures and the flags (see the module docstring). The snapshot is built
+        once per step, and while the readings are frozen the same readings record is
+        reused.
         """
         snap = self._snapshot
         if snap is None:
-            battery_c = self._battery_c
-            electronics_c = self._electronics_c
+            readings = self._readings
+            if readings is None:
+                readings = ThermalReadings(
+                    battery_c=self._reported_battery_c,
+                    electronics_c=self._reported_electronics_c,
+                    over_temp=self._battery_over or self._electronics_over,
+                    under_temp=self._battery_under or self._electronics_under,
+                )
+                self._readings = readings
             heater_on = self._heater_on
             snap = ThermalSnapshot(
                 truth=ThermalTruth(
-                    battery_c=battery_c,
-                    electronics_c=electronics_c,
+                    battery_c=self._battery_c,
+                    electronics_c=self._electronics_c,
                     heater_on=heater_on,
                     heater_power_w=self._heater_w if heater_on else 0.0,
                 ),
-                readings=ThermalReadings(
-                    battery_c=battery_c,
-                    electronics_c=electronics_c,
-                    over_temp=False,
-                    under_temp=False,
-                ),
+                readings=readings,
             )
             self._snapshot = snap
         return snap

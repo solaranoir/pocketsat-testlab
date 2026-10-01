@@ -105,7 +105,7 @@ Telemetry (#54) encodes readings records only.
 
 All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V, the noise levels, and the flag thresholds) are provisional; #72 calibrates them. With the defaults and the shared fakes' draws (attitude control 0.5 W, transmit 1.0 W), a nominal 92-minute orbit with 35% eclipse is net positive (about +2.6 Wh per orbit), which the story-level test (`tests/sil/test_power_story.py`) checks over three orbits. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
-## Thermal (#38)
+## Thermal (#38, #39)
 
 `pocketsat.spacecraft.Thermal` is built as `Thermal(config.thermal, initial.thermal, reader=board)`. It is a lumped model with two temperature nodes, the **battery** (`B`) and the **electronics** (`E`), integrated step by step with forward Euler and portable arithmetic only (ADR-0006, no `exp`). Each tick, with `dt` in seconds (`dt_us / 1_000_000`) and `T_amb` = `EnvironmentState.ambient_temp_c`:
 
@@ -124,8 +124,21 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 
 - **The reader is optional.** Without one (`reader=None`) there is no electrical heating, only the environment and the heater. With one, power must be published on it, or `step()` raises the board's `KeyError`.
 - **Step size.** Forward Euler is monotone (no overshoot or oscillation) while `dt <= C / (sum of the node's conductances)` for both nodes. `Thermal.max_step_us` is that limit (500 s with the defaults); `step()` raises `ValueError` beyond it.
-- **Reset.** `reset(rng)` returns to `ThermalInitial` (provisional 20 °C / 20 °C until #72). The heater starts on if the starting battery temperature is below the ON setpoint. Thermal uses no randomness and needs no reset before its first step.
-- **Readings (#39).** In #38, `ThermalReadings` reports the true temperatures exactly, with `over_temp` and `under_temp` always `False`, and `frozen_sensors` has no effect. #39 adds the sensor noise, the freeze, the two flags and their thresholds, and relates its `under_temp` threshold to the heater setpoints.
+- **Reset.** `reset(rng)` returns to `ThermalInitial` (provisional 20 °C / 20 °C until #72) and requests the noise stream; it must be called before the first `step()`, otherwise `step()` raises `RuntimeError`. The heater starts on if the starting battery temperature is below the ON setpoint.
+
+**Readings (#39).** `ThermalReadings` holds the reported temperatures and the limit flags (ADR-0004 §6 to §8). The thermostat and the physics never read them.
+
+- **Noise.** The reported battery and electronics temperatures are the true values plus noise from `portable_normal` on the stream `spacecraft.thermal.noise`, with standard deviation `temperature_noise_c` (default 0.2 °C) times `EnvironmentState.sensor_noise_scale` (0.0 gives the true values exactly). Two draws (battery, then electronics) are taken every tick, frozen or not, so a freeze does not shift the noise that follows it. `portable_normal` is bounded at ±6σ, so at nominal noise a reading is within ±1.2 °C of the truth.
+- **Flags, per node, with hysteresis.** The battery is heated and the electronics are not (in a nominal eclipse the electronics fall to about -2 °C while the heater holds the battery near 0 °C to 4 °C), so one shared threshold cannot serve both: each node has its own under- and over-temperature thresholds, evaluated on that node's *reported* temperature. A node's condition sets when its reading is beyond the set threshold, clears when it is beyond the clear threshold, and between the two keeps its previous value:
+
+  | Node | Under-temp sets below | clears above | Over-temp sets above | clears below |
+  |---|---|---|---|---|
+  | Battery | `battery_under_temp_c` = -5 °C | `battery_under_temp_clear_c` = -2 °C | `battery_over_temp_c` = 45 °C | `battery_over_temp_clear_c` = 42 °C |
+  | Electronics | `electronics_under_temp_c` = -25 °C | `electronics_under_temp_clear_c` = -22 °C | `electronics_over_temp_c` = 60 °C | `electronics_over_temp_clear_c` = 57 °C |
+
+  **The flags are OR-ed across the nodes:** `under_temp` is set while the battery's *or* the electronics' under-temperature condition is set, and `over_temp` likewise; a flag clears only when both nodes have cleared. Every hysteresis band (3 °C) is wider than a steady reading's full noise spread at nominal noise (2.4 °C), so a steady temperature near a threshold cannot make a flag flap; at `sensor_noise_scale` above 1.25 it can. After a reset each condition is set if its node's starting temperature is beyond its set threshold, and the readings equal the truth.
+- **Threshold order** (validated by `ThermalConfig`, `ValueError` otherwise). Battery: `battery_survival_limit_c` (default -10 °C) < `battery_under_temp_c` < `heater_on_setpoint_c` < `heater_off_setpoint_c`, with `battery_under_temp_c` at least 5 °C below `heater_on_setpoint_c` (the #72 margin rule), so the heater acts well before the flag. Each node: `under_temp_c` < `under_temp_clear_c` < `over_temp_clear_c` < `over_temp_c`. And `battery_over_temp_clear_c` is above `heater_off_setpoint_c`, so the heater cannot drive the battery into over-temperature. The survival limit is not used by the model; it anchors the order and documents the battery's survival range.
+- **`sensor_freeze`.** While `"thermal"` is in `controls.frozen_sensors`, the whole readings record (both temperatures and both flags) holds exactly its last pre-freeze value with no noise, while the truth (and the heater) keeps evolving; a real threshold crossing during a freeze is hidden from the flags. On release, live readings resume and each node's conditions continue from their pre-freeze state.
 
 **Settings** (`ThermalConfig`; every default is provisional, #72 calibrates them):
 
@@ -140,8 +153,16 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 | `heater_power_w` | 3.0 | survival heater power while on, W |
 | `heater_on_setpoint_c` | 0.0 | heater switches on below this battery temperature, °C |
 | `heater_off_setpoint_c` | 4.0 | heater switches off above this battery temperature, °C; above the ON setpoint |
+| `temperature_noise_c` | 0.2 | standard deviation of each reported temperature's noise at `sensor_noise_scale` 1.0, °C |
+| `battery_survival_limit_c` | -10.0 | lowest battery temperature it survives, °C; bottom of the threshold order |
+| `battery_under_temp_c` / `battery_under_temp_clear_c` | -5.0 / -2.0 | battery under-temperature set / clear, °C |
+| `battery_over_temp_c` / `battery_over_temp_clear_c` | 45.0 / 42.0 | battery over-temperature set / clear, °C |
+| `electronics_under_temp_c` / `electronics_under_temp_clear_c` | -25.0 / -22.0 | electronics under-temperature set / clear, °C |
+| `electronics_over_temp_c` / `electronics_over_temp_clear_c` | 60.0 / 57.0 | electronics over-temperature set / clear, °C |
 
-With these defaults, the real power subsystem, and the shared fakes' draws (3.5 W of load), the battery peaks near 28 °C and the electronics near 30 °C in a nominal orbit's sunlight. In the -20 °C eclipse the battery would settle near -11 °C without the heater and near +9 °C with it on, so the heater cycles between its setpoints, three times per nominal eclipse (about 12 minutes on in total), and at 1 s ticks the battery never falls more than a few hundredths of a degree below the ON setpoint. The values were chosen for that #73 behavior: heater power and battery isolation sized so the heater-on steady state is well above the OFF setpoint. `step()` plus `snapshot()` costs about 4 µs on a developer laptop.
+With these defaults, the real power subsystem, and the shared fakes' draws (3.5 W of load), the battery peaks near 28 °C and the electronics near 30 °C in a nominal orbit's sunlight. In the -20 °C eclipse the battery would settle near -11 °C without the heater and near +9 °C with it on, so the heater cycles between its setpoints, three times per nominal eclipse (about 12 minutes on in total), and at 1 s ticks the battery never falls more than a few hundredths of a degree below the ON setpoint. The values were chosen for that #73 behavior: heater power and battery isolation sized so the heater-on steady state is well above the OFF setpoint.
+
+The flag thresholds (#39) were chosen to leave nominal orbits clear with margin: over a nominal orbit the true battery stays within about 0 °C to 28 °C and the electronics within about -2 °C to 30 °C, so even with the ±1.2 °C noise bound the readings stay at least 3.8 °C from the nearest battery threshold (-5 °C) and more than 20 °C from the electronics thresholds. The battery thresholds bracket a lithium-ion pack's usual range (no charging below about 0 °C, at most about 45 °C); the electronics thresholds are below the -20 °C eclipse sink, which the electronics, always dissipating, never reach in a nominal orbit, and well below typical component limits. They are provisional; #72 calibrates them. The story-level test (`tests/sil/test_thermal_story.py`, story #37) runs the real power and thermal subsystems over three nominal orbits and checks that the temperatures settle into the same pattern each orbit, that no flag is raised, that the heater cycles in every eclipse with its draw in power's load, and determinism. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
 ## Attitude (#41)
 

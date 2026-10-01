@@ -149,7 +149,8 @@ class PowerConfig:
 
 @dataclass(frozen=True)
 class ThermalConfig:
-    """Thermal settings: the two-node lumped model and the battery survival heater (#38).
+    """Thermal settings: the two-node lumped model and the battery survival heater (#38),
+    and the sensors and limit flags (#39).
 
     The model is described in :mod:`pocketsat.spacecraft.thermal`. Every default is
     provisional: the power and thermal budget (#72) calibrates them. The defaults are
@@ -157,8 +158,16 @@ class ThermalConfig:
     the electronics near 32 °C in the nominal 20 °C sunlit ambient, and so that the
     survival heater cycles about three times in each nominal eclipse at the -20 °C
     eclipse ambient (#73): without the heater the battery would settle near -11 °C
-    there, with the heater on near +9 °C, so it switches between its setpoints. The
-    sensor noise and the ``over_temp``/``under_temp`` thresholds are added by #39.
+    there, with the heater on near +9 °C, so it switches between its setpoints.
+
+    **Limit flags (#39).** Each node has its own thresholds, because the battery is
+    heated and the electronics are not: the electronics fall well below the battery in
+    eclipse. Each threshold pair has hysteresis: a node's under-temperature condition
+    sets when its *reported* temperature falls below ``<node>_under_temp_c`` and clears
+    when it rises above ``<node>_under_temp_clear_c``; its over-temperature condition
+    sets above ``<node>_over_temp_c`` and clears below ``<node>_over_temp_clear_c``.
+    ``ThermalReadings.under_temp`` is set while either node's under-temperature
+    condition is set, and ``over_temp`` likewise (the flags are OR-ed across nodes).
 
     Attributes:
         battery_heat_capacity_j_per_c: Battery node heat capacity, joules per °C.
@@ -184,11 +193,44 @@ class ThermalConfig:
         heater_off_setpoint_c: The heater switches off when the true battery
             temperature rises above this, °C. Above ``heater_on_setpoint_c``.
             Default 4.0.
+        temperature_noise_c: Standard deviation of the noise on each reported
+            temperature at ``sensor_noise_scale`` 1.0, °C. Non-negative. Default 0.2,
+            so the noise (bounded at 6 sigma) spans at most ±1.2 °C, less than every
+            default hysteresis band (3 °C).
+        battery_survival_limit_c: Lowest temperature the battery survives, °C. Not
+            used by the model; it anchors the threshold order below. Default -10.0.
+        battery_under_temp_c: The battery's under-temperature condition sets when its
+            reported temperature falls below this, °C. Default -5.0.
+        battery_under_temp_clear_c: ... and clears when it rises above this, °C.
+            Default -2.0.
+        battery_over_temp_c: The battery's over-temperature condition sets when its
+            reported temperature rises above this, °C. Default 45.0.
+        battery_over_temp_clear_c: ... and clears when it falls below this, °C.
+            Default 42.0.
+        electronics_under_temp_c: The electronics' under-temperature condition sets
+            when their reported temperature falls below this, °C. Default -25.0.
+        electronics_under_temp_clear_c: ... and clears when it rises above this, °C.
+            Default -22.0.
+        electronics_over_temp_c: The electronics' over-temperature condition sets when
+            their reported temperature rises above this, °C. Default 60.0.
+        electronics_over_temp_clear_c: ... and clears when it falls below this, °C.
+            Default 57.0.
+
+    Threshold order (validated):
+
+    - Battery: ``battery_survival_limit_c < battery_under_temp_c < heater_on_setpoint_c
+      < heater_off_setpoint_c``, with ``battery_under_temp_c`` at least 5 °C below
+      ``heater_on_setpoint_c`` (the #72 margin rule), so the heater acts well before
+      the flag.
+    - Each node: ``under_temp_c < under_temp_clear_c < over_temp_clear_c <
+      over_temp_c``.
+    - The battery's ``battery_over_temp_clear_c`` is above ``heater_off_setpoint_c``,
+      so the heater cannot drive the battery into over-temperature.
 
     Raises:
         TypeError: A field is not a number.
-        ValueError: A field is not finite or is out of range, or the setpoints are out
-            of order.
+        ValueError: A field is not finite or is out of range, or the setpoints or
+            thresholds are out of order.
     """
 
     battery_heat_capacity_j_per_c: float = 80.0
@@ -200,6 +242,16 @@ class ThermalConfig:
     heater_power_w: float = 3.0
     heater_on_setpoint_c: float = 0.0
     heater_off_setpoint_c: float = 4.0
+    temperature_noise_c: float = 0.2
+    battery_survival_limit_c: float = -10.0
+    battery_under_temp_c: float = -5.0
+    battery_under_temp_clear_c: float = -2.0
+    battery_over_temp_c: float = 45.0
+    battery_over_temp_clear_c: float = 42.0
+    electronics_under_temp_c: float = -25.0
+    electronics_under_temp_clear_c: float = -22.0
+    electronics_over_temp_c: float = 60.0
+    electronics_over_temp_clear_c: float = 57.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -210,18 +262,44 @@ class ThermalConfig:
         ):
             if _require_number(name, getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
-        for name in ("coupling_conductance_w_per_c", "heater_power_w"):
+        for name in ("coupling_conductance_w_per_c", "heater_power_w", "temperature_noise_c"):
             if _require_number(name, getattr(self, name)) < 0:
                 raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
         _require_in_range("battery_dissipation_fraction", self.battery_dissipation_fraction, 0, 1)
-        for name in ("heater_on_setpoint_c", "heater_off_setpoint_c"):
+        for name in (
+            "heater_on_setpoint_c",
+            "heater_off_setpoint_c",
+            "battery_survival_limit_c",
+            *(
+                f"{node}_{kind}_c"
+                for node in ("battery", "electronics")
+                for kind in ("under_temp", "under_temp_clear", "over_temp", "over_temp_clear")
+            ),
+        ):
             if _require_number(name, getattr(self, name)) <= ABSOLUTE_ZERO_C:
                 raise ValueError(f"{name} must be above absolute zero, got {getattr(self, name)}")
-        if self.heater_off_setpoint_c <= self.heater_on_setpoint_c:
+
+        def require_above(name: str, lower: str) -> None:
+            value, bound = getattr(self, name), getattr(self, lower)
+            if value <= bound:
+                raise ValueError(f"{name} must be above {lower} ({bound}), got {value}")
+
+        require_above("heater_off_setpoint_c", "heater_on_setpoint_c")
+        # Battery threshold order (#39): survival < under_temp < heater ON < heater OFF.
+        require_above("battery_under_temp_c", "battery_survival_limit_c")
+        require_above("heater_on_setpoint_c", "battery_under_temp_c")
+        margin_c = 5.0  # the #72 margin rule
+        if self.heater_on_setpoint_c - self.battery_under_temp_c < margin_c:
             raise ValueError(
-                f"heater_off_setpoint_c must be above heater_on_setpoint_c "
-                f"({self.heater_on_setpoint_c}), got {self.heater_off_setpoint_c}"
+                f"battery_under_temp_c must be at least {margin_c} °C below "
+                f"heater_on_setpoint_c ({self.heater_on_setpoint_c}), "
+                f"got {self.battery_under_temp_c}"
             )
+        for node in ("battery", "electronics"):
+            require_above(f"{node}_under_temp_clear_c", f"{node}_under_temp_c")
+            require_above(f"{node}_over_temp_clear_c", f"{node}_under_temp_clear_c")
+            require_above(f"{node}_over_temp_c", f"{node}_over_temp_clear_c")
+        require_above("battery_over_temp_clear_c", "heater_off_setpoint_c")
 
 
 @dataclass(frozen=True)
