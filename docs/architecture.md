@@ -104,6 +104,15 @@ Each subsystem of the Python spacecraft model implements the `Subsystem` protoco
 
 The stack's `snapshot()` returns a `SpacecraftState` holding every subsystem's snapshot in that order, for telemetry and for other subsystems to read. Changing the order changes recorded behavior and requires a new ADR (ADR-0003 §2).
 
+#### Settings and starting state (ADR-0005)
+
+Each subsystem is built with two records from `pocketsat.spacecraft.config`, and `reset(rng)` returns to them; the `Subsystem` protocol is unchanged.
+
+- **Settings** (`SpacecraftConfig`: `PowerConfig`, `ThermalConfig`, `AttitudeConfig`, `PayloadConfig`, `CommsConfig`) describe what the spacecraft is. `NOMINAL_CONFIG` is the nominal set; the power and thermal budget (#72) adds a stressed set.
+- **Starting state** (`SpacecraftInitialState`: `PowerInitial`, `ThermalInitial`, `AttitudeInitial`, `PayloadInitial`) describes where it starts. Values are validated and are plain values, never random. Communications has no starting record.
+
+Scenarios supply both when the target is created (`SilTarget(config=..., initial=...)`), not through `TestTarget.reset()`, and `reset(seed)` returns to exactly that. Single values can be changed on top of a named set with `dataclasses.replace()`. The flight computer always starts in BOOT. A HIL target that can't honor starting conditions makes such a scenario fail up front.
+
 #### Controls from the flight computer (ADR-0004)
 
 The flight computer commands subsystems through one frozen `SpacecraftControls` record per tick (`pocketsat.spacecraft.controls`), which `SubsystemStack.step` passes to every subsystem. It is built from per-subsystem records plus fault overrides:
