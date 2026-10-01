@@ -172,6 +172,7 @@ This convention applies to every record dataclass in `pocketsat`: snapshots, con
   | `_hz` | hertz |
   | `_db` | decibels |
 
+- **Rates** combine a unit with `_per_s` and so end in `_s` (for example `data_rate_bytes_per_s`, bytes per second).
 - **Numbers without a unit** are IDs (`_id`), counts (`_count`), or on the allowlist:
   - named fractions, kept in 0..1: `soc`, `buffer_fill`, `sensor_noise_scale`, `battery_soc_override`, `loss_probability`
   - existing unitless numbers: `sequence`, `version`, `schema_version`, `master_seed`

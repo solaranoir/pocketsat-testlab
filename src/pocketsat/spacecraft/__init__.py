@@ -32,6 +32,13 @@ from pocketsat.spacecraft.controls import (
     RadioMode,
     SpacecraftControls,
 )
+from pocketsat.spacecraft.payload import (
+    CHUNK_ID_SIZE_BYTES,
+    MAX_CHUNK_ID,
+    MAX_CHUNK_SIZE_BYTES,
+    Payload,
+    chunk_content,
+)
 from pocketsat.spacecraft.power import Power
 from pocketsat.spacecraft.snapshots import (
     READINGS_FLAGS,
@@ -57,7 +64,10 @@ from pocketsat.spacecraft.snapshots import (
 )
 
 __all__ = [
+    "CHUNK_ID_SIZE_BYTES",
     "DEFAULT_INITIAL_STATE",
+    "MAX_CHUNK_ID",
+    "MAX_CHUNK_SIZE_BYTES",
     "NOMINAL_CONFIG",
     "READINGS_FLAGS",
     "SENSOR_SUBSYSTEMS",
@@ -75,6 +85,7 @@ __all__ = [
     "CommsSnapshot",
     "CommsTruth",
     "ContractSnapshot",
+    "Payload",
     "PayloadConfig",
     "PayloadControls",
     "PayloadInitial",
@@ -104,4 +115,5 @@ __all__ = [
     "ThermalReadings",
     "ThermalSnapshot",
     "ThermalTruth",
+    "chunk_content",
 ]
