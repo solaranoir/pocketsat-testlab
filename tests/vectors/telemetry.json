@@ -1,0 +1,715 @@
+{
+  "description": "PocketSat TELEMETRY payload test vectors (#54). Shared by Python and firmware tests. See README.md in this directory and docs/protocol.md.",
+  "payload_size": 26,
+  "frame_size": 36,
+  "valid_telemetry": [
+    {
+      "name": "nominal_no_flags",
+      "note": "Typical NOMINAL-mode values; no flag set.",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.4,
+          "soc": 0.85,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 0,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7400,
+        "soc_permille": 850,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e24000030000010202021ce803520721099200001000015e",
+      "sequence": 1,
+      "crc": 45944,
+      "frame_hex": "a55a01020001001a0001e24000030000010202021ce803520721099200001000015eb378"
+    },
+    {
+      "name": "flag_low_battery_only",
+      "note": "Only low_battery set (bit 0).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.4,
+          "soc": 0.85,
+          "low_battery": true,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 1,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7400,
+        "soc_permille": 850,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e24000030001010202021ce803520721099200001000015e",
+      "sequence": 2,
+      "crc": 27756,
+      "frame_hex": "a55a01020002001a0001e24000030001010202021ce803520721099200001000015e6c6c"
+    },
+    {
+      "name": "flag_critical_battery_only",
+      "note": "Only critical_battery set (bit 1).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.4,
+          "soc": 0.85,
+          "low_battery": false,
+          "critical_battery": true
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 2,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7400,
+        "soc_permille": 850,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e24000030002010202021ce803520721099200001000015e",
+      "sequence": 3,
+      "crc": 61066,
+      "frame_hex": "a55a01020003001a0001e24000030002010202021ce803520721099200001000015eee8a"
+    },
+    {
+      "name": "flag_over_temp_only",
+      "note": "Only over_temp set (bit 4).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.4,
+          "soc": 0.85,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": true,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 16,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7400,
+        "soc_permille": 850,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e24000030010010202021ce803520721099200001000015e",
+      "sequence": 4,
+      "crc": 32824,
+      "frame_hex": "a55a01020004001a0001e24000030010010202021ce803520721099200001000015e8038"
+    },
+    {
+      "name": "flag_under_temp_only",
+      "note": "Only under_temp set (bit 5).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.4,
+          "soc": 0.85,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": false,
+          "under_temp": true
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 32,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7400,
+        "soc_permille": 850,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e24000030020010202021ce803520721099200001000015e",
+      "sequence": 5,
+      "crc": 8249,
+      "frame_hex": "a55a01020005001a0001e24000030020010202021ce803520721099200001000015e2039"
+    },
+    {
+      "name": "all_flags",
+      "note": "Every assigned flag set: flags = 0x0033.",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 4,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 6.1,
+          "soc": 0.04,
+          "low_battery": true,
+          "critical_battery": true
+        },
+        "thermal": {
+          "battery_c": 18.25,
+          "electronics_c": 24.5,
+          "over_temp": true,
+          "under_temp": true
+        },
+        "attitude": {
+          "pointing_error_deg": 3.5,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 51,
+        "mode": 4,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 6100,
+        "soc_permille": 40,
+        "battery_centi_c": 1825,
+        "electronics_centi_c": 2450,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 350
+      },
+      "payload_hex": "0001e240000300330402020217d400280721099200001000015e",
+      "sequence": 6,
+      "crc": 35882,
+      "frame_hex": "a55a01020006001a0001e240000300330402020217d400280721099200001000015e8c2a"
+    },
+    {
+      "name": "at_upper_limits",
+      "note": "Every field exactly at its largest wire value.",
+      "input": {
+        "uptime_ms": 4294967295,
+        "mode_id": 5,
+        "boot_count": 65535,
+        "power": {
+          "bus_v": 65.535,
+          "soc": 1.0,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 327.67,
+          "electronics_c": 327.67,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 180.0,
+          "state": "DETUMBLING"
+        },
+        "payload": {
+          "buffered_bytes": 4294967295,
+          "state": "IDLE"
+        },
+        "comms": {
+          "radio_mode": "RX_ONLY"
+        }
+      },
+      "fields": {
+        "uptime_ms": 4294967295,
+        "boot_count": 65535,
+        "flags": 0,
+        "mode": 5,
+        "radio_mode": 1,
+        "attitude_state": 1,
+        "payload_state": 1,
+        "bus_mv": 65535,
+        "soc_permille": 1000,
+        "battery_centi_c": 32767,
+        "electronics_centi_c": 32767,
+        "buffered_bytes": 4294967295,
+        "pointing_error_centi_deg": 18000
+      },
+      "payload_hex": "ffffffffffff000005010101ffff03e87fff7fffffffffff4650",
+      "sequence": 7,
+      "crc": 4203,
+      "frame_hex": "a55a01020007001affffffffffff000005010101ffff03e87fff7fffffffffff4650106b"
+    },
+    {
+      "name": "at_lower_limits",
+      "note": "Every field exactly at its smallest wire value.",
+      "input": {
+        "uptime_ms": 0,
+        "mode_id": 0,
+        "boot_count": 0,
+        "power": {
+          "bus_v": 0.0,
+          "soc": 0.0,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": -327.68,
+          "electronics_c": -327.68,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 0.0,
+          "state": "TUMBLING"
+        },
+        "payload": {
+          "buffered_bytes": 0,
+          "state": "OFF"
+        },
+        "comms": {
+          "radio_mode": "OFF"
+        }
+      },
+      "fields": {
+        "uptime_ms": 0,
+        "boot_count": 0,
+        "flags": 0,
+        "mode": 0,
+        "radio_mode": 0,
+        "attitude_state": 0,
+        "payload_state": 0,
+        "bus_mv": 0,
+        "soc_permille": 0,
+        "battery_centi_c": -32768,
+        "electronics_centi_c": -32768,
+        "buffered_bytes": 0,
+        "pointing_error_centi_deg": 0
+      },
+      "payload_hex": "0000000000000000000000000000000080008000000000000000",
+      "sequence": 8,
+      "crc": 36262,
+      "frame_hex": "a55a01020008001a00000000000000000000000000000000800080000000000000008da6"
+    },
+    {
+      "name": "beyond_upper_limits",
+      "note": "Values above every limit saturate; uptime wraps.",
+      "input": {
+        "uptime_ms": 4294967301,
+        "mode_id": 2,
+        "boot_count": 70000,
+        "power": {
+          "bus_v": 100.0,
+          "soc": 1.02,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": 400.0,
+          "electronics_c": 1e+300,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 181.0,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 1099511627776,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 5,
+        "boot_count": 65535,
+        "flags": 0,
+        "mode": 2,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 65535,
+        "soc_permille": 1000,
+        "battery_centi_c": 32767,
+        "electronics_centi_c": 32767,
+        "buffered_bytes": 4294967295,
+        "pointing_error_centi_deg": 18000
+      },
+      "payload_hex": "00000005ffff000002020202ffff03e87fff7fffffffffff4650",
+      "sequence": 9,
+      "crc": 4595,
+      "frame_hex": "a55a01020009001a00000005ffff000002020202ffff03e87fff7fffffffffff465011f3"
+    },
+    {
+      "name": "beyond_lower_limits",
+      "note": "Values below every limit saturate.",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 3,
+        "boot_count": 3,
+        "power": {
+          "bus_v": -0.5,
+          "soc": -0.01,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": -400.0,
+          "electronics_c": -1e+300,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": -0.004,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 0,
+        "mode": 3,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 0,
+        "soc_permille": 0,
+        "battery_centi_c": -32768,
+        "electronics_centi_c": -32768,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 0
+      },
+      "payload_hex": "0001e24000030000030202020000000080008000000010000000",
+      "sequence": 10,
+      "crc": 31914,
+      "frame_hex": "a55a0102000a001a0001e240000300000302020200000000800080000000100000007caa"
+    },
+    {
+      "name": "infinities_saturate",
+      "note": "+inf saturates to the maximum, -inf to the minimum.",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": "inf",
+          "soc": "-inf",
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": "inf",
+          "electronics_c": "-inf",
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": "inf",
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 0,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 65535,
+        "soc_permille": 0,
+        "battery_centi_c": 32767,
+        "electronics_centi_c": -32768,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 18000
+      },
+      "payload_hex": "0001e2400003000001020202ffff00007fff8000000010004650",
+      "sequence": 11,
+      "crc": 51651,
+      "frame_hex": "a55a0102000b001a0001e2400003000001020202ffff00007fff8000000010004650c9c3"
+    },
+    {
+      "name": "rounding_half_away_from_zero",
+      "note": "Products that are exact halves round away from zero; 2.675 * 100 is 267.5 in double, so it rounds to 268 (decimal rounding of 2.675 would give 267).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 7.0005,
+          "soc": 0.4995,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": -0.005,
+          "electronics_c": 2.675,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 0.125,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 0,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 7001,
+        "soc_permille": 500,
+        "battery_centi_c": -1,
+        "electronics_centi_c": 268,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 13
+      },
+      "payload_hex": "0001e24000030000010202021b5901f4ffff010c00001000000d",
+      "sequence": 12,
+      "crc": 28686,
+      "frame_hex": "a55a0102000c001a0001e24000030000010202021b5901f4ffff010c00001000000d700e"
+    },
+    {
+      "name": "rounding_below_half",
+      "note": "Products below a half round toward zero; 1.005 * 100 is 100.49999999999999 in double, so it rounds to 100 (decimal rounding of 1.005 would give 101).",
+      "input": {
+        "uptime_ms": 123456,
+        "mode_id": 1,
+        "boot_count": 3,
+        "power": {
+          "bus_v": 3.3004,
+          "soc": 0.12349,
+          "low_battery": false,
+          "critical_battery": false
+        },
+        "thermal": {
+          "battery_c": -10.004,
+          "electronics_c": 1.005,
+          "over_temp": false,
+          "under_temp": false
+        },
+        "attitude": {
+          "pointing_error_deg": 45.674,
+          "state": "STABILIZED"
+        },
+        "payload": {
+          "buffered_bytes": 4096,
+          "state": "ACQUIRING"
+        },
+        "comms": {
+          "radio_mode": "RX_TX"
+        }
+      },
+      "fields": {
+        "uptime_ms": 123456,
+        "boot_count": 3,
+        "flags": 0,
+        "mode": 1,
+        "radio_mode": 2,
+        "attitude_state": 2,
+        "payload_state": 2,
+        "bus_mv": 3300,
+        "soc_permille": 123,
+        "battery_centi_c": -1000,
+        "electronics_centi_c": 100,
+        "buffered_bytes": 4096,
+        "pointing_error_centi_deg": 4567
+      },
+      "payload_hex": "0001e24000030000010202020ce4007bfc1800640000100011d7",
+      "sequence": 13,
+      "crc": 35071,
+      "frame_hex": "a55a0102000d001a0001e24000030000010202020ce4007bfc1800640000100011d788ff"
+    }
+  ],
+  "decoder_ignores": [
+    {
+      "name": "reserved_flag_bits_ignored",
+      "note": "Every flag bit set on the wire; the decoder keeps only the assigned bits (0x0033).",
+      "payload_hex": "0001e2400003ffff010202021ce803520721099200001000015e",
+      "decoded_flags": 51
+    }
+  ],
+  "invalid_payloads": [
+    {
+      "name": "empty",
+      "payload_hex": "",
+      "error": "size"
+    },
+    {
+      "name": "one_byte_short",
+      "payload_hex": "0001e24000030000010202021ce80352072109920000100001",
+      "error": "size"
+    },
+    {
+      "name": "one_byte_long",
+      "payload_hex": "0001e24000030000010202021ce803520721099200001000015e00",
+      "error": "size"
+    },
+    {
+      "name": "unknown_mode",
+      "payload_hex": "0001e24000030000060202021ce803520721099200001000015e",
+      "error": "mode"
+    },
+    {
+      "name": "unknown_radio_mode",
+      "payload_hex": "0001e24000030000010302021ce803520721099200001000015e",
+      "error": "radio_mode"
+    },
+    {
+      "name": "unknown_attitude_state",
+      "payload_hex": "0001e24000030000010203021ce803520721099200001000015e",
+      "error": "attitude_state"
+    },
+    {
+      "name": "unknown_payload_state",
+      "payload_hex": "0001e24000030000010202ff1ce803520721099200001000015e",
+      "error": "payload_state"
+    }
+  ]
+}
