@@ -145,6 +145,8 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 | Effect → power sees the draw | +1 tick (downstream read) |
 | Fault → effect | 0 ticks |
 
+**Radio traffic (ADR-0007, Proposed, implemented by #98).** Comms reads nothing, so each tick's radio traffic (bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in the controls at step a of the next tick. Comms reports tick N's traffic in tick N+1, and power sees the transmit energy in tick N+2; comms' byte count is therefore named `previous_tick_sent_bytes`. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
+
 #### Snapshot contracts (#76)
 
 Every subsystem's snapshot is defined up front in `pocketsat.spacecraft.snapshots`, so subsystems depend on the contract and not on each other's implementation. Following ADR-0004 §7, each snapshot (`PowerSnapshot`, `ThermalSnapshot`, `AttitudeSnapshot`, `PayloadSnapshot`, `CommsSnapshot`) holds a **truth** record (`PowerTruth`, ...) that physics reads and a **readings** record (`PowerReadings`, ...) that decisions and telemetry read. Payload and comms have no sensors, so their readings always equal their truth. Subsystems read each other only through `SpacecraftState`: one earlier in `STEP_ORDER` as of the current tick, one later as of the previous tick (#36). The fields, the table of cross-subsystem reads, and the shared test fakes (`pocketsat.spacecraft.fakes`) are described in [spacecraft.md](spacecraft.md). A subsystem ticket adds fields only by extending the contract in the same change.
