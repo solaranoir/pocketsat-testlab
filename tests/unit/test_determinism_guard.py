@@ -160,6 +160,8 @@ def test_scan_covers_simulation_code() -> None:
         "core/portable.py",
         "core/rng.py",
         "environment/nominal.py",
+        "flight/__init__.py",
+        "flight/modes.py",
         "targets/base.py",
         "targets/echo.py",
     } <= names

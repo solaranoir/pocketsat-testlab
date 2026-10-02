@@ -18,7 +18,7 @@ There is no flight computer yet, so the tests script `SpacecraftControls` the wa
 | **Reference** (#63, #70 use it) | SCIENCE for the whole orbit except one 10-minute DOWNLINK pass at the end of each orbit | | | |
 
 - The pass sits at the **end of eclipse**, the worst place for the minimum SOC.
-- The payload stays enabled during DOWNLINK. #47 has not decided this yet; keeping it on is pessimistic for both energy and data. With the payload off during the pass the reference margin would rise by about 0.25 Wh, to roughly +16%, still inside the band.
+- The payload stays enabled during DOWNLINK. The mode table (#47, [spacecraft-modes.md](spacecraft-modes.md)) turns it off in DOWNLINK, so keeping it on here is deliberately pessimistic for both energy and data. With the payload off during the pass the reference margin would rise by about 0.25 Wh, to roughly +16%, still inside the band.
 
 ### Transmitter energy model ("Option C", decided 2026-10-01)
 
