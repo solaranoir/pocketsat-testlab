@@ -6,19 +6,18 @@ import random
 import re
 import struct
 from decimal import ROUND_HALF_UP, Decimal
-from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pocketsat.flight import Mode
 from pocketsat.messages import (
     ATTITUDE_STATE_CODES,
     BUS_V_SCALE,
     INT16_MAX,
     INT16_MIN,
     KNOWN_FLAGS_MASK,
-    MODE_IDS,
     PAYLOAD_STATE_CODES,
     POINTING_CENTI_DEG_MAX,
     POINTING_SCALE,
@@ -55,7 +54,7 @@ from pocketsat.spacecraft.snapshots import (
 
 PROTOCOL = (Path(__file__).parents[2] / "docs" / "protocol.md").read_text(encoding="utf-8")
 
-FC = FlightComputerTelemetryState(uptime_ms=60_000, mode_id=1, boot_count=2)
+FC = FlightComputerTelemetryState(uptime_ms=60_000, mode=Mode.NOMINAL, boot_count=2)
 POWER = PowerReadings(
     bus_v=7.4, battery_current_a=0.5, soc=0.8, low_battery=False, critical_battery=False
 )
@@ -290,9 +289,9 @@ def test_boot_count_saturates(value: int, decoded: int) -> None:
     assert round_trip(boot_count=value).boot_count == decoded
 
 
-@pytest.mark.parametrize("mode_id", sorted(MODE_IDS.values()))
-def test_mode_round_trip(mode_id: int) -> None:
-    assert round_trip(mode_id=mode_id).mode_id == mode_id
+@pytest.mark.parametrize("mode", list(Mode))
+def test_mode_round_trip(mode: Mode) -> None:
+    assert round_trip(mode=mode).mode is mode
 
 
 @pytest.mark.parametrize("radio_mode", list(RadioMode))
@@ -314,7 +313,7 @@ def test_decoded_telemetry_reencodes_to_the_same_bytes() -> None:
     payload = encode(bus_v=7.81234, soc=0.4567, battery_c=-3.333, pointing_error_deg=91.119)
     t = decode_telemetry(payload)
     again = encode_telemetry(
-        FlightComputerTelemetryState(t.uptime_ms, t.mode_id, t.boot_count),
+        FlightComputerTelemetryState(t.uptime_ms, t.mode, t.boot_count),
         power=dataclasses.replace(
             POWER,
             bus_v=t.bus_v,
@@ -380,34 +379,36 @@ def test_wrongly_typed_reading_is_rejected(field: str, value: Any) -> None:
     [
         ({"uptime_ms": -1}, ValueError),
         ({"boot_count": -1}, ValueError),
-        ({"mode_id": 6}, ValueError),
-        ({"mode_id": -1}, ValueError),
-        ({"mode_id": True}, TypeError),
+        ({"mode": 1}, TypeError),
+        ({"mode": 6}, TypeError),
+        ({"mode": True}, TypeError),
+        ({"mode": "NOMINAL"}, TypeError),
         ({"uptime_ms": 1.0}, TypeError),
         ({"boot_count": "1"}, TypeError),
     ],
 )
 def test_flight_computer_state_is_validated(kwargs: dict[str, Any], error: type[Exception]) -> None:
-    base: dict[str, Any] = {"uptime_ms": 0, "mode_id": 0, "boot_count": 0}
+    base: dict[str, Any] = {"uptime_ms": 0, "mode": Mode.BOOT, "boot_count": 0}
     with pytest.raises(error):
         FlightComputerTelemetryState(**(base | kwargs))
 
 
-class _Mode(IntEnum):
-    """Stands in for #47's ``Mode`` enum, which uses the same values."""
-
-    BOOT = 0
-    NOMINAL = 1
-    SCIENCE = 2
-    DOWNLINK = 3
-    SAFE = 4
-    FAULT = 5
+WIRE_MODE_VALUES = {"BOOT": 0, "NOMINAL": 1, "SCIENCE": 2, "DOWNLINK": 3, "SAFE": 4, "FAULT": 5}
+"""The telemetry ``mode`` wire values (docs/protocol.md, #54), written out by hand so
+that renumbering ``Mode`` fails here instead of silently changing the wire format."""
 
 
-def test_flight_computer_state_accepts_an_int_enum_mode() -> None:
-    assert {m.name: m.value for m in _Mode} == dict(MODE_IDS)
-    for member in _Mode:
-        assert round_trip(mode_id=member).mode_id == member
+@pytest.mark.parametrize("mode", list(Mode), ids=lambda m: m.name)
+def test_every_mode_value_is_its_telemetry_wire_value(mode: Mode) -> None:
+    # #101: telemetry carries Mode itself, so the enum value and the wire byte can't drift.
+    wire = struct.unpack(TELEMETRY_FORMAT, encode(mode=mode))[3]
+    assert wire == mode.value == WIRE_MODE_VALUES[mode.name]
+    assert decode_telemetry(encode(mode=mode)).mode is mode
+
+
+def test_wire_mode_values_name_every_mode_once() -> None:
+    assert {m.name for m in Mode} == set(WIRE_MODE_VALUES)
+    assert sorted(WIRE_MODE_VALUES.values()) == list(range(len(Mode)))
 
 
 # --- Flags -----------------------------------------------------------------------------
@@ -520,7 +521,7 @@ def test_docs_mapping_table_names_real_readings_fields() -> None:
 @pytest.mark.parametrize(
     ("heading", "codes"),
     [
-        ("#### Mode", MODE_IDS),
+        ("#### Mode", {m.name: m.value for m in Mode}),
         ("#### Radio mode", {m.name: v for m, v in RADIO_MODE_CODES.items()}),
         ("#### Attitude state", {s.name: v for s, v in ATTITUDE_STATE_CODES.items()}),
         ("#### Payload state", {s.name: v for s, v in PAYLOAD_STATE_CODES.items()}),
@@ -537,7 +538,7 @@ def test_state_codes_cover_every_member() -> None:
     assert set(PAYLOAD_STATE_CODES) == set(PayloadState)
     for codes in (RADIO_MODE_CODES, ATTITUDE_STATE_CODES, PAYLOAD_STATE_CODES):
         assert sorted(codes.values()) == list(range(len(codes)))
-    assert sorted(MODE_IDS.values()) == list(range(6))
+    assert sorted(m.value for m in Mode) == list(range(6))
 
 
 def test_docs_state_the_sizes() -> None:

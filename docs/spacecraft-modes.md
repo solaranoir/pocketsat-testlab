@@ -173,7 +173,7 @@ Keeping it on would instead keep science continuous through passes and match the
 
 | Ticket | Adds |
 |---|---|
-| #101 | The `FlightComputer` component that holds a `ModeState`, calls `transition()` in step d, and `controls_for_mode()` in step f |
+| #101 | The `FlightComputer` component (`pocketsat.flight.computer`) that holds a `ModeState`, calls `transition()` in step d for the events earlier phases raise, and `controls_for_mode()` in step f and at `reset()`; telemetry carries `Mode` itself |
 | #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared) |
 | #49 | When `BOOT_COMPLETE` fires, the reboot behind RESET and `forced_reset` (uptime, boot counter, held-in-reset), and BOOT's controls applying from tick 0 |
 | #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F |

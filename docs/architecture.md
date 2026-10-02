@@ -136,6 +136,8 @@ The defaults (payload off, radio `RX_TX`, attitude control on, no overrides) are
 - e. The flight computer emits telemetry if due.
 - f. The flight computer produces controls for tick N+1.
 
+Steps c to f are one call, `pocketsat.flight.FlightComputer.step(uplink_frames, readings, now_us)` (#101), which runs six fixed phases in order: decode uplink, execute commands (step c), evaluate flags, update mode (step d), emit telemetry (step e), and produce controls (step f, the single controls function, `controls_for_mode()`). Its input is the subsystems' readings only (`SpacecraftReadings`, taken from `SpacecraftState`), and it returns a `FlightComputerOutput`: the downlink frames, the next tick's controls, and the per-tick counts `SilTarget` passes on in `RadioTraffic` (ADR-0007). `FlightComputer.reset()` returns BOOT's controls for tick 0, and `reboot()` is the RESET path shared with `forced_reset`.
+
 So commands act one tick later and faults act on the same tick. Telemetry at tick N can show a new mode alongside subsystem state produced under the previous controls; that one-frame lag is correct.
 
 | Chain | Latency (100 ms default tick) |

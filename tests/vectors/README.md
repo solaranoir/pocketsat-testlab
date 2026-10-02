@@ -37,11 +37,11 @@ layout, conversions, rounding, and saturation rules are in `docs/protocol.md`
 ("Telemetry payload"). `payload_size` and `frame_size` give the fixed sizes (26 and 36).
 
 - `valid_telemetry[]`: one telemetry frame each.
-  - `input`: the encoder's inputs. `uptime_ms`, `mode_id`, `boot_count` are the flight
+  - `input`: the encoder's inputs. `uptime_ms`, `mode`, `boot_count` are the flight
     computer state; `power`, `thermal`, `attitude`, `payload`, and `comms` hold only the
     readings fields that go on the wire (other readings fields don't affect the payload).
-    States are enum member names. A float may be the string `"inf"` or `"-inf"`, which
-    JSON can't express.
+    States, the flight `mode` included (`pocketsat.flight.Mode`), are enum member
+    names. A float may be the string `"inf"` or `"-inf"`, which JSON can't express.
   - `fields`: the expected wire integer of every payload field, by its name in
     `docs/protocol.md`.
   - `payload_hex`: the 26-byte payload. Encoding `input` must produce exactly this, and

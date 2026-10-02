@@ -418,6 +418,11 @@ def test_public_exports() -> None:
             "INITIAL_STATE",
             "RETURN_MODES",
             "EventKind",
+            # The flight computer component (#101).
+            "PHASE_ORDER",
+            "FlightComputer",
+            "FlightComputerOutput",
+            "SpacecraftReadings",
             "Mode",
             "ModeEvent",
             "ModeState",

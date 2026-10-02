@@ -11,6 +11,12 @@ readings fields to wire integers, and the flag bits are documented in
 ``tests/vectors/telemetry.json`` are the contract the Phase 7 firmware must match. True
 values never go on the wire (ADR-0004 §7): the encoder accepts no truth record, so mypy
 rejects one.
+
+The telemetry ``mode`` field carries the flight computer's :class:`~pocketsat.flight.Mode`
+(#47), whose values are the wire values, so there is no separate mode table to drift
+from the enum (#101). This module imports ``Mode`` from :mod:`pocketsat.flight.modes`,
+which depends only on :mod:`pocketsat.spacecraft.controls`; see :mod:`pocketsat.flight`
+for how its modules import this one without a cycle.
 """
 
 import math
@@ -21,6 +27,7 @@ from enum import IntFlag
 from types import MappingProxyType
 from typing import Final
 
+from pocketsat.flight.modes import Mode
 from pocketsat.frame import MIN_FRAME_SIZE
 from pocketsat.spacecraft.controls import RadioMode
 from pocketsat.spacecraft.snapshots import (
@@ -122,13 +129,6 @@ KNOWN_FLAGS_MASK: Final = int(
 )
 """Every assigned flag bit. The decoder ignores (clears) any other bit."""
 
-MODE_IDS: Final[Mapping[str, int]] = MappingProxyType(
-    {"BOOT": 0, "NOMINAL": 1, "SCIENCE": 2, "DOWNLINK": 3, "SAFE": 4, "FAULT": 5}
-)
-"""Numeric value of each flight mode in the telemetry ``mode`` field. The flight
-computer's ``Mode`` enum (#47, ``pocketsat.flight``) defines the modes and uses the same
-values."""
-
 RADIO_MODE_CODES: Final[Mapping[RadioMode, int]] = MappingProxyType(
     {RadioMode.OFF: 0, RadioMode.RX_ONLY: 1, RadioMode.RX_TX: 2}
 )
@@ -205,42 +205,40 @@ class TelemetryDecodeError(ValueError):
 class FlightComputerTelemetryState:
     """The flight computer's own state carried in telemetry (#54).
 
-    Supplied by the flight computer: the uptime counter and boot count from #49 and the
-    current mode from #47, assembled by the telemetry scheduler (#55). Validated on
-    construction.
+    Supplied by the flight computer (:class:`~pocketsat.flight.FlightComputer`, #101):
+    the uptime counter and boot count from #49 and the current mode from #47, assembled
+    by the telemetry scheduler (#55). Validated on construction.
 
     Attributes:
         uptime_ms: Milliseconds since the last power-on or RESET (#49). Non-negative. The
             wire field is uint32 and wraps modulo 2**32 (about 49.7 days).
-        mode_id: Current flight mode as its numeric value, 0..5 (:data:`MODE_IDS`:
-            BOOT 0, NOMINAL 1, SCIENCE 2, DOWNLINK 3, SAFE 4, FAULT 5). A member of the
-            ``Mode`` ``IntEnum`` from #47 satisfies it.
+        mode: Current flight mode. Its value is the wire value: ``Mode`` is an
+            ``IntEnum`` whose values are the telemetry encoding (#47).
         boot_count: Boots since first power-on; persists across RESET (#49).
             Non-negative. The wire field is uint16 and saturates at 65535.
 
     Raises:
-        TypeError: A field is not an ``int`` (``bool`` is rejected).
-        ValueError: ``uptime_ms`` or ``boot_count`` is negative, or ``mode_id`` is not a
-            known mode value.
+        TypeError: ``uptime_ms`` or ``boot_count`` is not an ``int`` (``bool`` is
+            rejected), or ``mode`` is not a :class:`~pocketsat.flight.Mode` (a plain
+            ``int`` is rejected).
+        ValueError: ``uptime_ms`` or ``boot_count`` is negative.
     """
 
     uptime_ms: int
-    mode_id: int
+    mode: Mode
     boot_count: int
 
     def __post_init__(self) -> None:
-        for name in ("uptime_ms", "mode_id", "boot_count"):
+        for name in ("uptime_ms", "boot_count"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an int, got {value!r}")
+        if not isinstance(self.mode, Mode):
+            raise TypeError(f"mode must be a Mode, got {self.mode!r}")
         if self.uptime_ms < 0:
             raise ValueError(f"uptime_ms must be non-negative, got {self.uptime_ms}")
         if self.boot_count < 0:
             raise ValueError(f"boot_count must be non-negative, got {self.boot_count}")
-        if int(self.mode_id) not in MODE_IDS.values():
-            raise ValueError(
-                f"mode_id must be one of {sorted(MODE_IDS.values())}, got {self.mode_id!r}"
-            )
 
 
 @dataclass(frozen=True)
@@ -255,7 +253,7 @@ class Telemetry:
         uptime_ms: Flight computer uptime, milliseconds, modulo 2**32.
         boot_count: Boot count, saturated at 65535.
         flags: Readings flags; unknown bits are cleared.
-        mode_id: Flight mode value (:data:`MODE_IDS`).
+        mode: Flight mode.
         radio_mode: ``CommsReadings.radio_mode``.
         attitude_state: ``AttitudeReadings.state``.
         payload_state: ``PayloadReadings.state``.
@@ -271,7 +269,7 @@ class Telemetry:
     uptime_ms: int
     boot_count: int
     flags: TelemetryFlags
-    mode_id: int
+    mode: Mode
     radio_mode: RadioMode
     attitude_state: AttitudeState
     payload_state: PayloadState
@@ -411,7 +409,7 @@ def encode_telemetry(
         flight_computer.uptime_ms & UINT32_MAX,
         min(flight_computer.boot_count, UINT16_MAX),
         telemetry_flags(power, thermal),
-        int(flight_computer.mode_id),
+        flight_computer.mode.value,
         RADIO_MODE_CODES[comms.radio_mode],
         ATTITUDE_STATE_CODES[attitude.state],
         PAYLOAD_STATE_CODES[payload.state],
@@ -466,13 +464,15 @@ def decode_telemetry(payload: bytes) -> Telemetry:
         buffered_bytes,
         pointing_error_centi_deg,
     ) = struct.unpack(TELEMETRY_FORMAT, payload)
-    if mode not in MODE_IDS.values():
-        raise TelemetryDecodeError(f"unknown mode value {mode}")
+    try:
+        decoded_mode = Mode(mode)
+    except ValueError:
+        raise TelemetryDecodeError(f"unknown mode value {mode}") from None
     return Telemetry(
         uptime_ms=uptime_ms,
         boot_count=boot_count,
         flags=TelemetryFlags(flags & KNOWN_FLAGS_MASK),
-        mode_id=mode,
+        mode=decoded_mode,
         radio_mode=_lookup("radio_mode", RADIO_MODE_CODES, radio_mode),
         attitude_state=_lookup("attitude_state", ATTITUDE_STATE_CODES, attitude_state),
         payload_state=_lookup("payload_state", PAYLOAD_STATE_CODES, payload_state),

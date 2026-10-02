@@ -8,7 +8,7 @@
       "note": "Typical NOMINAL-mode values; no flag set.",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.4,
@@ -59,7 +59,7 @@
       "note": "Only low_battery set (bit 0).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.4,
@@ -110,7 +110,7 @@
       "note": "Only critical_battery set (bit 1).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.4,
@@ -161,7 +161,7 @@
       "note": "Only over_temp set (bit 4).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.4,
@@ -212,7 +212,7 @@
       "note": "Only under_temp set (bit 5).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.4,
@@ -263,7 +263,7 @@
       "note": "Every assigned flag set: flags = 0x0033.",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 4,
+        "mode": "SAFE",
         "boot_count": 3,
         "power": {
           "bus_v": 6.1,
@@ -314,7 +314,7 @@
       "note": "Every field exactly at its largest wire value.",
       "input": {
         "uptime_ms": 4294967295,
-        "mode_id": 5,
+        "mode": "FAULT",
         "boot_count": 65535,
         "power": {
           "bus_v": 65.535,
@@ -365,7 +365,7 @@
       "note": "Every field exactly at its smallest wire value.",
       "input": {
         "uptime_ms": 0,
-        "mode_id": 0,
+        "mode": "BOOT",
         "boot_count": 0,
         "power": {
           "bus_v": 0.0,
@@ -416,7 +416,7 @@
       "note": "Values above every limit saturate; uptime wraps.",
       "input": {
         "uptime_ms": 4294967301,
-        "mode_id": 2,
+        "mode": "SCIENCE",
         "boot_count": 70000,
         "power": {
           "bus_v": 100.0,
@@ -467,7 +467,7 @@
       "note": "Values below every limit saturate.",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 3,
+        "mode": "DOWNLINK",
         "boot_count": 3,
         "power": {
           "bus_v": -0.5,
@@ -518,7 +518,7 @@
       "note": "+inf saturates to the maximum, -inf to the minimum.",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": "inf",
@@ -569,7 +569,7 @@
       "note": "Products that are exact halves round away from zero; 2.675 * 100 is 267.5 in double, so it rounds to 268 (decimal rounding of 2.675 would give 267).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 7.0005,
@@ -620,7 +620,7 @@
       "note": "Products below a half round toward zero; 1.005 * 100 is 100.49999999999999 in double, so it rounds to 100 (decimal rounding of 1.005 would give 101).",
       "input": {
         "uptime_ms": 123456,
-        "mode_id": 1,
+        "mode": "NOMINAL",
         "boot_count": 3,
         "power": {
           "bus_v": 3.3004,
