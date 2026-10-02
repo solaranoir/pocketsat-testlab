@@ -635,8 +635,11 @@ def scenario_cold(out: TextIO, seed: int, tick_us: int, ambient_c: float = -60.0
     )
     run = new_run(seed, tick_us, initial=initial, env_model=env)
     samples = run.advance(ticks_for(60 * US_PER_MIN, tick_us), lambda _t, _s: PAYLOAD_ON)
+    heater = NOMINAL_CONFIG.thermal
     out.write(
-        "Survival heater: ON below 0 C, OFF above 4 C (3 W). At this ambient it cannot reach 4 C,\n"
+        f"Survival heater: ON below {heater.heater_on_setpoint_c:g} C,"
+        f" OFF above {heater.heater_off_setpoint_c:g} C ({heater.heater_power_w:g} W)."
+        f" At this ambient it cannot reach {heater.heater_off_setpoint_c:g} C,\n"
         "so once on it never switches off. Starts at 10 C.\n\n"
     )
     write_timeline(out, every(samples, 5 * US_PER_MIN))

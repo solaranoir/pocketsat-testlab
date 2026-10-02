@@ -103,7 +103,7 @@ Telemetry (#54) encodes readings records only.
   Between the two thresholds a flag keeps its previous value. The hysteresis band (0.05) is wider than the estimate's full noise spread at nominal noise (0.04), so a steady true SOC near a threshold cannot make a flag flap; at `sensor_noise_scale` above 1.25 it can, while the true SOC stays within the band. `PowerConfig` validates that each clear threshold is above its set threshold and that critical's thresholds are at or below low's, so `critical_battery` is only ever set together with `low_battery`. After a reset each flag is set if the starting SOC is below its set threshold, and the readings equal the truth.
 - **`sensor_freeze`.** While `"power"` is in `controls.frozen_sensors`, the whole readings record (voltage, current, SOC estimate, and flags) holds exactly its last pre-freeze value with no noise, while the truth keeps evolving; a real threshold crossing during a freeze is hidden from the flags. On release, live readings resume and the flags continue from their pre-freeze state.
 
-All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 V, the noise levels, and the flag thresholds) are provisional; #72 calibrates them. With the defaults and the shared fakes' draws (attitude control 0.5 W, transmit 1.0 W), a nominal 92-minute orbit with 35% eclipse is net positive (about +2.6 Wh per orbit), which the story-level test (`tests/sil/test_power_story.py`) checks over three orbits. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
+The `PowerConfig` defaults (20 Wh battery, 8 W array, 1.8 W base load, 6.0 to 8.4 V, the noise levels, and the flag thresholds) are calibrated by the power and thermal budget ([power-thermal-budget.md](power-thermal-budget.md), #72), and the default starting charge (`PowerInitial.soc`) is 0.5. With the defaults and the shared fakes' draws (attitude control 0.5 W, transmit 1.0 W), a nominal 92-minute orbit with 35% eclipse is net positive (about +2.9 Wh per orbit), which the story-level test (`tests/sil/test_power_story.py`) checks over three orbits. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
 ## Thermal (#38, #39)
 
@@ -124,7 +124,7 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 
 - **The reader is optional.** Without one (`reader=None`) there is no electrical heating, only the environment and the heater. With one, power must be published on it, or `step()` raises the board's `KeyError`.
 - **Step size.** Forward Euler is monotone (no overshoot or oscillation) while `dt <= C / (sum of the node's conductances)` for both nodes. `Thermal.max_step_us` is that limit (500 s with the defaults); `step()` raises `ValueError` beyond it.
-- **Reset.** `reset(rng)` returns to `ThermalInitial` (provisional 20 °C / 20 °C until #72) and requests the noise stream; it must be called before the first `step()`, otherwise `step()` raises `RuntimeError`. The heater starts on if the starting battery temperature is below the ON setpoint.
+- **Reset.** `reset(rng)` returns to `ThermalInitial` (20 °C / 20 °C, confirmed by #72) and requests the noise stream; it must be called before the first `step()`, otherwise `step()` raises `RuntimeError`. The heater starts on if the starting battery temperature is below the ON setpoint.
 
 **Readings (#39).** `ThermalReadings` holds the reported temperatures and the limit flags (ADR-0004 §6 to §8). The thermostat and the physics never read them.
 
@@ -140,7 +140,7 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 - **Threshold order** (validated by `ThermalConfig`, `ValueError` otherwise). Battery: `battery_survival_limit_c` (default -10 °C) < `battery_under_temp_c` < `heater_on_setpoint_c` < `heater_off_setpoint_c`, with `battery_under_temp_c` at least 5 °C below `heater_on_setpoint_c` (the #72 margin rule), so the heater acts well before the flag. Each node: `under_temp_c` < `under_temp_clear_c` < `over_temp_clear_c` < `over_temp_c`. And `battery_over_temp_clear_c` is above `heater_off_setpoint_c`, so the heater cannot drive the battery into over-temperature. The survival limit is not used by the model; it anchors the order and documents the battery's survival range.
 - **`sensor_freeze`.** While `"thermal"` is in `controls.frozen_sensors`, the whole readings record (both temperatures and both flags) holds exactly its last pre-freeze value with no noise, while the truth (and the heater) keeps evolving; a real threshold crossing during a freeze is hidden from the flags. On release, live readings resume and each node's conditions continue from their pre-freeze state.
 
-**Settings** (`ThermalConfig`; every default is provisional, #72 calibrates them):
+**Settings** (`ThermalConfig`; calibrated by the power and thermal budget, [power-thermal-budget.md](power-thermal-budget.md), #72):
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -151,8 +151,8 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 | `coupling_conductance_w_per_c` | 0.04 | battery to electronics, W/°C (0 decouples) |
 | `battery_dissipation_fraction` | 0.25 | share of the electrical dissipation (heater excluded) heating the battery; the rest heats the electronics |
 | `heater_power_w` | 3.0 | survival heater power while on, W |
-| `heater_on_setpoint_c` | 0.0 | heater switches on below this battery temperature, °C |
-| `heater_off_setpoint_c` | 4.0 | heater switches off above this battery temperature, °C; above the ON setpoint |
+| `heater_on_setpoint_c` | 1.0 | heater switches on below this battery temperature, °C |
+| `heater_off_setpoint_c` | 5.0 | heater switches off above this battery temperature, °C; above the ON setpoint |
 | `temperature_noise_c` | 0.2 | standard deviation of each reported temperature's noise at `sensor_noise_scale` 1.0, °C |
 | `battery_survival_limit_c` | -10.0 | lowest battery temperature it survives, °C; bottom of the threshold order |
 | `battery_under_temp_c` / `battery_under_temp_clear_c` | -5.0 / -2.0 | battery under-temperature set / clear, °C |
@@ -160,9 +160,9 @@ All `PowerConfig` defaults (20 Wh battery, 8 W array, 2 W base load, 6.0 to 8.4 
 | `electronics_under_temp_c` / `electronics_under_temp_clear_c` | -25.0 / -22.0 | electronics under-temperature set / clear, °C |
 | `electronics_over_temp_c` / `electronics_over_temp_clear_c` | 60.0 / 57.0 | electronics over-temperature set / clear, °C |
 
-With these defaults, the real power subsystem, and the shared fakes' draws (3.5 W of load), the battery peaks near 28 °C and the electronics near 30 °C in a nominal orbit's sunlight. In the -20 °C eclipse the battery would settle near -11 °C without the heater and near +9 °C with it on, so the heater cycles between its setpoints, three times per nominal eclipse (about 12 minutes on in total), and at 1 s ticks the battery never falls more than a few hundredths of a degree below the ON setpoint. The values were chosen for that #73 behavior: heater power and battery isolation sized so the heater-on steady state is well above the OFF setpoint.
+With these defaults, the real power subsystem, and the shared fakes' draws (3.3 W of load), the battery peaks near 28 °C and the electronics near 30 °C in a nominal orbit's sunlight. In the -20 °C eclipse the battery would settle well below the ON setpoint without the heater and well above the OFF setpoint with it on, so the heater cycles between its setpoints several times per nominal eclipse, and the battery never falls more than a few hundredths of a degree below the ON setpoint. With all five real subsystems in the budget's reference profile the heater cycles three times per eclipse at about 28% duty (about 0.5 Wh per orbit; see the budget). The values were chosen for that #73 behavior: heater power and battery isolation sized so the heater-on steady state is well above the OFF setpoint.
 
-The flag thresholds (#39) were chosen to leave nominal orbits clear with margin: over a nominal orbit the true battery stays within about 0 °C to 28 °C and the electronics within about -2 °C to 30 °C, so even with the ±1.2 °C noise bound the readings stay at least 3.8 °C from the nearest battery threshold (-5 °C) and more than 20 °C from the electronics thresholds. The battery thresholds bracket a lithium-ion pack's usual range (no charging below about 0 °C, at most about 45 °C); the electronics thresholds are below the -20 °C eclipse sink, which the electronics, always dissipating, never reach in a nominal orbit, and well below typical component limits. They are provisional; #72 calibrates them. The story-level test (`tests/sil/test_thermal_story.py`, story #37) runs the real power and thermal subsystems over three nominal orbits and checks that the temperatures settle into the same pattern each orbit, that no flag is raised, that the heater cycles in every eclipse with its draw in power's load, and determinism. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
+The flag thresholds (#39) were chosen to leave nominal orbits clear with margin: over a nominal orbit the true battery stays within about 1 °C to 29 °C and the electronics within about -4 °C to 31 °C, so even with the ±1.2 °C noise bound the readings stay at least 4.8 °C from the nearest battery threshold (-5 °C) and more than 20 °C from the electronics thresholds. The battery thresholds bracket a lithium-ion pack's usual range (no charging below about 0 °C, at most about 45 °C); the electronics thresholds are below the -20 °C eclipse sink, which the electronics, always dissipating, never reach in a nominal orbit, and well below typical component limits. The budget (#72) keeps every temperature at least 5 °C inside them. The story-level test (`tests/sil/test_thermal_story.py`, story #37) runs the real power and thermal subsystems over three nominal orbits and checks that the temperatures settle into the same pattern each orbit, that no flag is raised, that the heater cycles in every eclipse with its draw in power's load, and determinism. `step()` plus `snapshot()` costs about 10 µs on a developer laptop.
 
 ## Attitude (#41)
 
@@ -189,7 +189,7 @@ Readings report the pointing error and rate with noise from the stream `spacecra
 - No environmental torques beyond the seeded disturbance.
 - Antenna pointing does not affect the link in Phase 1; Phase 3's RF channel may use the true pointing error for antenna gain.
 
-All `AttitudeConfig` defaults are illustrative; the power and thermal budget (#72) finalizes `control_power_w`.
+All `AttitudeConfig` defaults are illustrative; the power and thermal budget (#72) confirmed `control_power_w` (0.5 W).
 
 ## Communications (#44)
 
@@ -212,10 +212,10 @@ After a reset, and until the first step, the radio is `OFF` with no draw and the
 | `CommsConfig` field | Default | Meaning |
 |---|---|---|
 | `transmit_capacity_bytes` | 120 | bytes per tick while the transmitter is on (9600 bit/s at the 100 ms tick; fits one default 78-byte DATA frame plus an ACK) |
-| `transmitter_on_power_w` | 1.0 | fixed draw while the transmitter is on, W (the shared fakes' transmit draw) |
-| `transmit_power_per_byte_w` | 0.005 | extra draw per byte sent in the tick, W per byte (0.6 W at full capacity) |
+| `transmitter_on_power_w` | 0.15 | fixed (idle) draw while the transmitter is on, W |
+| `transmit_power_per_byte_w` | 0.02 | extra draw per byte sent in the tick, W per byte (2.4 W at full capacity, so 2.55 W keyed at the 100 ms tick) |
 
-The defaults are provisional; #72 calibrates the draws. `step()` plus `snapshot()` costs well under 1 µs on a developer laptop: the snapshot is rebuilt only when the mode changes.
+The draws follow the budget's transmitter model (#72, "Option C"): the radio stays `RX_TX` in every normal mode, so the fixed draw is a small idle draw and energy follows airtime ([power-thermal-budget.md](power-thermal-budget.md)). The shared fakes keep their illustrative 1.0 W transmit draw. `step()` plus `snapshot()` costs well under 1 µs on a developer laptop: the snapshot is rebuilt only when the mode changes.
 
 The story-level test for #42 (`tests/sil/test_payload_comms_story.py`) runs the real power, thermal, attitude, payload, and comms subsystems over three nominal orbits with the payload commanded on and the radio `RX_TX`, with scripted chunk releases standing in for the flight computer. At every tick it checks the data accounting (`total_produced_bytes == buffered_bytes + total_released_bytes`), that the payload acquires exactly when its inhibits allow, that comms sends nothing, and that power sees every draw one tick late, plus determinism. A second scenario uses a `battery_drain` extra load to set `low_battery` and shows acquisition stopping and resuming. The downlink accounting (bytes sent minus bytes released) and the radio-transmit inhibits are verified with the flight computer's downlink (#56).
 

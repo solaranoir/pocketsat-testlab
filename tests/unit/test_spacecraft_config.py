@@ -62,7 +62,7 @@ def test_initial_state_has_no_comms_record() -> None:
 def test_default_initial_state() -> None:
     initial = SpacecraftInitialState()
     assert initial == DEFAULT_INITIAL_STATE
-    assert initial.power == PowerInitial(soc=0.8)
+    assert initial.power == PowerInitial(soc=0.5)
     assert initial.thermal == ThermalInitial(battery_c=20.0, electronics_c=20.0)
     assert initial.attitude == AttitudeInitial(pointing_error_deg=45.0, rate_dps=1.0)
     assert initial.payload == PayloadInitial(buffer_fill=0.0)

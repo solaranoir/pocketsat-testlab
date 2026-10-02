@@ -172,7 +172,7 @@ def _check_story(run: Run, *, lockstep: bool = True) -> None:
 def test_story_nominal_start() -> None:
     run = _run(DEFAULT_INITIAL_STATE.power, SpacecraftControls())
     _check_story(run)
-    # From the default 0.8 start the battery stays well above the low threshold.
+    # From the default 0.5 start (#72) the battery stays well above the low threshold.
     assert run.flag_changes == []
 
 

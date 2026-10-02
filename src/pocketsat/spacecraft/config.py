@@ -55,8 +55,9 @@ def _require_records(owner: object, **kinds: type) -> None:
 class PowerConfig:
     """Power settings: battery and solar model (#35), sensors and flags (#36).
 
-    Every default is provisional: the power and thermal budget (#72) calibrates them.
-    The defaults describe a small 2S lithium-ion battery charged by a body-mounted
+    The defaults are calibrated as a set by the power and thermal budget (#72,
+    ``docs/power-thermal-budget.md``, which gives each one's real-world range and
+    rationale). They describe a small 2S lithium-ion battery charged by a body-mounted
     array.
 
     Attributes:
@@ -65,7 +66,7 @@ class PowerConfig:
         solar_array_w: Solar array output at ideal pointing (pointing error 0°) in
             sunlight, watts. Non-negative. Default 8.0.
         base_load_w: Always-on electrical load (avionics, receiver), watts.
-            Non-negative. Default 2.0. The per-subsystem draws are added on top.
+            Non-negative. Default 1.8. The per-subsystem draws are added on top.
         battery_empty_v: Bus voltage at SOC 0, volts. Positive. Default 6.0.
         battery_full_v: Bus voltage at SOC 1, volts. Above ``battery_empty_v``.
             Default 8.4. Bus voltage is linear in SOC between the two.
@@ -95,7 +96,7 @@ class PowerConfig:
 
     battery_capacity_wh: float = 20.0
     solar_array_w: float = 8.0
-    base_load_w: float = 2.0
+    base_load_w: float = 1.8
     battery_empty_v: float = 6.0
     battery_full_v: float = 8.4
     voltage_noise_v: float = 0.008
@@ -152,13 +153,14 @@ class ThermalConfig:
     """Thermal settings: the two-node lumped model and the battery survival heater (#38),
     and the sensors and limit flags (#39).
 
-    The model is described in :mod:`pocketsat.spacecraft.thermal`. Every default is
-    provisional: the power and thermal budget (#72) calibrates them. The defaults are
-    chosen so that, with about 4 W of electrical load, the battery sits near 29 °C and
-    the electronics near 32 °C in the nominal 20 °C sunlit ambient, and so that the
-    survival heater cycles about three times in each nominal eclipse at the -20 °C
-    eclipse ambient (#73): without the heater the battery would settle near -11 °C
-    there, with the heater on near +9 °C, so it switches between its setpoints.
+    The model is described in :mod:`pocketsat.spacecraft.thermal`. The defaults are
+    calibrated by the power and thermal budget (#72, ``docs/power-thermal-budget.md``).
+    They are chosen so that, with about 4 W of electrical load, the battery sits near
+    29 °C and the electronics near 31 °C in the nominal 20 °C sunlit ambient, and so
+    that the survival heater cycles in each nominal eclipse at the -20 °C eclipse
+    ambient (#73): without the heater the battery would settle well below the ON
+    setpoint there, with the heater on well above the OFF setpoint, so it switches
+    between its setpoints.
 
     **Limit flags (#39).** Each node has its own thresholds, because the battery is
     heated and the electronics are not: the electronics fall well below the battery in
@@ -189,10 +191,12 @@ class ThermalConfig:
         heater_power_w: Survival heater power while on, watts. Non-negative. Default
             3.0.
         heater_on_setpoint_c: The heater switches on when the true battery temperature
-            falls below this, °C. Default 0.0.
+            falls below this, °C. Default 1.0, so the battery, which dips just below
+            the ON setpoint before the heater catches it, stays at least 5 °C above
+            ``battery_under_temp_c`` (#72).
         heater_off_setpoint_c: The heater switches off when the true battery
             temperature rises above this, °C. Above ``heater_on_setpoint_c``.
-            Default 4.0.
+            Default 5.0.
         temperature_noise_c: Standard deviation of the noise on each reported
             temperature at ``sensor_noise_scale`` 1.0, °C. Non-negative. Default 0.2,
             so the noise (bounded at 6 sigma) spans at most ±1.2 °C, less than every
@@ -240,8 +244,8 @@ class ThermalConfig:
     coupling_conductance_w_per_c: float = 0.04
     battery_dissipation_fraction: float = 0.25
     heater_power_w: float = 3.0
-    heater_on_setpoint_c: float = 0.0
-    heater_off_setpoint_c: float = 4.0
+    heater_on_setpoint_c: float = 1.0
+    heater_off_setpoint_c: float = 5.0
     temperature_noise_c: float = 0.2
     battery_survival_limit_c: float = -10.0
     battery_under_temp_c: float = -5.0
@@ -310,7 +314,7 @@ class AttitudeConfig:
     magnitude (see :mod:`pocketsat.spacecraft.attitude`). The defaults are illustrative:
     they detumble the default starting state within a few minutes and hold the pointing
     error near 2° under the default disturbance. The power and thermal budget (#72)
-    finalizes ``control_power_w``.
+    confirmed ``control_power_w`` (0.5 W).
 
     Attributes:
         rate_damping_per_s: Rate damping while attitude control is on, per second: each
@@ -412,20 +416,24 @@ after the chunk ID. ``MAX_PAYLOAD_SIZE`` (65 535, the frame length field's limit
 class PayloadConfig:
     """Payload settings (#43).
 
-    The defaults are provisional: illustrative values sized so a chunk's DATA frame
-    fits in a tick's nominal transmit capacity. The power and thermal budget (#72)
-    finalizes the power draws.
+    The defaults are calibrated by the power and thermal budget (#72,
+    ``docs/power-thermal-budget.md``): a chunk's 78-byte DATA frame fits in one tick's
+    nominal transmit capacity, one orbit of data (about 221 KB at 40 bytes/s) fits in
+    one 10-minute DOWNLINK pass with more than 20% margin, and the buffer holds more
+    than two orbits of data, so one missed pass loses nothing.
 
     Attributes:
         buffer_capacity_bytes: Buffer capacity, bytes. A positive whole number of
             chunks (a multiple of ``chunk_size_bytes``), so the buffer fills exactly
-            on a chunk boundary.
+            on a chunk boundary. Default 524 288 (512 KiB).
         chunk_size_bytes: Size of every chunk, bytes. Positive and at most
             :data:`MAX_CHUNK_SIZE_BYTES`, so a chunk fits in one DATA frame (#56).
+            Default 64.
         data_rate_bytes_per_s: True acquisition data rate while acquiring, bytes per
-            second. Non-negative.
+            second. Non-negative. Default 40.
         idle_power_w: Draw while commanded on but not acquiring, watts. Non-negative.
-        acquiring_power_w: Draw while acquiring, watts. Non-negative.
+            Default 0.3.
+        acquiring_power_w: Draw while acquiring, watts. Non-negative. Default 1.5.
 
     Raises:
         TypeError: A byte field is not an int, or a power field is not a number.
@@ -433,11 +441,11 @@ class PayloadConfig:
             chunks.
     """
 
-    buffer_capacity_bytes: int = 65_536
+    buffer_capacity_bytes: int = 524_288
     chunk_size_bytes: int = 64
-    data_rate_bytes_per_s: int = 100
-    idle_power_w: float = 0.5
-    acquiring_power_w: float = 2.0
+    data_rate_bytes_per_s: int = 40
+    idle_power_w: float = 0.3
+    acquiring_power_w: float = 1.5
 
     def __post_init__(self) -> None:
         for name in ("buffer_capacity_bytes", "chunk_size_bytes", "data_rate_bytes_per_s"):
@@ -467,18 +475,25 @@ class PayloadConfig:
 class CommsConfig:
     """Communications settings (#44).
 
-    The defaults are provisional: the power and thermal budget (#72) finalizes the
-    draws. The capacity matches a 9600 bit/s downlink at the default 100 ms tick and
-    fits one default payload chunk's DATA frame (64-byte chunk + 4-byte ID + 10 bytes
-    of frame header and CRC = 78 bytes) with room for an ACK.
+    The capacity matches a 9600 bit/s downlink at the default 100 ms tick and fits one
+    default payload chunk's DATA frame (64-byte chunk + 4-byte ID + 10 bytes of frame
+    header and CRC = 78 bytes) with room for an ACK. The capacity is per tick, so it is
+    9600 bit/s only at the 100 ms tick.
+
+    The draws follow the power and thermal budget's transmitter model (#72, "Option
+    C"): the radio stays ``RX_TX`` in every normal mode, so the fixed draw is a small
+    idle draw while the transmitter is enabled but not keyed, and energy follows
+    airtime through the per-byte draw: full capacity (120 bytes per 100 ms tick) costs
+    0.15 + 2.4 = 2.55 W keyed, typical of a small-satellite UHF transmitter.
 
     Attributes:
         transmit_capacity_bytes: Bytes the transmitter may send in one tick while it
             is on, whatever the tick length. Non-negative int. Default 120.
-        transmitter_on_power_w: Fixed transmit draw while the transmitter is on,
-            watts. Non-negative. Default 1.0.
+        transmitter_on_power_w: Fixed transmit draw while the transmitter is on (idle,
+            not keyed), watts. Non-negative. Default 0.15.
         transmit_power_per_byte_w: Additional draw per byte sent in the tick, watts
-            per byte. Non-negative. Default 0.005 (0.6 W at full capacity).
+            per byte. Non-negative. Default 0.02 (2.4 W at full capacity). Being per
+            tick, it assumes the default 100 ms tick.
 
     Raises:
         TypeError: ``transmit_capacity_bytes`` is not an int, or a draw is not a
@@ -487,8 +502,8 @@ class CommsConfig:
     """
 
     transmit_capacity_bytes: int = 120
-    transmitter_on_power_w: float = 1.0
-    transmit_power_per_byte_w: float = 0.005
+    transmitter_on_power_w: float = 0.15
+    transmit_power_per_byte_w: float = 0.02
 
     def __post_init__(self) -> None:
         capacity = self.transmit_capacity_bytes
@@ -506,8 +521,7 @@ class SpacecraftConfig:
     """Every subsystem's settings: what the spacecraft is (ADR-0005).
 
     Each subsystem is built with, and reads, only its own record. The nominal set is
-    :data:`NOMINAL_CONFIG`; the stressed set is added by the power and thermal budget
-    (#72) once the records have fields.
+    :data:`NOMINAL_CONFIG` and the stressed set :data:`STRESSED_CONFIG` (#72).
 
     Attributes:
         power: Power settings.
@@ -538,7 +552,30 @@ class SpacecraftConfig:
 
 
 NOMINAL_CONFIG = SpacecraftConfig()
-"""The nominal settings. The power and thermal budget (#72) calibrates them."""
+"""The nominal settings, calibrated by the power and thermal budget (#72,
+``docs/power-thermal-budget.md``). Deliberately comfortable: scenarios about power or
+thermal stress use :data:`STRESSED_CONFIG`, a different starting state, or
+``EnvironmentState`` overrides, never retuned nominal defaults."""
+
+STRESSED_SOLAR_ARRAY_W: Final = 6.0
+"""Stressed solar array output, watts: 25% below nominal (end-of-life cell
+degradation, higher array temperature, off-pointing)."""
+
+STRESSED_BATTERY_CAPACITY_WH: Final = 14.0
+"""Stressed battery capacity, watt-hours: 30% below nominal (an aged battery)."""
+
+STRESSED_CONFIG = SpacecraftConfig(
+    power=PowerConfig(
+        battery_capacity_wh=STRESSED_BATTERY_CAPACITY_WH,
+        solar_array_w=STRESSED_SOLAR_ARRAY_W,
+        base_load_w=2.16,
+    ),
+    payload=PayloadConfig(idle_power_w=0.36, acquiring_power_w=1.8),
+)
+"""The stressed settings (#72): reduced solar output (-25%), reduced battery capacity
+(-30%), and higher loads (base load and payload draws +20%); everything else nominal.
+SCIENCE is energy-negative under it, so it is used by the budget's must-fail profiles
+and is available to later phases (Phase 6 campaigns vary battery condition)."""
 
 
 # --- Starting state --------------------------------------------------------------------
@@ -549,15 +586,17 @@ class PowerInitial:
     """Where the power subsystem starts.
 
     Attributes:
-        soc: Battery state of charge, 0..1. The default is provisional; the power and
-            thermal budget (#72) sets the final value.
+        soc: Battery state of charge, 0..1. Default 0.5, set by the power and
+            thermal budget (#72): a typical launch storage charge, which puts the
+            reference profile's minimum SOC 20 percentage points above the
+            ``low_battery`` threshold.
 
     Raises:
         TypeError: ``soc`` is not a number.
         ValueError: ``soc`` is not finite or is outside 0..1.
     """
 
-    soc: float = 0.8
+    soc: float = 0.5
 
     def __post_init__(self) -> None:
         _require_in_range("soc", self.soc, 0.0, 1.0)
@@ -571,8 +610,9 @@ class ThermalInitial:
         battery_c: Battery temperature, °C.
         electronics_c: Electronics temperature, °C.
 
-    Both defaults equal the nominal sunlit ambient (20 °C) and are provisional; the
-    power and thermal budget (#72) sets the final values. The survival heater starts
+    Both defaults equal the nominal sunlit ambient (20 °C), confirmed by the power and
+    thermal budget (#72): the nodes settle within an hour, long before the first
+    eclipse, so the start barely affects the first orbit. The survival heater starts
     on if ``battery_c`` is below ``ThermalConfig.heater_on_setpoint_c`` and off
     otherwise (#38).
 

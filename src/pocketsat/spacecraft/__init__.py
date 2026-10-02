@@ -14,6 +14,7 @@ from pocketsat.spacecraft.comms import Comms, transmit_draw_w
 from pocketsat.spacecraft.config import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
+    STRESSED_CONFIG,
     AttitudeConfig,
     AttitudeInitial,
     CommsConfig,
@@ -76,6 +77,7 @@ __all__ = [
     "SENSOR_SUBSYSTEMS",
     "SNAPSHOT_TYPES",
     "STEP_ORDER",
+    "STRESSED_CONFIG",
     "Attitude",
     "AttitudeConfig",
     "AttitudeControls",
