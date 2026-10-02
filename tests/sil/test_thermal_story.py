@@ -6,7 +6,7 @@ driven by ``NominalEnvironment`` (92-minute orbit, 35% eclipse, 20 °C sunlit an
 -20 °C eclipse ambient, #73) and a ``SimClock`` at the default 100 ms tick, for three
 full orbits, with the default settings, starting state, and controls. The fakes'
 draws are the shared defaults (attitude control 0.5 W, transmit 1.0 W, payload off),
-so power's total load is 3.5 W plus the survival heater.
+so power's total load is 3.3 W plus the survival heater.
 
 Three identical stacks step in lockstep: two with the same seed, which must produce
 identical ``SpacecraftState`` values every tick, and one with a different seed, whose
@@ -49,8 +49,9 @@ from pocketsat.spacecraft.fakes import FakeSubsystem, fake_subsystems
 pytestmark = pytest.mark.slow
 
 ORBITS = 3
-FAKE_LOAD_W = 3.5
-"""Power's total load without the heater: base 2.0 W, attitude 0.5 W, transmit 1.0 W."""
+FAKE_LOAD_W = 3.3
+"""Power's total load without the heater: base 1.8 W (#72), attitude 0.5 W, transmit
+1.0 W (the fakes' draws)."""
 
 PERIODIC_TOLERANCE_C = 0.25
 """Largest tick-by-tick difference between the second and third orbits, °C."""

@@ -22,8 +22,10 @@ DEFAULT_ECLIPSE_FRACTION: Final = 0.35
 DEFAULT_ECLIPSE_AMBIENT_TEMP_C: Final = -20.0
 """Default effective ambient temperature during eclipse, °C.
 
-Chosen as a starting point so the battery survival heater (#38) cycles a few times per
-nominal eclipse. Provisional: the power and thermal budget (#72) sets the final value.
+Set by the power and thermal budget (#72, ``docs/power-thermal-budget.md``): with the
+nominal settings the battery survival heater (#38) cycles in every nominal eclipse
+(about 28% duty in eclipse, about 0.5 Wh per orbit) while the energy and temperature
+margins hold.
 """
 
 
@@ -72,7 +74,7 @@ class NominalEnvironment:
                 to ``1`` (always in eclipse). Default 0.35.
             ambient_temp_c: Ambient temperature in sunlight, °C (default 20).
             eclipse_ambient_temp_c: Ambient temperature in eclipse, °C (default -20,
-                provisional until #72). Must be finite and above absolute zero.
+                set by #72). Must be finite and above absolute zero.
             sensor_noise_scale: Sensor noise scale reported in every state.
 
         Raises:

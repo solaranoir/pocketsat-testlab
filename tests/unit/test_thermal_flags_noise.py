@@ -158,12 +158,12 @@ def test_battery_threshold_order_is_validated(values: tuple[float, ...]) -> None
         # Equal neighbours in the battery order.
         ({"battery_survival_limit_c": -5.0}, "battery_under_temp_c must be above"),
         (
-            {"battery_under_temp_c": 0.0, "battery_under_temp_clear_c": 1.0},
+            {"battery_under_temp_c": 1.0, "battery_under_temp_clear_c": 2.0},
             "heater_on_setpoint_c must be above",
         ),
         ({"heater_off_setpoint_c": 0.0}, "heater_off_setpoint_c must be above"),
         # The 5 °C margin between under_temp and the heater ON setpoint.
-        ({"battery_under_temp_c": -4.0}, "at least 5.0 °C below"),
+        ({"battery_under_temp_c": -3.0}, "at least 5.0 °C below"),
         ({"battery_under_temp_c": -4.5, "heater_on_setpoint_c": 0.0}, "at least 5.0 °C"),
         (
             {"heater_on_setpoint_c": 1.0, "battery_under_temp_c": -3.5},

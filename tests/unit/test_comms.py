@@ -179,7 +179,7 @@ def test_default_controls_give_rx_tx_with_the_nominal_config() -> None:
     truth = comms.snapshot().truth
     assert truth.radio_mode is RadioMode.RX_TX
     assert truth.transmit_capacity_bytes == 120
-    assert truth.transmit_power_w == 1.0
+    assert truth.transmit_power_w == 0.15
 
 
 # --- Transmitter failure (the transmitter_off fault, merged by #60) -------------------
@@ -304,8 +304,8 @@ def test_comms_reads_nothing_from_other_subsystems() -> None:
 def test_config_defaults() -> None:
     config = CommsConfig()
     assert config.transmit_capacity_bytes == 120
-    assert config.transmitter_on_power_w == 1.0
-    assert config.transmit_power_per_byte_w == 0.005
+    assert config.transmitter_on_power_w == 0.15
+    assert config.transmit_power_per_byte_w == 0.02
     assert NOMINAL_CONFIG.comms == config
 
 

@@ -130,6 +130,11 @@ run can be replayed from its record alone (ADR-0005, #74). That needs a new run-
 schema version (`docs/run-record.md`). Until then, a run's configuration is fixed by its
 code version, which `run.json` already records.
 
+Review point: at the start of Phase 6, reassess the realism of the power and thermal
+budget (`docs/power-thermal-budget.md`, #72): its parameter ranges, the "what's
+optimistic" list, and the traffic stand-ins, against the real downlink traffic of #56
+and #59. Campaigns that vary battery condition start from `STRESSED_CONFIG`.
+
 ### Phase 7 — Hardware-in-the-Loop (split into 7a and 7b)
 
 Move the flight-computer role to a Raspberry Pi Pico, ESP32, or similar

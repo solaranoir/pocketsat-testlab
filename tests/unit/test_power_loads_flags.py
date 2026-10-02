@@ -37,7 +37,9 @@ SUN = EnvironmentState(sunlit=True)
 ECLIPSE = EnvironmentState(sunlit=False)
 CONTROLS = SpacecraftControls()
 FROZEN = SpacecraftControls(frozen_sensors=frozenset({"power"}))
-CONFIG = PowerConfig()
+CONFIG = PowerConfig(base_load_w=2.0)
+"""The settings these model tests use: the defaults, except a round 2 W base load, so
+the hand-computed expectations stay independent of the budget's calibration (#72)."""
 
 DRAW_FIELDS = {
     "thermal": "heater_power_w",

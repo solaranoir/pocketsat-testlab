@@ -35,7 +35,9 @@ TICK_US = 100_000
 SUN = EnvironmentState(sunlit=True)
 ECLIPSE = EnvironmentState(sunlit=False)
 CONTROLS = SpacecraftControls()
-CONFIG = PowerConfig()
+CONFIG = PowerConfig(base_load_w=2.0)
+"""The settings these model tests use: the defaults, except a round 2 W base load, so
+the hand-computed expectations stay independent of the budget's calibration (#72)."""
 TICKS_PER_HOUR = 36_000
 
 
@@ -102,7 +104,7 @@ def test_config_defaults_are_documented_values() -> None:
     assert NOMINAL_CONFIG.power == PowerConfig(
         battery_capacity_wh=20.0,
         solar_array_w=8.0,
-        base_load_w=2.0,
+        base_load_w=1.8,
         battery_empty_v=6.0,
         battery_full_v=8.4,
         voltage_noise_v=0.008,

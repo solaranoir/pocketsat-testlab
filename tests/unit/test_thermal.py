@@ -136,8 +136,8 @@ def test_config_defaults_are_documented_values() -> None:
         coupling_conductance_w_per_c=0.04,
         battery_dissipation_fraction=0.25,
         heater_power_w=3.0,
-        heater_on_setpoint_c=0.0,
-        heater_off_setpoint_c=4.0,
+        heater_on_setpoint_c=1.0,
+        heater_off_setpoint_c=5.0,
     )
     assert DEFAULT_INITIAL_STATE.thermal == ThermalInitial(battery_c=20.0, electronics_c=20.0)
 
@@ -538,8 +538,8 @@ def test_power_draws_the_heater_one_tick_late() -> None:
     for _ in range(3600):
         stack.step(SECOND_US, COLD, CONTROLS)
         load_w = power.snapshot().truth.total_load_w
-        # Base 2.0 W + fake attitude 0.5 W + fake comms 1.0 W + last tick's heater.
-        assert load_w == pytest.approx(3.5 + previous_heater_w)
+        # Base 1.8 W + fake attitude 0.5 W + fake comms 1.0 W + last tick's heater.
+        assert load_w == pytest.approx(3.3 + previous_heater_w)
         previous_heater_w = thermal.snapshot().truth.heater_power_w
     assert previous_heater_w in (0.0, CONFIG.heater_power_w)
 
