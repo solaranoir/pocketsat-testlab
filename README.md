@@ -65,6 +65,35 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run
 
 Contributors, human or AI, should read [`AGENTS.md`](AGENTS.md) first.
 
+## Demo
+
+[`scripts/demo_spacecraft.py`](scripts/demo_spacecraft.py) runs the spacecraft subsystem
+models (epic #30) together and prints a text report. It takes a few seconds:
+
+```sh
+uv run python scripts/demo_spacecraft.py                        # all scenarios
+uv run python scripts/demo_spacecraft.py --scenario faults      # one scenario
+uv run python scripts/demo_spacecraft.py --orbits 3 --seed 7    # longer nominal run
+```
+
+The real power, thermal, attitude, and payload subsystems share a `SnapshotBoard`,
+driven by `NominalEnvironment` and a `SimClock`. The scenarios are:
+
+- `nominal`: an orbit's timeline (sunlight and eclipse, true and estimated SOC, bus
+  voltage, temperatures, survival heater, attitude, payload buffer) and an energy,
+  heater, and flag summary.
+- `detumble`: a high starting rate with attitude control off, then on. Generation
+  drops while tumbling, and the payload waits for `STABILIZED`.
+- `faults`: `battery_drain` (`extra_load_w`) sets `low_battery` and
+  `critical_battery` and stops acquisition; `sensor_freeze` (`frozen_sensors`) holds
+  the readings while the truth moves.
+- `determinism`: the same seed gives identical digests, and a new seed with the
+  attitude disturbance off changes only the sensor readings.
+- `cold`: a permanent cold eclipse where the survival heater never switches off.
+
+Communications (#44) is a labelled stand-in from `pocketsat.spacecraft.fakes` until
+the real subsystem lands.
+
 ## License
 
 [Apache License 2.0](LICENSE)
