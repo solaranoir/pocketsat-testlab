@@ -1,6 +1,6 @@
 # ADR-0004: Flight computer to subsystem controls
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0003 (refines step 6, `advance(dt_us)`, into steps a to f). Related: ADR-0002 (`inject()` and target faults). Issue: #71.
 
