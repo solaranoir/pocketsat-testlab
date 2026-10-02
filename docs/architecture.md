@@ -316,6 +316,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | `SimClock`, `RngFactory` | `pocketsat.core` |
 | Environment model (`NominalEnvironment`) | `pocketsat.environment` |
 | Spacecraft model | `pocketsat.spacecraft` |
+| Flight computer (modes: [spacecraft-modes.md](spacecraft-modes.md)) | `pocketsat.flight` |
 | Ground station | `pocketsat.groundstation` |
 | RF channel | `pocketsat.rf` |
 | Fault injection | `pocketsat.faults` |

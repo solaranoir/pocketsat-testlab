@@ -24,7 +24,8 @@ pocketsat-test-lab/
 │   ├── core/                    # SimClock, RngFactory (determinism foundations)
 │   ├── environment/             # environment models producing EnvironmentState
 │   ├── targets/                 # TestTarget protocol, SilTarget, HilTarget
-│   ├── spacecraft/              # power, thermal, attitude, payload, comms, flight computer
+│   ├── spacecraft/              # power, thermal, attitude, payload, comms
+│   ├── flight/                  # flight computer: modes, commands, telemetry
 │   ├── groundstation/           # pass state, radio control, uplink, decoding
 │   ├── rf/                      # channel model (elevation, range, Doppler, SNR, loss)
 │   ├── faults/                  # reusable fault injectors
