@@ -49,13 +49,16 @@ class SubsystemSnapshot:
 
 @runtime_checkable
 class Subsystem(Protocol):
-    """A spacecraft subsystem stepped in simulated time.
+    """A spacecraft subsystem stepped in simulated time."""
 
-    Attributes:
-        name: Unique name, one of :data:`STEP_ORDER` (for example ``"power"``).
-    """
+    @property
+    def name(self) -> str:
+        """Unique name, one of :data:`STEP_ORDER` (for example ``"power"``).
 
-    name: str
+        Read-only: a subsystem's name never changes after construction. A plain or
+        ``Final`` class attribute, or an instance attribute, satisfies it.
+        """
+        ...
 
     def reset(self, rng: RngFactory) -> None:
         """Return to the initial state.

@@ -67,6 +67,7 @@ each flag is set if the starting SOC is below its set threshold.
 """
 
 from random import Random
+from typing import Final
 
 from pocketsat.core.clock import check_us
 from pocketsat.core.portable import portable_cos_deg
@@ -103,7 +104,7 @@ class Power:
         name: Always ``"power"``.
     """
 
-    name = "power"
+    name: Final = "power"
 
     def __init__(
         self,
