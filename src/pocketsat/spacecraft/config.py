@@ -465,7 +465,40 @@ class PayloadConfig:
 
 @dataclass(frozen=True)
 class CommsConfig:
-    """Communications settings. Fields are added by the communications subsystem (#44)."""
+    """Communications settings (#44).
+
+    The defaults are provisional: the power and thermal budget (#72) finalizes the
+    draws. The capacity matches a 9600 bit/s downlink at the default 100 ms tick and
+    fits one default payload chunk's DATA frame (64-byte chunk + 4-byte ID + 10 bytes
+    of frame header and CRC = 78 bytes) with room for an ACK.
+
+    Attributes:
+        transmit_capacity_bytes: Bytes the transmitter may send in one tick while it
+            is on, whatever the tick length. Non-negative int. Default 120.
+        transmitter_on_power_w: Fixed transmit draw while the transmitter is on,
+            watts. Non-negative. Default 1.0.
+        transmit_power_per_byte_w: Additional draw per byte sent in the tick, watts
+            per byte. Non-negative. Default 0.005 (0.6 W at full capacity).
+
+    Raises:
+        TypeError: ``transmit_capacity_bytes`` is not an int, or a draw is not a
+            number.
+        ValueError: A field is negative or not finite.
+    """
+
+    transmit_capacity_bytes: int = 120
+    transmitter_on_power_w: float = 1.0
+    transmit_power_per_byte_w: float = 0.005
+
+    def __post_init__(self) -> None:
+        capacity = self.transmit_capacity_bytes
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError(f"transmit_capacity_bytes must be an int, got {capacity!r}")
+        if capacity < 0:
+            raise ValueError(f"transmit_capacity_bytes must be non-negative, got {capacity}")
+        for name in ("transmitter_on_power_w", "transmit_power_per_byte_w"):
+            if _require_number(name, getattr(self, name)) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
 
 
 @dataclass(frozen=True)
