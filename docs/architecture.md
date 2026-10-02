@@ -145,7 +145,7 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 | Effect → power sees the draw | +1 tick (downstream read) |
 | Fault → effect | 0 ticks |
 
-**Radio traffic (ADR-0007, Proposed, implemented by #98).** Comms reads nothing, so each tick's radio traffic (bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in the controls at step a of the next tick. Comms reports tick N's traffic in tick N+1, and power sees the transmit energy in tick N+2. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
+**Radio traffic (ADR-0007, Proposed, implemented by #98).** Comms reads nothing, so each tick's radio traffic (bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in the controls at step a of the next tick. Comms reports tick N's traffic in tick N+1, and power sees the transmit energy in tick N+2; comms' byte count is therefore named `previous_tick_sent_bytes`. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
 
 #### Snapshot contracts (#76)
 
