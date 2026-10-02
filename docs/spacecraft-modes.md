@@ -163,7 +163,7 @@ Each mode's entry action is one `SpacecraftControls` record, returned by `contro
 
 The payload is off in DOWNLINK, so each mode does one job and the controls depend on the mode alone. The power and thermal budget (#72) assumed it stays on, which is pessimistic. With it off:
 
-- **Energy:** the 10-minute pass no longer carries the 1.5 W acquiring draw, about 0.25 Wh per orbit, which lifts the reference profile's orbit-average margin from about +12.8% to about +16% (roughly +3 percentage points, still inside the +5% to +25% band).
+- **Energy:** the 10-minute pass no longer carries the 1.5 W acquiring draw, about 0.25 Wh per orbit, which lifts the reference profile's orbit-average margin from about +12.8% to about +16 to +17% (roughly +3 to +4 percentage points, still inside the +5% to +25% band).
 - **Data:** about 24 kB less per orbit is produced (600 s at 40 B/s), so the data margin rises from about 36% to about 43%.
 - **Cost:** about 11% less science time (10 of 92 minutes) in the reference profile.
 
