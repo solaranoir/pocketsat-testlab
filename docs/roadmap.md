@@ -155,6 +155,11 @@ estimate no longer holds and Phase 7 is split:
 If the 10-week plan slips, 7b is the first item cut; HIL then runs nominal scenarios
 only. Both phases still need a revised estimate.
 
+Open point: the firmware's telemetry encoder must decide how a non-finite sensor value
+is sent. The SIL encoder raises on NaN because the simulation validates its inputs; the
+options are a per-field sentinel or a "sensor invalid" flag bit from a reserved group
+(`docs/protocol.md`, #54).
+
 ### Phase 12 — CI/CD Test Infrastructure (throughout)
 
 Run unit tests, SIL tests, nominal mission scenarios, and selected fault scenarios on
