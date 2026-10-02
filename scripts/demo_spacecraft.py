@@ -1,6 +1,6 @@
 """Demo of epic #30: the spacecraft subsystem models running together.
 
-Wires the real power, thermal, attitude, and payload subsystems through a shared
+Wires the real power, thermal, attitude, payload, and comms subsystems through a shared
 ``SnapshotBoard``, drives them with ``NominalEnvironment`` and a ``SimClock``, and
 prints a text report for a few short scenarios::
 
@@ -8,9 +8,9 @@ prints a text report for a few short scenarios::
     uv run python scripts/demo_spacecraft.py --scenario faults   # just one
     uv run python scripts/demo_spacecraft.py --orbits 3 --seed 7
 
-Communications (#44) is not merged yet, so the stack uses a clearly labelled stand-in
-from ``pocketsat.spacecraft.fakes`` (power needs comms' ``transmit_power_w``). The
-stand-in lives in :func:`build_stack` only.
+There is no flight computer yet (#47, #56), so the demo scripts the controls each
+tick, including, in the nominal orbit, a labelled stand-in for the downlink's chunk
+releases.
 
 Only public APIs are used. Simulated time is integer microseconds; the wall clock is
 read only to print how long the demo took.
@@ -36,6 +36,8 @@ from pocketsat.spacecraft import (
     AttitudeInitial,
     AttitudeSnapshot,
     AttitudeState,
+    Comms,
+    CommsSnapshot,
     Payload,
     PayloadControls,
     PayloadSnapshot,
@@ -43,6 +45,8 @@ from pocketsat.spacecraft import (
     Power,
     PowerInitial,
     PowerSnapshot,
+    RadioControls,
+    RadioMode,
     SnapshotBoard,
     SpacecraftConfig,
     SpacecraftControls,
@@ -53,18 +57,12 @@ from pocketsat.spacecraft import (
     ThermalInitial,
     ThermalSnapshot,
 )
-from pocketsat.spacecraft.fakes import FakeSubsystem, default_snapshot
 from pocketsat.targets.base import EnvironmentState
 
 US_PER_S = 1_000_000
 US_PER_MIN = 60 * US_PER_S
 
 SCENARIOS = ("nominal", "detumble", "faults", "determinism", "cold")
-
-COMMS_STAND_IN_NOTE = (
-    "comms: STAND-IN (fakes.FakeSubsystem holding the default comms snapshot, "
-    "constant 1.0 W transmit draw) until #44 merges"
-)
 
 # --- Stack and run loop ----------------------------------------------------------------
 
@@ -73,24 +71,17 @@ def build_stack(
     config: SpacecraftConfig = NOMINAL_CONFIG,
     initial: SpacecraftInitialState | None = None,
 ) -> SubsystemStack:
-    """Build the real subsystems on one shared ``SnapshotBoard``.
-
-    Power, thermal, attitude, and payload are the real models from ``main``. Comms is a
-    stand-in until #44 merges; it is the only fake in the stack.
-    """
+    """Build the five real subsystems on one shared ``SnapshotBoard``."""
     initial = SpacecraftInitialState() if initial is None else initial
     board = SnapshotBoard()
-    # TODO(#44): replace this stand-in with the real subsystem, e.g.
-    #   comms = Comms(config.comms, board)
-    comms = FakeSubsystem("comms", default_snapshot("comms"))
-    # Typed loosely: Thermal and Payload declare ``name: Final``, which mypy treats as
-    # not matching the Subsystem protocol's settable ``name: str``.
+    # Typed loosely: Thermal, Payload, and Comms declare ``name: Final``, which mypy
+    # treats as not matching the Subsystem protocol's settable ``name: str``.
     subsystems: tuple[Any, ...] = (
         Power(config.power, initial.power, board),
         Thermal(config.thermal, initial.thermal, board),
         Attitude(config.attitude, initial.attitude),
         Payload(config.payload, initial.payload, board),
-        comms,
+        Comms(config.comms),
     )
     return SubsystemStack(subsystems, board=board)
 
@@ -122,13 +113,18 @@ class Sample:
         return self.state.get("payload", PayloadSnapshot)
 
     @property
+    def comms(self) -> CommsSnapshot:
+        return self.state.get("comms", CommsSnapshot)
+
+    @property
     def minutes(self) -> float:
         return self.now_us / US_PER_MIN
 
 
-ControlsAt = Callable[[int], SpacecraftControls]
-"""Controls for the tick starting at simulated time ``now_us``. In the full system the
-flight computer and fault injectors produce these; the demo scripts them."""
+ControlsAt = Callable[[int, SpacecraftState], SpacecraftControls]
+"""Controls for the tick starting at simulated time ``now_us``, given the state at the
+end of the previous tick. In the full system the flight computer and fault injectors
+produce these; the demo scripts them."""
 
 PAYLOAD_ON = SpacecraftControls(payload=PayloadControls(enabled=True))
 
@@ -152,7 +148,7 @@ class Run:
         samples = []
         for _ in range(ticks):
             env = self.env_model.state_at(self.clock.now_us)
-            controls = controls_at(self.clock.now_us)
+            controls = controls_at(self.clock.now_us, self.stack.snapshot())
             self.stack.step(self.clock.tick_us, env, controls)
             self.clock.advance_one_tick()
             samples.append(Sample(self.clock.now_us, env, controls, self.stack.snapshot()))
@@ -200,6 +196,10 @@ def att_short(state: AttitudeState) -> str:
     return {"tumbling": "TUMBL", "detumbling": "DETUM", "stabilized": "STAB"}[state.value]
 
 
+def radio_short(mode: RadioMode) -> str:
+    return {"off": "OFF", "rx_only": "RX", "rx_tx": "RX/TX"}[mode.value]
+
+
 def flags_of(s: Sample) -> str:
     names = [
         name
@@ -216,7 +216,7 @@ def flags_of(s: Sample) -> str:
 
 TIMELINE_HEADER = (
     "  t(min) light   SOC true/est  bus V  gen W load W  batt C  elec C  heat  "
-    "attitude  ptg deg  payload   buf B  flags"
+    "attitude  ptg deg  payload   buf B  radio  tx W  flags"
 )
 
 
@@ -231,6 +231,7 @@ def timeline_row(s: Sample) -> str:
         f"  {'ON ' if th.truth.heater_on else 'off'}"
         f"  {att_short(at.truth.state):8s} {at.truth.pointing_error_deg:7.1f}"
         f"  {pl.truth.state.value:9s} {pl.truth.buffered_bytes:6d}"
+        f"  {radio_short(s.comms.truth.radio_mode):5s} {s.comms.truth.transmit_power_w:4.1f}"
         f"  {flags_of(s)}"
     )
 
@@ -278,17 +279,41 @@ def raised_flags(samples: Sequence[Sample]) -> list[str]:
     return list(seen) or ["none"]
 
 
+RELEASE_EVERY_US = 5 * US_PER_MIN
+"""Period of the scripted chunk release in the nominal orbit."""
+
+
+def downlink_stand_in(now_us: int, state: SpacecraftState) -> SpacecraftControls:
+    """Payload on, and every :data:`RELEASE_EVERY_US` release every whole chunk stored.
+
+    STAND-IN for the flight computer's downlink (#56), which will release chunks only
+    after sending them as DATA frames. Nothing is actually sent here (comms'
+    ``sent_bytes`` stays 0); the release only keeps the payload buffer from filling.
+    """
+    release = None
+    if now_us and now_us % RELEASE_EVERY_US == 0:
+        payload = state.get("payload", PayloadSnapshot).truth
+        if payload.next_chunk_id > payload.oldest_unreleased_chunk_id:
+            release = payload.next_chunk_id - 1
+    return SpacecraftControls(
+        payload=PayloadControls(enabled=True, release_through_chunk_id=release)
+    )
+
+
 def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> None:
     heading(out, f"1. NOMINAL ORBIT  ({float(orbits):g} orbit(s), payload enabled, seed {seed})")
     env = NominalEnvironment()
     run = new_run(seed, tick_us, env_model=env)
-    samples = run.advance(ticks_for(orbits * env.orbit_period_us, tick_us), lambda _t: PAYLOAD_ON)
+    samples = run.advance(ticks_for(orbits * env.orbit_period_us, tick_us), downlink_stand_in)
     out.write(
         f"Orbit {env.orbit_period_us // US_PER_MIN} min:"
         f" sunlit {env.sunlit_us / US_PER_MIN:.1f} min,"
         f" eclipse {env.eclipse_us / US_PER_MIN:.1f} min (ambient +20 C sunlit, -20 C eclipse).\n"
         "Starts DETUMBLING at 45 deg / 1.0 dps (default AttitudeInitial). Truth values,"
-        " except 'est' (SOC estimate from the noisy voltage) and bus V (reported).\n\n"
+        " except 'est' (SOC estimate from the noisy voltage) and bus V (reported).\n"
+        f"Radio commanded RX_TX. Every {RELEASE_EVERY_US // US_PER_MIN} min a scripted release"
+        " frees every stored chunk: a STAND-IN for the flight\n"
+        "computer's downlink (#56); no bytes are actually sent yet.\n\n"
     )
     write_timeline(out, every(samples, 5 * US_PER_MIN))
 
@@ -323,7 +348,18 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
         )
     last = samples[-1].payload.truth
     out.write(
-        f"  payload: produced {last.total_produced_bytes} B, buffer fill {last.buffer_fill:.1%}\n"
+        f"  payload: produced {last.total_produced_bytes} B,"
+        f" released {last.total_released_bytes} B (scripted stand-in),"
+        f" buffer fill {last.buffer_fill:.1%}\n"
+    )
+    radio = samples[-1].comms.truth
+    out.write(
+        f"  comms: {radio.radio_mode.value}, receiver {'on' if radio.receiver_on else 'off'},"
+        f" transmitter {'on' if radio.transmitter_on else 'off'},"
+        f" capacity {radio.transmit_capacity_bytes} B per tick"
+        f" ({radio.transmit_capacity_bytes * US_PER_S // tick_us} B/s at this tick),"
+        f" draw {radio.transmit_power_w:.2f} W, sent {radio.sent_bytes} B"
+        " (counters wait for #56/#59)\n"
     )
     out.write(f"  flags raised: {', '.join(raised_flags(samples))}\n")
 
@@ -339,7 +375,7 @@ def scenario_detumble(out: TextIO, seed: int, tick_us: int, control_off_min: int
     run = new_run(seed, tick_us, initial=initial)
     off_until = control_off_min * US_PER_MIN
 
-    def controls_at(now_us: int) -> SpacecraftControls:
+    def controls_at(now_us: int, _state: SpacecraftState) -> SpacecraftControls:
         return SpacecraftControls(
             payload=PayloadControls(enabled=True),
             attitude=AttitudeControls(enabled=now_us >= off_until),
@@ -387,7 +423,7 @@ def scenario_faults(out: TextIO, seed: int, tick_us: int) -> None:
     run = new_run(seed, tick_us, initial=initial)
     drain_from = US_PER_MIN
 
-    def drain(now_us: int) -> SpacecraftControls:
+    def drain(now_us: int, _state: SpacecraftState) -> SpacecraftControls:
         return SpacecraftControls(
             payload=PayloadControls(enabled=True),
             extra_load_w=50.0 if now_us >= drain_from else 0.0,
@@ -423,7 +459,7 @@ def scenario_faults(out: TextIO, seed: int, tick_us: int) -> None:
     run = new_run(seed, tick_us, initial=SpacecraftInitialState(attitude=STABLE_START))
     frozen = frozenset({"power", "thermal", "attitude"})
 
-    def freeze(now_us: int) -> SpacecraftControls:
+    def freeze(now_us: int, _state: SpacecraftState) -> SpacecraftControls:
         on = 2 * US_PER_MIN <= now_us < 6 * US_PER_MIN
         return SpacecraftControls(
             payload=PayloadControls(enabled=True),
@@ -453,6 +489,49 @@ def scenario_faults(out: TextIO, seed: int, tick_us: int) -> None:
         f"\n  while frozen: power readings held={held}; true SOC moved {moved:+.4f};"
         " readings resume on release\n"
     )
+    scenario_transmitter_off(out, seed, tick_us)
+
+
+def scenario_transmitter_off(out: TextIO, seed: int, tick_us: int) -> None:
+    heading(
+        out,
+        "3c. FAULT: transmitter_off representation"
+        "  (controls.radio.mode RX_TX -> RX_ONLY from t=30 s to t=60 s)",
+    )
+    off_from, off_until = 30 * US_PER_S, 60 * US_PER_S
+
+    def radio(now_us: int, _state: SpacecraftState) -> SpacecraftControls:
+        failed = off_from <= now_us < off_until
+        mode = RadioMode.RX_ONLY if failed else RadioMode.RX_TX
+        return SpacecraftControls(radio=RadioControls(mode=mode))
+
+    run = new_run(seed, tick_us, initial=SpacecraftInitialState(attitude=STABLE_START))
+    samples = run.advance(ticks_for(off_until + 3 * tick_us, tick_us), radio)
+    out.write(
+        "The transmitter_off fault is a control override (merged by SilTarget, #60) that"
+        " downgrades the radio mode;\ncomms just obeys the mode. Comms steps after power,"
+        " so power sees the new draw one tick later.\n\n"
+    )
+    out.write("  tick  t(s)  mode     rx   tx   capacity B  comms draw W  power load W\n")
+    edges = {off_from, off_until}
+    shown = [
+        s
+        for s in samples
+        if any(edge - tick_us <= s.now_us - tick_us <= edge + 2 * tick_us for edge in edges)
+    ]
+    previous = None
+    for s in shown:
+        if previous is not None and s.now_us - previous.now_us > tick_us:
+            out.write("   ...\n")
+        c = s.comms.truth
+        tick = s.now_us // tick_us - 1
+        out.write(
+            f"  {tick:4d} {(s.now_us - tick_us) / US_PER_S:5.0f}  {c.radio_mode.value:7s}"
+            f"  {'on ' if c.receiver_on else 'off'}  {'on ' if c.transmitter_on else 'off'}"
+            f"  {c.transmit_capacity_bytes:10d}  {c.transmit_power_w:12.2f}"
+            f"  {s.power.truth.total_load_w:12.2f}\n"
+        )
+        previous = s
 
 
 # --- Scenario 4: determinism -----------------------------------------------------------
@@ -495,7 +574,7 @@ def scenario_determinism(out: TextIO, seed: int, tick_us: int, minutes: int = 20
         run_seed: int, config: SpacecraftConfig, controls: SpacecraftControls
     ) -> list[Sample]:
         run = new_run(run_seed, tick_us, config=config)
-        return run.advance(ticks_for(minutes * US_PER_MIN, tick_us), lambda _t: controls)
+        return run.advance(ticks_for(minutes * US_PER_MIN, tick_us), lambda _t, _s: controls)
 
     cases = (
         ("A nominal, payload on", NOMINAL_CONFIG, PAYLOAD_ON),
@@ -555,7 +634,7 @@ def scenario_cold(out: TextIO, seed: int, tick_us: int, ambient_c: float = -60.0
         thermal=ThermalInitial(battery_c=10.0, electronics_c=10.0), attitude=STABLE_START
     )
     run = new_run(seed, tick_us, initial=initial, env_model=env)
-    samples = run.advance(ticks_for(60 * US_PER_MIN, tick_us), lambda _t: PAYLOAD_ON)
+    samples = run.advance(ticks_for(60 * US_PER_MIN, tick_us), lambda _t, _s: PAYLOAD_ON)
     out.write(
         "Survival heater: ON below 0 C, OFF above 4 C (3 W). At this ambient it cannot reach 4 C,\n"
         "so once on it never switches off. Starts at 10 C.\n\n"
@@ -602,8 +681,7 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
     out.write(
         f"PocketSat epic #30 demo: spacecraft subsystem models (seed {args.seed},"
         f" tick {args.tick_ms} ms)\n"
-        "Real subsystems: power, thermal, attitude, payload on a shared SnapshotBoard.\n"
-        f"{COMMS_STAND_IN_NOTE}\n"
+        "Real subsystems: power, thermal, attitude, payload, comms on a shared SnapshotBoard.\n"
     )
     chosen = SCENARIOS if args.scenario == "all" else (args.scenario,)
     for name in chosen:

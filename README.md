@@ -76,23 +76,24 @@ uv run python scripts/demo_spacecraft.py --scenario faults      # one scenario
 uv run python scripts/demo_spacecraft.py --orbits 3 --seed 7    # longer nominal run
 ```
 
-The real power, thermal, attitude, and payload subsystems share a `SnapshotBoard`,
-driven by `NominalEnvironment` and a `SimClock`. The scenarios are:
+The real power, thermal, attitude, payload, and comms subsystems share a
+`SnapshotBoard`, driven by `NominalEnvironment` and a `SimClock`. There is no flight
+computer yet, so the demo scripts the controls. The scenarios are:
 
 - `nominal`: an orbit's timeline (sunlight and eclipse, true and estimated SOC, bus
-  voltage, temperatures, survival heater, attitude, payload buffer) and an energy,
-  heater, and flag summary.
+  voltage, temperatures, survival heater, attitude, payload buffer, radio mode and
+  transmit draw) and an energy, heater, payload, comms, and flag summary. A scripted
+  chunk release every 5 minutes stands in for the flight computer's downlink (#56).
 - `detumble`: a high starting rate with attitude control off, then on. Generation
   drops while tumbling, and the payload waits for `STABILIZED`.
 - `faults`: `battery_drain` (`extra_load_w`) sets `low_battery` and
   `critical_battery` and stops acquisition; `sensor_freeze` (`frozen_sensors`) holds
-  the readings while the truth moves.
+  the readings while the truth moves; the `transmitter_off` representation downgrades
+  the radio mode from `RX_TX` to `RX_ONLY`, so transmit capacity and draw drop to 0
+  while the receiver stays on.
 - `determinism`: the same seed gives identical digests, and a new seed with the
   attitude disturbance off changes only the sensor readings.
 - `cold`: a permanent cold eclipse where the survival heater never switches off.
-
-Communications (#44) is a labelled stand-in from `pocketsat.spacecraft.fakes` until
-the real subsystem lands.
 
 ## License
 

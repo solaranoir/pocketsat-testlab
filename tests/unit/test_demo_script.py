@@ -33,16 +33,16 @@ def run(demo: ModuleType, *argv: str) -> str:
 @pytest.mark.parametrize(
     ("scenario", "expected"),
     [
-        ("nominal", ["1. NOMINAL ORBIT", "Summary", "energy:", "flags raised:"]),
+        ("nominal", ["1. NOMINAL ORBIT", "energy:", "(scripted stand-in)", "comms: rx_tx"]),
         ("detumble", ["2. DETUMBLE", "tumbling", "stabilized", "payload first ACQUIRING"]),
-        ("faults", ["3a. FAULT: battery_drain", "critical_battery set at", "3b. FAULT"]),
+        ("faults", ["3a. FAULT: battery_drain", "critical_battery set at", "3b.", "3c."]),
         ("determinism", ["4. DETERMINISM", "identical truth and readings in every case: True"]),
         ("cold", ["5. COLD CASE", "heater first on at", "UNDER"]),
     ],
 )
 def test_each_scenario_runs(demo: ModuleType, scenario: str, expected: list[str]) -> None:
     text = run(demo, "--scenario", scenario)
-    assert "comms: STAND-IN" in text
+    assert "payload, comms on a shared SnapshotBoard" in text
     for snippet in expected:
         assert snippet in text, snippet
     assert "Done: 1 scenario(s)" in text
@@ -50,6 +50,15 @@ def test_each_scenario_runs(demo: ModuleType, scenario: str, expected: list[str]
 
 def test_sensor_freeze_holds_readings(demo: ModuleType) -> None:
     assert "power readings held=True" in run(demo, "--scenario", "faults")
+
+
+def test_transmitter_off_drops_capacity_and_draw(demo: ModuleType) -> None:
+    text = run(demo, "--scenario", "faults").split("3c.")[1]
+    rows = [line.split() for line in text.splitlines() if "rx_only" in line]
+    assert rows
+    for row in rows:
+        mode, rx, tx, capacity, draw = row[2:7]
+        assert (mode, rx, tx, capacity, draw) == ("rx_only", "on", "off", "0", "0.00")
 
 
 def test_noise_only_seed_change(demo: ModuleType) -> None:
