@@ -7,21 +7,9 @@ The real ``Power``, ``Thermal``, ``Attitude``, ``Payload``, and ``Comms`` run in
 per-byte transmit draw are per tick, so the budget only holds at 100 ms.
 
 There is no flight computer yet, so each profile scripts ``SpacecraftControls`` the way
-the flight computer's mode table will (#47): payload enabled in SCIENCE and DOWNLINK,
-radio ``RX_TX`` in every mode (ADR-0004 §10), attitude control on.
-
-**Stand-ins until #56 and #59 send real traffic** (comms' ``sent_bytes`` is always 0):
-
-- *Traffic energy.* The bytes a real flight computer would send are costed with
-  :func:`~pocketsat.spacecraft.comms.transmit_draw_w` and added through
-  ``SpacecraftControls.extra_load_w`` in the ticks they would be sent: an assumed
-  beacon of one :data:`TELEMETRY_FRAME_BYTES` telemetry frame per second outside the
-  pass, and full transmit capacity in every tick of the DOWNLINK pass. Comms' own
-  truth already carries the idle draw (``transmitter_on_power_w``), so only the
-  per-byte part is added.
-- *Data release.* In each pass tick the test releases as many of the oldest chunks as
-  whole DATA frames fit in the capacity left after telemetry and ACK/NACK (ADR-0004
-  §10 priority), as #56 will.
+the flight computer's mode table will (#47), through ``ProfileDriver``. The profiles, the
+driver, and the traffic and release stand-ins (until #56 and #59 send real traffic) live
+in ``_reference_profile.py``, shared with the epic #30 close-out test (#70).
 
 Re-check this budget once #56 and #59 send real traffic.
 
@@ -35,69 +23,39 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
 
 import pytest
+from _reference_profile import (
+    BEACON_PERIOD_US,
+    PASS_US,
+    REFERENCE,
+    US_PER_S,
+    Profile,
+    ProfileDriver,
+    data_frames_in_tick,
+    real_stack,
+)
 
 from pocketsat.core.clock import SimClock
-from pocketsat.core.rng import RngFactory
 from pocketsat.environment import NominalEnvironment
-from pocketsat.frame import MIN_FRAME_SIZE
 from pocketsat.spacecraft import (
-    CHUNK_ID_SIZE_BYTES,
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
     STRESSED_CONFIG,
-    Attitude,
-    AttitudeControls,
-    Comms,
     CommsSnapshot,
-    Payload,
-    PayloadControls,
     PayloadSnapshot,
-    Power,
     PowerSnapshot,
-    RadioControls,
-    RadioMode,
-    SnapshotBoard,
     SpacecraftConfig,
-    SpacecraftControls,
     SpacecraftInitialState,
     SpacecraftState,
-    SubsystemStack,
-    Thermal,
     ThermalSnapshot,
-    transmit_draw_w,
 )
 
 # Multi-orbit budget runs: skipped by a plain `pytest`, run with `pytest -m slow`.
 pytestmark = pytest.mark.slow
 
 SEED = 1
-US_PER_S = 1_000_000
 S_PER_H = 3600
-
-# --- Traffic assumptions (stand-ins until #56 and #59) ---------------------------------
-
-TELEMETRY_PAYLOAD_BYTES = 54
-"""Assumed telemetry payload, bytes. #54's field list (uptime, mode, flags, voltage,
-SOC, two temperatures, pointing error, buffer fill, radio, attitude and payload states,
-boot count) encodes to about 24 bytes; 54 leaves room for growth."""
-
-TELEMETRY_FRAME_BYTES = MIN_FRAME_SIZE + TELEMETRY_PAYLOAD_BYTES
-"""Assumed telemetry (beacon) frame, bytes: 64 with the 10-byte frame overhead
-(``docs/protocol.md``)."""
-
-ACK_FRAME_BYTES = MIN_FRAME_SIZE + 3
-"""Assumed ACK/NACK frame, bytes: acknowledged sequence (2) and status (1) plus the
-frame overhead, 13."""
-
-BEACON_PERIOD_US = US_PER_S
-"""One telemetry frame per second, in every mode."""
-
-PASS_US = 10 * 60 * US_PER_S
-"""DOWNLINK pass length: 10 minutes, at the end of each orbit (the end of eclipse, the
-worst place for the minimum SOC)."""
 
 # --- Budget requirements (#72) ---------------------------------------------------------
 
@@ -152,22 +110,8 @@ COLD_HEATER_DUTY = 0.95
 """In the cold case the heater is on for at least this fraction of the ticks after it
 first switches on."""
 
-Downlink = Literal["none", "pass", "continuous"]
-
-
-@dataclass(frozen=True)
-class Profile:
-    """An operating profile: what the flight computer would command."""
-
-    name: str
-    payload: bool = True
-    attitude: bool = True
-    downlink: Downlink = "pass"
-
-
 NOMINAL = Profile("NOMINAL", payload=False, downlink="none")
 SCIENCE = Profile("SCIENCE", downlink="none")
-REFERENCE = Profile("reference (SCIENCE + 10-min DOWNLINK)")
 CONTINUOUS_DOWNLINK = Profile("continuous DOWNLINK", downlink="continuous")
 TUMBLING = Profile("tumbling (attitude control off)", attitude=False)
 STRESSED_SCIENCE = Profile("SCIENCE, stressed configuration", downlink="none")
@@ -230,37 +174,6 @@ class Result:
     """(ticks on, ticks) from the heater's first switch-on to the end."""
 
 
-def _stack(config: SpacecraftConfig, initial: SpacecraftInitialState) -> SubsystemStack:
-    board = SnapshotBoard()
-    stack = SubsystemStack(
-        [
-            Power(config.power, initial.power, reader=board),
-            Thermal(config.thermal, initial.thermal, reader=board),
-            Attitude(config.attitude, initial.attitude),
-            Payload(config.payload, initial.payload, reader=board),
-            Comms(config.comms),
-        ],
-        board=board,
-    )
-    stack.reset(RngFactory(SEED))
-    return stack
-
-
-def data_frame_bytes(config: SpacecraftConfig) -> int:
-    """One chunk's DATA frame: chunk ID, chunk content, and the frame overhead (#56)."""
-    return CHUNK_ID_SIZE_BYTES + config.payload.chunk_size_bytes + MIN_FRAME_SIZE
-
-
-def data_frames_in_tick(config: SpacecraftConfig, beacon_tick: bool) -> int:
-    """Whole DATA frames that fit in one pass tick after ACK/NACK and telemetry.
-
-    Frames that don't fit are not queued (ADR-0004 §10). In the beacon tick the
-    telemetry frame and an assumed ACK/NACK come first.
-    """
-    overhead = TELEMETRY_FRAME_BYTES + ACK_FRAME_BYTES if beacon_tick else 0
-    return max(0, config.comms.transmit_capacity_bytes - overhead) // data_frame_bytes(config)
-
-
 def pass_capacity_bytes(config: SpacecraftConfig, tick_us: int) -> int:
     """Chunk bytes one DOWNLINK pass can carry, net of ACK/NACK and telemetry."""
     ticks_per_beacon = BEACON_PERIOD_US // tick_us
@@ -284,20 +197,13 @@ def run_profile(
     """Run ``profile`` for ``orbits`` orbits (or until flag ``stop_on`` sets)."""
     started = time.perf_counter()
     env_model = NominalEnvironment() if environment is None else environment
-    stack = _stack(config, initial)
+    stack = real_stack(SEED, config, initial)
     clock = SimClock()
     tick_us = clock.tick_us
     dt_h = tick_us / US_PER_S / S_PER_H
     period_us = env_model.orbit_period_us
-    pass_start_us = period_us - PASS_US
-    comms = config.comms
-    idle_w = transmit_draw_w(comms, True, 0)
-    beacon_w = transmit_draw_w(comms, True, TELEMETRY_FRAME_BYTES) - idle_w
-    pass_w = transmit_draw_w(comms, True, comms.transmit_capacity_bytes) - idle_w
-    frames = {beacon: data_frames_in_tick(config, beacon) for beacon in (False, True)}
+    driver = ProfileDriver(profile, config, period_us, extra_load_w)
     capacity_wh = config.power.battery_capacity_wh
-    attitude = AttitudeControls(enabled=profile.attitude)
-    radio = RadioControls(mode=RadioMode.RX_TX)
 
     previous = stack.snapshot()
     flags: dict[str, int] = {}
@@ -314,29 +220,10 @@ def run_profile(
         heater_was_on = previous.get("thermal", ThermalSnapshot).truth.heater_on
         for _ in range(period_us // tick_us):
             now_us = clock.now_us
-            beacon = now_us % BEACON_PERIOD_US == 0
-            in_pass = profile.downlink == "continuous" or (
-                profile.downlink == "pass" and now_us % period_us >= pass_start_us
-            )
-            release = None
-            if in_pass:
-                traffic_w = pass_w
-                chunks = frames[beacon]
-                payload = previous.get("payload", PayloadSnapshot).truth
-                if chunks and payload.next_chunk_id > payload.oldest_unreleased_chunk_id:
-                    release = (
-                        min(payload.oldest_unreleased_chunk_id + chunks, payload.next_chunk_id) - 1
-                    )
-            else:
-                traffic_w = beacon_w if beacon else 0.0
-            controls = SpacecraftControls(
-                payload=PayloadControls(enabled=profile.payload, release_through_chunk_id=release),
-                radio=radio,
-                attitude=attitude,
-                extra_load_w=traffic_w + extra_load_w,
-            )
+            command = driver.command(now_us, previous)
+            in_pass, traffic_w = command.in_pass, command.traffic_w
             env = env_model.state_at(now_us)
-            stack.step(tick_us, env, controls)
+            stack.step(tick_us, env, command.controls)
             clock.advance_one_tick()
             state = stack.snapshot()
             _accumulate(stats, previous, state, env.sunlit, dt_h)
