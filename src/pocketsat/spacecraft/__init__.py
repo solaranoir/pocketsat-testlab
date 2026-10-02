@@ -10,6 +10,7 @@ from pocketsat.spacecraft.base import (
     SubsystemSnapshot,
     SubsystemStack,
 )
+from pocketsat.spacecraft.comms import Comms, transmit_draw_w
 from pocketsat.spacecraft.config import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -83,6 +84,7 @@ __all__ = [
     "AttitudeSnapshot",
     "AttitudeState",
     "AttitudeTruth",
+    "Comms",
     "CommsConfig",
     "CommsReadings",
     "CommsSnapshot",
@@ -120,4 +122,5 @@ __all__ = [
     "ThermalSnapshot",
     "ThermalTruth",
     "chunk_content",
+    "transmit_draw_w",
 ]

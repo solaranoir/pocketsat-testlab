@@ -191,6 +191,34 @@ Readings report the pointing error and rate with noise from the stream `spacecra
 
 All `AttitudeConfig` defaults are illustrative; the power and thermal budget (#72) finalizes `control_power_w`.
 
+## Communications (#44)
+
+`pocketsat.spacecraft.Comms` is built as `Comms(config.comms)`. It has no starting record (it holds no data, ADR-0005), uses no randomness, and reads nothing from other subsystems. The radio is full duplex (ADR-0004 §10); each tick comms obeys `controls.radio.mode`:
+
+| Mode | `receiver_on` | `transmitter_on` | `transmit_capacity_bytes` |
+|---|---|---|---|
+| `OFF` | false | false | 0 |
+| `RX_ONLY` | true | false | 0 |
+| `RX_TX` | true | true | `CommsConfig.transmit_capacity_bytes` |
+
+- **Comms holds no data** (ADR-0004 §13). It only exposes how many bytes may be sent this tick; the flight computer (#56) moves payload chunks into DATA frames within that capacity and rate-limits downlink against it. The capacity is per tick, whatever the tick length.
+- **Transmitter failure is a mode downgrade.** The controls have no "transmitter failed" field. `SilTarget` (#60) represents the `transmitter_off` fault by downgrading `controls.radio.mode` from `RX_TX` to `RX_ONLY`: transmitter off and capacity 0, receiver still on, so the spacecraft can hear and execute commands but cannot reply. Comms has no fault hook; it simply obeys the mode.
+- **Transmit draw.** `transmit_draw_w(config, transmitter_on, sent_bytes)` is a pure function: `transmitter_on_power_w + transmit_power_per_byte_w * sent_bytes` while the transmitter is on, 0 while it is off. `CommsTruth.transmit_power_w` is its value for the tick; power (#36) adds it to the total load one tick late.
+- **Traffic counters.** `sent_bytes`, `uplink_lost_count`, and `outbound_suppressed_count` depend on what the flight computer sends (#56) and on the uplink frames `SilTarget` delivers (#59). Neither exists yet, so the counters are 0 and the draw is computed with `sent_bytes = 0`; #56 and #59 define the input path and fill them.
+- **Radio-transmit inhibits** (story #42) belong to the flight computer: its downlink (#56) decides whether to send, and #56 verifies them. Comms has no inhibits of its own.
+
+After a reset, and until the first step, the radio is `OFF` with no draw and the counters at 0; the first step applies the commanded mode. Readings equal truth (`CommsSnapshot.from_truth`).
+
+| `CommsConfig` field | Default | Meaning |
+|---|---|---|
+| `transmit_capacity_bytes` | 120 | bytes per tick while the transmitter is on (9600 bit/s at the 100 ms tick; fits one default 78-byte DATA frame plus an ACK) |
+| `transmitter_on_power_w` | 1.0 | fixed draw while the transmitter is on, W (the shared fakes' transmit draw) |
+| `transmit_power_per_byte_w` | 0.005 | extra draw per byte sent in the tick, W per byte (0.6 W at full capacity) |
+
+The defaults are provisional; #72 calibrates the draws. `step()` plus `snapshot()` costs well under 1 µs on a developer laptop: the snapshot is rebuilt only when the mode changes.
+
+The story-level test for #42 (`tests/sil/test_payload_comms_story.py`) runs the real power, thermal, attitude, payload, and comms subsystems over three nominal orbits with the payload commanded on and the radio `RX_TX`, with scripted chunk releases standing in for the flight computer. At every tick it checks the data accounting (`total_produced_bytes == buffered_bytes + total_released_bytes`), that the payload acquires exactly when its inhibits allow, that comms sends nothing, and that power sees every draw one tick late, plus determinism. A second scenario uses a `battery_drain` extra load to set `low_battery` and shows acquisition stopping and resuming. The downlink accounting (bytes sent minus bytes released) and the radio-transmit inhibits are verified with the flight computer's downlink (#56).
+
 ## Shared test fakes
 
 `pocketsat.spacecraft.fakes` provides fakes that every test directory can import, following `EchoTarget`'s precedent. Subsystem tickets test against fakes of the subsystems they read, so none waits for another's implementation.
