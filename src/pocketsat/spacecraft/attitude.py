@@ -169,7 +169,7 @@ class Attitude:
         name: Always ``"attitude"``.
     """
 
-    name = "attitude"
+    name: Final = "attitude"
 
     def __init__(self, config: AttitudeConfig, initial: AttitudeInitial) -> None:
         """Create the attitude subsystem, at its starting state.
