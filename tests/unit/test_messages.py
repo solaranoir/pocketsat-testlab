@@ -4,7 +4,13 @@ import dataclasses
 
 import pytest
 
-from pocketsat.messages import Command, Packet, Telemetry
+from pocketsat.messages import (
+    TELEMETRY_PAYLOAD_SIZE,
+    Command,
+    FlightComputerTelemetryState,
+    Packet,
+    decode_telemetry,
+)
 from pocketsat.targets import base
 
 
@@ -12,7 +18,8 @@ from pocketsat.targets import base
     "instance",
     [
         Command(command_id=1),
-        Telemetry(uptime_ms=0),
+        decode_telemetry(bytes(TELEMETRY_PAYLOAD_SIZE)),
+        FlightComputerTelemetryState(uptime_ms=0, mode_id=0, boot_count=0),
         Packet(frame=b"\xa5\x5a"),
         base.TargetCapabilities(deterministic=True, real_time=False),
         base.EnvironmentState(),
