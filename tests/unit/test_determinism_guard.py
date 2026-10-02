@@ -134,6 +134,25 @@ def _simulation_modules() -> list[Path]:
     )
 
 
+SPACECRAFT_MODULES = frozenset(
+    {
+        "spacecraft/__init__.py",
+        "spacecraft/attitude.py",
+        "spacecraft/base.py",
+        "spacecraft/comms.py",
+        "spacecraft/config.py",
+        "spacecraft/controls.py",
+        "spacecraft/fakes.py",
+        "spacecraft/payload.py",
+        "spacecraft/power.py",
+        "spacecraft/snapshots.py",
+        "spacecraft/thermal.py",
+    }
+)
+"""Every spacecraft module, listed by name (epic #30 close-out, #70): the five subsystems
+(power, thermal, attitude, payload, comms) and the framework they share."""
+
+
 def test_scan_covers_simulation_code() -> None:
     names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
     assert {
@@ -141,11 +160,21 @@ def test_scan_covers_simulation_code() -> None:
         "core/portable.py",
         "core/rng.py",
         "environment/nominal.py",
-        "spacecraft/base.py",
         "targets/base.py",
         "targets/echo.py",
     } <= names
     assert not any(name.startswith("reporting/") for name in names)
+
+
+def test_scan_covers_every_spacecraft_module() -> None:
+    # Each subsystem module is scanned by name, and a new spacecraft module must be added
+    # to the list, so none is left out of the explicit coverage.
+    names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
+    scanned = {name for name in names if name.startswith("spacecraft/")}
+    assert scanned == SPACECRAFT_MODULES, (
+        f"missing from the scan: {sorted(SPACECRAFT_MODULES - scanned)};"
+        f" not listed in SPACECRAFT_MODULES: {sorted(scanned - SPACECRAFT_MODULES)}"
+    )
 
 
 @pytest.mark.parametrize(
