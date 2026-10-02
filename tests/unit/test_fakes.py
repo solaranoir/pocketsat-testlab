@@ -61,7 +61,7 @@ def test_fake_rejects_unknown_name_and_wrong_snapshot_type() -> None:
     with pytest.raises(ValueError, match="unknown subsystem"):
         FakeSubsystem("radio", default_snapshot("comms"))
     with pytest.raises(TypeError, match="needs a PowerSnapshot"):
-        FakeSubsystem("power", default_snapshot("thermal"))  # type: ignore[arg-type]
+        FakeSubsystem("power", default_snapshot("thermal"))
     with pytest.raises(TypeError, match="needs a PowerSnapshot"):
         FakeSubsystem("power", default_snapshot("power"), script={3: default_snapshot("thermal")})
     with pytest.raises(ValueError, match="non-negative ints"):
@@ -87,6 +87,7 @@ def test_mapping_script_steps_up_at_tick_10_and_holds() -> None:
 
 def test_function_script_gets_tick_and_previous() -> None:
     start = default_snapshot("power")
+    assert isinstance(start, PowerSnapshot)  # narrows S, so the script can take a PowerSnapshot
     seen: list[tuple[int, float]] = []
 
     def drain(tick: int, previous: PowerSnapshot) -> PowerSnapshot:
@@ -104,7 +105,7 @@ def test_function_script_gets_tick_and_previous() -> None:
 
 
 def test_function_script_returning_wrong_type_is_rejected() -> None:
-    fake = FakeSubsystem("power", default_snapshot("power"), script=lambda t, p: p.truth)  # type: ignore[arg-type,return-value]
+    fake = FakeSubsystem("power", default_snapshot("power"), script=lambda t, p: p.truth)
     with pytest.raises(TypeError):
         fake.step(TICK_US, ENV, CONTROLS)
 

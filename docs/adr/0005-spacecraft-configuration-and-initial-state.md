@@ -1,6 +1,6 @@
 # ADR-0005: Spacecraft configuration and initial state
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Phase:** 1
 - **Amends / Supersedes:** None. Related: ADR-0002 (`TestTarget`, unsupported faults), ADR-0003 (determinism, run records), ADR-0004 (per-subsystem record pattern). Issue: #74.
 

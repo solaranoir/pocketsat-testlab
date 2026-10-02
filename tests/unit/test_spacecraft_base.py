@@ -90,9 +90,9 @@ def test_snapshots_are_frozen() -> None:
 
 def test_mutable_snapshot_subclass_is_impossible() -> None:
     with pytest.raises(TypeError):
-
+        # Deliberately invalid: the test checks the runtime rejects what mypy also rejects.
         @dataclasses.dataclass
-        class Mutable(SubsystemSnapshot):
+        class Mutable(SubsystemSnapshot):  # type: ignore[misc]
             value: int = 0
 
 

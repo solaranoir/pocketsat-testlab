@@ -1,6 +1,6 @@
 # ADR-0006: Portable arithmetic in simulation code
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0003 §3, which names `gauss` as a stable method. Issue: #75.
 
