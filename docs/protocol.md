@@ -69,7 +69,7 @@ use typed, immutable messages (`pocketsat.messages`, `pocketsat.targets.base`).
 |---|---|---|
 | `Command` | `pocketsat.messages` | Ground-originated request: `command_id`, `payload`. Encoded into a COMMAND frame. |
 | `Telemetry` | `pocketsat.messages` | Decoded TELEMETRY payload: reported values at wire resolution (`decode_telemetry`). |
-| `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode_id`, `boot_count` (#49, #47, via #55). |
+| `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47, via #55). |
 | `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. |
 | `EnvironmentState` | `pocketsat.targets.base` | Per-tick environment inputs; delivered by `apply_environment()`. |
 | `TargetFault` | `pocketsat.targets.base` | Fault type, parameters, duration; delivered by `inject()`. |
@@ -110,7 +110,7 @@ significant byte first) rather than relying on a packed struct.
 | 0 | `uptime_ms` | uint32 | `FlightComputerTelemetryState.uptime_ms` (#49) | as is | ms | 0 .. 4 294 967 295 | wraps modulo 2³² (after 49.7 days) |
 | 4 | `boot_count` | uint16 | `FlightComputerTelemetryState.boot_count` (#49) | as is | boots | 0 .. 65 535 | saturates at 65 535 |
 | 6 | `flags` | uint16 | readings flags, see [Flag bits](#flag-bits) | bit field | — | see the bit table | reserved bits sent as 0 |
-| 8 | `mode` | uint8 | `FlightComputerTelemetryState.mode_id` (#47) | see [Mode](#mode) | — | 0 .. 5 | rejected when the record is built |
+| 8 | `mode` | uint8 | `FlightComputerTelemetryState.mode` (#47) | `Mode` value, see [Mode](#mode) | — | 0 .. 5 | cannot occur: only a `Mode` is accepted |
 | 9 | `radio_mode` | uint8 | `CommsReadings.radio_mode` | see [Radio mode](#radio-mode) | — | 0 .. 2 | — |
 | 10 | `attitude_state` | uint8 | `AttitudeReadings.state` | see [Attitude state](#attitude-state) | — | 0 .. 2 | — |
 | 11 | `payload_state` | uint8 | `PayloadReadings.state` | see [Payload state](#payload-state) | — | 0 .. 2 | — |
@@ -172,8 +172,10 @@ Values are never reassigned.
 
 #### Mode
 
-The flight computer's `Mode` enum is defined by #47 (`pocketsat.flight`, docs/spacecraft-modes.md)
-with these values; `pocketsat.messages.MODE_IDS` holds the same mapping for the codec.
+The flight computer's `Mode` enum is defined by #47 (`pocketsat.flight`, docs/spacecraft-modes.md),
+and its values are the wire values: `FlightComputerTelemetryState.mode` and the decoded
+`Telemetry.mode` are `Mode` members, and the codec sends `mode.value`, so there is no
+second table to keep in step (#101). A test checks every member against this table.
 
 | Value | Mode |
 |---|---|

@@ -4,6 +4,7 @@ import dataclasses
 
 import pytest
 
+from pocketsat.flight import Mode
 from pocketsat.messages import (
     TELEMETRY_PAYLOAD_SIZE,
     Command,
@@ -19,7 +20,7 @@ from pocketsat.targets import base
     [
         Command(command_id=1),
         decode_telemetry(bytes(TELEMETRY_PAYLOAD_SIZE)),
-        FlightComputerTelemetryState(uptime_ms=0, mode_id=0, boot_count=0),
+        FlightComputerTelemetryState(uptime_ms=0, mode=Mode.BOOT, boot_count=0),
         Packet(frame=b"\xa5\x5a"),
         base.TargetCapabilities(deterministic=True, real_time=False),
         base.EnvironmentState(),

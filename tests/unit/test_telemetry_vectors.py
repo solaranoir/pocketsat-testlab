@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from pocketsat.flight import Mode
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
 from pocketsat.messages import (
     BUS_V_SCALE,
@@ -56,7 +57,7 @@ def encode_vector_input(inp: dict[str, Any]) -> bytes:
     attitude, payload, comms = inp["attitude"], inp["payload"], inp["comms"]
     return encode_telemetry(
         FlightComputerTelemetryState(
-            uptime_ms=inp["uptime_ms"], mode_id=inp["mode_id"], boot_count=inp["boot_count"]
+            uptime_ms=inp["uptime_ms"], mode=Mode[inp["mode"]], boot_count=inp["boot_count"]
         ),
         power=PowerReadings(
             bus_v=_float(power["bus_v"]),
@@ -133,7 +134,7 @@ def test_decode(vector: dict[str, Any]) -> None:
         uptime_ms=fields["uptime_ms"],
         boot_count=fields["boot_count"],
         flags=TelemetryFlags(fields["flags"]),
-        mode_id=fields["mode"],
+        mode=Mode(fields["mode"]),
         radio_mode=list(RadioMode)[fields["radio_mode"]],
         attitude_state=list(AttitudeState)[fields["attitude_state"]],
         payload_state=list(PayloadState)[fields["payload_state"]],
@@ -144,6 +145,40 @@ def test_decode(vector: dict[str, Any]) -> None:
         buffered_bytes=fields["buffered_bytes"],
         pointing_error_deg=fields["pointing_error_centi_deg"] / POINTING_SCALE,
     )
+
+
+@pytest.mark.parametrize("vector", VALID, ids=_ids("valid_telemetry"))
+def test_decode_then_reencode_is_byte_identical(vector: dict[str, Any]) -> None:
+    # #101 changed the mode field to ``Mode``; the wire bytes must not change.
+    payload = bytes.fromhex(vector["payload_hex"])
+    t = decode_telemetry(payload)
+    assert t.mode is Mode[vector["input"]["mode"]]
+    again = encode_vector_input(
+        {
+            "uptime_ms": t.uptime_ms,
+            "mode": t.mode.name,
+            "boot_count": t.boot_count,
+            "power": {
+                "bus_v": t.bus_v,
+                "soc": t.soc,
+                "low_battery": TelemetryFlags.low_battery in t.flags,
+                "critical_battery": TelemetryFlags.critical_battery in t.flags,
+            },
+            "thermal": {
+                "battery_c": t.battery_c,
+                "electronics_c": t.electronics_c,
+                "over_temp": TelemetryFlags.over_temp in t.flags,
+                "under_temp": TelemetryFlags.under_temp in t.flags,
+            },
+            "attitude": {
+                "pointing_error_deg": t.pointing_error_deg,
+                "state": t.attitude_state.name,
+            },
+            "payload": {"buffered_bytes": t.buffered_bytes, "state": t.payload_state.name},
+            "comms": {"radio_mode": t.radio_mode.name},
+        }
+    )
+    assert again == payload
 
 
 @pytest.mark.parametrize("vector", VALID, ids=_ids("valid_telemetry"))

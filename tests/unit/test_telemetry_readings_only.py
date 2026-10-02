@@ -15,6 +15,7 @@ from mypy import api
 
 PREAMBLE = textwrap.dedent(
     """\
+    from pocketsat.flight import Mode
     from pocketsat.messages import FlightComputerTelemetryState, encode_telemetry
     from pocketsat.spacecraft.controls import RadioMode
     from pocketsat.spacecraft.snapshots import (
@@ -32,7 +33,7 @@ PREAMBLE = textwrap.dedent(
         ThermalTruth,
     )
 
-    FC = FlightComputerTelemetryState(uptime_ms=0, mode_id=1, boot_count=0)
+    FC = FlightComputerTelemetryState(uptime_ms=0, mode=Mode.NOMINAL, boot_count=0)
     POWER = PowerReadings(
         bus_v=7.4, battery_current_a=0.0, soc=0.8, low_battery=False, critical_battery=False
     )
