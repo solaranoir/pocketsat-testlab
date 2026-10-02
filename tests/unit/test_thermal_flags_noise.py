@@ -204,7 +204,8 @@ def test_threshold_type_checked(name: str) -> None:
     with pytest.raises(TypeError):
         ThermalConfig(**{name: True})
     with pytest.raises(TypeError):
-        ThermalConfig(**{name: "1"})
+        # Deliberately the wrong type: the test checks the runtime type check.
+        ThermalConfig(**{name: "1"})  # type: ignore[arg-type]
 
 
 def test_margin_of_exactly_five_degrees_is_valid() -> None:
