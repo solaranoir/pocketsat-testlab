@@ -28,7 +28,9 @@ The vectors were generated independently of `pocketsat.frame` (with Python's
 implementation under test; add new vectors by hand or from an independent reference.
 
 The payloads in `frames.json` are opaque to the frame codec; for example
-`telemetry_uptime` predates the telemetry layout and is not a valid TELEMETRY payload.
+`telemetry_uptime` predates the telemetry layout and is not a valid TELEMETRY payload,
+and `command_with_payload` (`01 02`) is a PING with an extra byte, which the command
+decoder NACKs `PAYLOAD_TOO_LONG` (`commands.json`).
 
 ## `telemetry.json`
 
@@ -60,3 +62,33 @@ These vectors were generated independently of `pocketsat.messages`: hand-packed 
 `struct`, rounded with `decimal` (`ROUND_HALF_UP` on the IEEE double product), and
 checksummed with `binascii.crc_hqx`. As for `frames.json`, don't regenerate them from the
 implementation under test.
+
+## `commands.json`
+
+COMMAND and ACK payload vectors (#52), checked by `tests/unit/test_command_vectors.py`.
+The layouts, the validation order, and the reason codes are in `docs/protocol.md`
+("Commands").
+
+- `command_ids`, `argument_sizes`, `nack_reasons`: the code tables, by name. Codes are
+  JSON integers (so `"TARGET_NOT_COMMANDABLE": 20` is `0x14`).
+- `ack_payload_size`, `ack_frame_size`: the fixed ACK sizes (4 and 14).
+- `valid_commands[]`: `command` (a command name) and, for SET_MODE, `target` (a mode
+  name, `pocketsat.flight.Mode`). Encoding them must produce exactly `payload_hex`, and
+  decoding `payload_hex` must give them back. `sequence`, `crc`, and `frame_hex` are the
+  whole COMMAND frame (version 1). SET_MODE appears once per mode: all six decode, and
+  the non-commandable ones are left for the state machine to NACK.
+- `invalid_commands[]`: COMMAND payloads (and frames) the decoder must turn into a NACK
+  with `reason` (a `nack_reasons` name) and the echoed `command_id`, never an exception.
+  They cover an empty payload, unknown IDs (`0x00` included), missing and extra argument
+  bytes for every command, bad SET_MODE bytes, and payloads with two problems (the first
+  check in the documented order wins).
+- `acks[]`: ACK frame payloads. `sequence` and `command_id` name the command answered,
+  `reason` is `null` for an ACK or a `nack_reasons` name for a NACK (every reason
+  appears once). Encoding them must produce exactly `payload_hex`, and decoding must give
+  them back. `frame_sequence`, `crc`, and `frame_hex` are the whole ACK frame.
+- `invalid_acks[]`: ACK payloads the ground decoder must reject, with the reason in
+  `error`: `size` (not 4 bytes) or `reason` (a code that is neither `0x00` nor assigned).
+
+These vectors were generated independently of `pocketsat.messages`: hand-packed with
+`struct` and checksummed with `binascii.crc_hqx`, from code tables written out by hand.
+As for the other files, don't regenerate them from the implementation under test.

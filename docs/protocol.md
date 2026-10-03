@@ -1,12 +1,12 @@
 # PocketSat Wire Protocol
 
-Status: Phase 1. Implements ADR-0002. The [telemetry payload](#telemetry-payload) is
-defined (#54); command IDs and the maximum payload size are **TBD** and will be filled in
-with the subsystems that use them.
+Status: Phase 1. Implements ADR-0002. The [telemetry payload](#telemetry-payload) (#54)
+and the [command and ACK payloads](#commands) with their NACK reason codes (#52) are
+defined; the maximum payload size is **TBD**.
 
-Python implementation: `pocketsat.frame` (frames) and `pocketsat.messages` (telemetry
-payload). Shared test vectors: `tests/vectors/frames.json` and
-`tests/vectors/telemetry.json`.
+Python implementation: `pocketsat.frame` (frames) and `pocketsat.messages` (telemetry,
+command, and ACK payloads). Shared test vectors: `tests/vectors/frames.json`,
+`tests/vectors/telemetry.json`, and `tests/vectors/commands.json`.
 
 ## Frame layout
 
@@ -56,9 +56,9 @@ HIL bridge.
 
 | Code | Type | Direction | Payload |
 |---|---|---|---|
-| `0x01` | COMMAND | ground → spacecraft | Command ID and arguments (**TBD**) |
+| `0x01` | COMMAND | ground → spacecraft | Command ID and arguments, see [COMMAND payload](#command-payload) |
 | `0x02` | TELEMETRY | spacecraft → ground | Fixed 26-byte [telemetry payload](#telemetry-payload) |
-| `0x03` | ACK | spacecraft → ground | Acknowledged sequence and status (**TBD**) |
+| `0x03` | ACK | spacecraft → ground | Fixed 4-byte [ACK payload](#ack-payload), for both ACK and NACK |
 
 ## Message types
 
@@ -67,16 +67,18 @@ use typed, immutable messages (`pocketsat.messages`, `pocketsat.targets.base`).
 
 | Type | Module | Purpose |
 |---|---|---|
-| `Command` | `pocketsat.messages` | Ground-originated request: `command_id`, `payload`. Encoded into a COMMAND frame. |
+| `Command` | `pocketsat.messages` | Ground-originated request: `command_id`, argument bytes `payload`. Encoded into a COMMAND payload (`encode_command`). |
+| `ParsedCommand`, `MalformedCommand` | `pocketsat.messages` | Result of `decode_command` on the spacecraft: a valid command (`command_id`, SET_MODE `target`), or the received ID and a `DecodeReason` for the NACK (#52). |
+| `CommandAck` | `pocketsat.messages` | An ACK frame payload: the answered command's `sequence` and `command_id`, and the NACK `reason` (`None` for an ACK) (`encode_ack`, `decode_ack`). |
 | `Telemetry` | `pocketsat.messages` | Decoded TELEMETRY payload: reported values at wire resolution (`decode_telemetry`). |
 | `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47, via #55). |
 | `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. |
 | `EnvironmentState` | `pocketsat.targets.base` | Per-tick environment inputs; delivered by `apply_environment()`. |
 | `TargetFault` | `pocketsat.targets.base` | Fault type, parameters, duration; delivered by `inject()`. |
 
-### Command IDs
+### Command and ACK layouts
 
-**TBD.** Planned commands: `PING`, `SET_MODE`, `BEGIN_DOWNLINK`, `ENTER_SAFE_MODE`, `RESET`.
+See [Commands](#commands).
 
 ### Telemetry layout
 
@@ -251,3 +253,137 @@ subsystem so each group can grow independently. The single source of truth is
 - A removed flag leaves its bit reserved; the bit is never reused.
 - Reassigning or reusing a bit requires a protocol version change (the frame Version
   byte) and an ADR.
+
+## Commands
+
+Defined in #52. Python: `encode_command`, `decode_command`, `encode_ack`, and `decode_ack`
+in `pocketsat.messages`. Shared vectors: `tests/vectors/commands.json`. This section and
+those vectors are the contract the Phase 7 firmware must match. Executing commands and
+sending the ACK frames is the command dispatcher (#51); what each command does to the
+mode is the state machine in [docs/spacecraft-modes.md](spacecraft-modes.md).
+
+Every COMMAND frame that decodes as a frame gets exactly one ACK frame back: an ACK if it
+was accepted, or a NACK with a [reason code](#nack-reason-codes). A frame that fails frame
+decoding (sync, length, CRC, or type, see [Decoding and errors](#decoding-and-errors)) is
+dropped without a reply, because its sequence number cannot be trusted.
+
+### COMMAND payload
+
+All multi-byte fields are big-endian.
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `command_id` | uint8 | See [Command IDs](#command-ids). `0x00` is reserved and never assigned |
+| 1 | `arguments` | per command | Exactly the command's argument bytes, no padding |
+
+So a COMMAND payload is 1 + the command's argument size, and the whole COMMAND frame is
+that plus the 10-byte frame overhead (11 or 12 bytes for the commands below).
+
+### Command IDs
+
+The single source of truth is `pocketsat.messages.CommandId` and
+`COMMAND_ARGUMENT_SIZES`; a test checks this table against them.
+
+| ID | Command | Argument bytes | Arguments | Mode event (#51) |
+|---|---|---|---|---|
+| `0x01` | `PING` | 0 | none | none: never changes the mode, answered with an ACK in every mode (#51) |
+| `0x02` | `SET_MODE` | 1 | offset 1: target mode, uint8 [`Mode`](#mode) value | `SET_MODE` with that target |
+| `0x03` | `BEGIN_DOWNLINK` | 0 | none | `BEGIN_DOWNLINK` |
+| `0x04` | `ENTER_SAFE_MODE` | 0 | none | `ENTER_SAFE_MODE` |
+| `0x05` | `RESET` | 0 | none | `RESET` |
+
+The `SET_MODE` argument uses the same numbers as the telemetry `mode` field (the
+[Mode](#mode) table, `pocketsat.flight.Mode`). Any of the six modes decodes: only NOMINAL
+and SCIENCE are commandable, and the state machine NACKs the others with
+`TARGET_NOT_COMMANDABLE` (0x14). A byte that is not a mode at all (`0x06` to `0xFF`) is
+`INVALID_ARGUMENT` (0x04).
+
+Example, the `set_mode_science` vector (COMMAND, sequence 4, SET_MODE SCIENCE):
+
+```
+a5 5a 01 01 00 04 00 02 | 02 | 02 | 6f ca
+frame header (len 2)      id   mode crc
+```
+
+### Decoding and validation
+
+`decode_command` takes the COMMAND frame's payload and **never raises**: every problem
+becomes a `MalformedCommand` carrying the received command ID and a `DecodeReason`, which
+the dispatcher sends back in a NACK. Checks run in this order, so a payload with several
+problems gets the first reason that applies:
+
+| Order | Check | NACK reason | `command_id` in the NACK |
+|---|---|---|---|
+| 1 | The payload is not empty | `PAYLOAD_TRUNCATED` (0x02) | `0x00` (nothing to echo) |
+| 2 | `command_id` is an assigned ID | `UNKNOWN_COMMAND` (0x01) | the received byte |
+| 3 | At least the command's argument bytes are present | `PAYLOAD_TRUNCATED` (0x02) | the received byte |
+| 4 | No bytes beyond the command's arguments | `PAYLOAD_TOO_LONG` (0x03) | the received byte |
+| 5 | Every argument has a meaning (SET_MODE: a `Mode` value) | `INVALID_ARGUMENT` (0x04) | the received byte |
+
+Only a command that passes all five reaches the state machine, so decoding reasons come
+before mode reasons: in BOOT, an unknown command is NACKed `UNKNOWN_COMMAND`, not
+`BOOT_IN_PROGRESS`. Arguments of an unknown command are never read.
+
+### ACK payload
+
+ACK and NACK share frame type `0x03` and one fixed **4-byte** payload, so an ACK frame is
+always **14 bytes**. The ACK frame's own header sequence is the spacecraft's downlink
+counter; the command it answers is named in the payload.
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `sequence` | uint16 | Header sequence of the COMMAND frame being answered |
+| 2 | `command_id` | uint8 | Command ID byte received, echoed even if unassigned; `0x00` for an empty payload |
+| 3 | `reason` | uint8 | `0x00` = ACK (accepted); any other value = NACK, see [NACK reason codes](#nack-reason-codes) |
+
+Example, the `nack_target_not_commandable` vector (ACK frame, downlink sequence 12,
+answering SET_MODE in command sequence 108, reason `0x14`):
+
+```
+a5 5a 01 03 00 0c 00 04 | 00 6c | 02 | 14 | a2 88
+frame header (len 4)      seq     id   rsn  crc
+```
+
+`decode_ack` raises `AckDecodeError` for a payload that is not exactly 4 bytes or a
+reason code that is neither `0x00` nor listed below.
+
+### NACK reason codes
+
+One uint8 namespace for every NACK, split by source:
+
+- `0x00`: reserved. It is the `reason` of an ACK and never a NACK reason.
+- `0x01`–`0x0F`: decoding and argument errors, `pocketsat.messages.DecodeReason`
+  (this section, #52).
+- `0x10`–`0x1F`: mode rejections, `pocketsat.flight.RejectReason`, defined by the state
+  machine (#47, [docs/spacecraft-modes.md](spacecraft-modes.md#reason-codes)) and
+  reused here unchanged.
+
+The single source of truth is `pocketsat.messages.NACK_REASONS`, built from those two
+enums; a test checks this table against it.
+
+| Code | Reason | Enum | Meaning |
+|---|---|---|---|
+| `0x01` | `UNKNOWN_COMMAND` | `DecodeReason` | Command ID not assigned (`0x00` included) |
+| `0x02` | `PAYLOAD_TRUNCATED` | `DecodeReason` | Payload empty or shorter than the command's layout |
+| `0x03` | `PAYLOAD_TOO_LONG` | `DecodeReason` | Bytes beyond the command's layout |
+| `0x04` | `INVALID_ARGUMENT` | `DecodeReason` | An argument value with no meaning, for example a SET_MODE byte that is not a mode |
+| `0x10` | `BOOT_IN_PROGRESS` | `RejectReason` | In BOOT only RESET (and PING) are accepted |
+| `0x11` | `FAULT_REQUIRES_RESET` | `RejectReason` | In FAULT only RESET is accepted (PING is answered in every mode) |
+| `0x12` | `NOT_ALLOWED_IN_SAFE` | `RejectReason` | From SAFE, SET_MODE NOMINAL comes first; SCIENCE and BEGIN_DOWNLINK are refused |
+| `0x13` | `SAFE_CONDITIONS_ACTIVE` | `RejectReason` | SET_MODE NOMINAL from SAFE while the triggering flags have not cleared |
+| `0x14` | `TARGET_NOT_COMMANDABLE` | `RejectReason` | SET_MODE asked for BOOT, DOWNLINK, SAFE, or FAULT |
+
+### Command wire-contract rules
+
+- A command ID, an argument layout, or a reason code is never renumbered, reassigned,
+  or reused. `0x00` stays reserved as both a command ID and a reason code.
+- A new command takes the next unassigned ID; a new decoding reason takes the next free
+  code in `0x01`–`0x0F`, and a new mode reason the next in `0x10`–`0x1F`. This needs no
+  protocol version change: firmware that does not know a new command NACKs it
+  `UNKNOWN_COMMAND`, and a ground decoder that does not know a new reason code reports
+  it (`AckDecodeError`) instead of guessing.
+- A removed command or reason leaves its code unassigned; it is never reused.
+- Argument sizes are exact: there are no optional or trailing arguments, so a longer
+  layout for an existing command would be a new command ID.
+- Changing an existing layout, or reusing a code, requires a protocol version change
+  (the frame Version byte) and an ADR.

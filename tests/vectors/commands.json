@@ -1,0 +1,441 @@
+{
+  "description": "PocketSat COMMAND and ACK payload test vectors (#52). Shared by Python and firmware tests. See README.md in this directory and docs/protocol.md.",
+  "command_ids": {
+    "PING": 1,
+    "SET_MODE": 2,
+    "BEGIN_DOWNLINK": 3,
+    "ENTER_SAFE_MODE": 4,
+    "RESET": 5
+  },
+  "argument_sizes": {
+    "PING": 0,
+    "SET_MODE": 1,
+    "BEGIN_DOWNLINK": 0,
+    "ENTER_SAFE_MODE": 0,
+    "RESET": 0
+  },
+  "nack_reasons": {
+    "UNKNOWN_COMMAND": 1,
+    "PAYLOAD_TRUNCATED": 2,
+    "PAYLOAD_TOO_LONG": 3,
+    "INVALID_ARGUMENT": 4,
+    "BOOT_IN_PROGRESS": 16,
+    "FAULT_REQUIRES_RESET": 17,
+    "NOT_ALLOWED_IN_SAFE": 18,
+    "SAFE_CONDITIONS_ACTIVE": 19,
+    "TARGET_NOT_COMMANDABLE": 20
+  },
+  "ack_payload_size": 4,
+  "ack_frame_size": 14,
+  "valid_commands": [
+    {
+      "name": "ping",
+      "note": "PING: command ID only.",
+      "command": "PING",
+      "payload_hex": "01",
+      "sequence": 1,
+      "crc": 22955,
+      "frame_hex": "a55a0101000100010159ab"
+    },
+    {
+      "name": "set_mode_boot",
+      "note": "SET_MODE BOOT: ID then the mode byte. Decodes; the state machine NACKs it (TARGET_NOT_COMMANDABLE, or a mode reason).",
+      "command": "SET_MODE",
+      "target": "BOOT",
+      "payload_hex": "0200",
+      "sequence": 2,
+      "crc": 33293,
+      "frame_hex": "a55a0101000200020200820d"
+    },
+    {
+      "name": "set_mode_nominal",
+      "note": "SET_MODE NOMINAL: ID then the mode byte.",
+      "command": "SET_MODE",
+      "target": "NOMINAL",
+      "payload_hex": "0201",
+      "sequence": 3,
+      "crc": 14461,
+      "frame_hex": "a55a0101000300020201387d"
+    },
+    {
+      "name": "set_mode_science",
+      "note": "SET_MODE SCIENCE: ID then the mode byte.",
+      "command": "SET_MODE",
+      "target": "SCIENCE",
+      "payload_hex": "0202",
+      "sequence": 4,
+      "crc": 28618,
+      "frame_hex": "a55a01010004000202026fca"
+    },
+    {
+      "name": "set_mode_downlink",
+      "note": "SET_MODE DOWNLINK: ID then the mode byte. Decodes; the state machine NACKs it (TARGET_NOT_COMMANDABLE, or a mode reason).",
+      "command": "SET_MODE",
+      "target": "DOWNLINK",
+      "payload_hex": "0203",
+      "sequence": 5,
+      "crc": 54714,
+      "frame_hex": "a55a0101000500020203d5ba"
+    },
+    {
+      "name": "set_mode_safe",
+      "note": "SET_MODE SAFE: ID then the mode byte. Decodes; the state machine NACKs it (TARGET_NOT_COMMANDABLE, or a mode reason).",
+      "command": "SET_MODE",
+      "target": "SAFE",
+      "payload_hex": "0204",
+      "sequence": 6,
+      "crc": 19343,
+      "frame_hex": "a55a01010006000202044b8f"
+    },
+    {
+      "name": "set_mode_fault",
+      "note": "SET_MODE FAULT: ID then the mode byte. Decodes; the state machine NACKs it (TARGET_NOT_COMMANDABLE, or a mode reason).",
+      "command": "SET_MODE",
+      "target": "FAULT",
+      "payload_hex": "0205",
+      "sequence": 7,
+      "crc": 61951,
+      "frame_hex": "a55a0101000700020205f1ff"
+    },
+    {
+      "name": "begin_downlink",
+      "note": "BEGIN_DOWNLINK: command ID only.",
+      "command": "BEGIN_DOWNLINK",
+      "payload_hex": "03",
+      "sequence": 8,
+      "crc": 35486,
+      "frame_hex": "a55a010100080001038a9e"
+    },
+    {
+      "name": "enter_safe_mode",
+      "note": "ENTER_SAFE_MODE: command ID only.",
+      "command": "ENTER_SAFE_MODE",
+      "payload_hex": "04",
+      "sequence": 9,
+      "crc": 36045,
+      "frame_hex": "a55a010100090001048ccd"
+    },
+    {
+      "name": "reset",
+      "note": "RESET: command ID only.",
+      "command": "RESET",
+      "payload_hex": "05",
+      "sequence": 10,
+      "crc": 1840,
+      "frame_hex": "a55a0101000a0001050730"
+    }
+  ],
+  "invalid_commands": [
+    {
+      "name": "empty",
+      "note": "No command ID at all; the NACK names command ID 0x00.",
+      "payload_hex": "",
+      "command_id": 0,
+      "reason": "PAYLOAD_TRUNCATED",
+      "sequence": 11,
+      "crc": 4368,
+      "frame_hex": "a55a0101000b00001110"
+    },
+    {
+      "name": "reserved_id_zero",
+      "note": "0x00 is never assigned.",
+      "payload_hex": "00",
+      "command_id": 0,
+      "reason": "UNKNOWN_COMMAND",
+      "sequence": 12,
+      "crc": 28684,
+      "frame_hex": "a55a0101000c000100700c"
+    },
+    {
+      "name": "unknown_id_0x06",
+      "note": "First unassigned ID.",
+      "payload_hex": "06",
+      "command_id": 6,
+      "reason": "UNKNOWN_COMMAND",
+      "sequence": 13,
+      "crc": 26238,
+      "frame_hex": "a55a0101000d000106667e"
+    },
+    {
+      "name": "unknown_id_0xff",
+      "note": "Largest ID byte.",
+      "payload_hex": "ff",
+      "command_id": 255,
+      "reason": "UNKNOWN_COMMAND",
+      "sequence": 14,
+      "crc": 33684,
+      "frame_hex": "a55a0101000e0001ff8394"
+    },
+    {
+      "name": "unknown_id_with_arguments",
+      "note": "Unknown ID wins over any length problem; arguments are not read.",
+      "payload_hex": "7f0102",
+      "command_id": 127,
+      "reason": "UNKNOWN_COMMAND",
+      "sequence": 15,
+      "crc": 3351,
+      "frame_hex": "a55a0101000f00037f01020d17"
+    },
+    {
+      "name": "ping_extra_byte",
+      "note": "PING takes no arguments.",
+      "payload_hex": "0100",
+      "command_id": 1,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 16,
+      "crc": 38791,
+      "frame_hex": "a55a01010010000201009787"
+    },
+    {
+      "name": "set_mode_missing_argument",
+      "note": "SET_MODE without its mode byte.",
+      "payload_hex": "02",
+      "command_id": 2,
+      "reason": "PAYLOAD_TRUNCATED",
+      "sequence": 17,
+      "crc": 29295,
+      "frame_hex": "a55a01010011000102726f"
+    },
+    {
+      "name": "set_mode_extra_byte",
+      "note": "SET_MODE with two argument bytes.",
+      "payload_hex": "020100",
+      "command_id": 2,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 18,
+      "crc": 58315,
+      "frame_hex": "a55a010100120003020100e3cb"
+    },
+    {
+      "name": "set_mode_first_non_mode",
+      "note": "0x06 is not a mode value.",
+      "payload_hex": "0206",
+      "command_id": 2,
+      "reason": "INVALID_ARGUMENT",
+      "sequence": 19,
+      "crc": 19648,
+      "frame_hex": "a55a01010013000202064cc0"
+    },
+    {
+      "name": "set_mode_0xff",
+      "note": "0xFF is not a mode value.",
+      "payload_hex": "02ff",
+      "command_id": 2,
+      "reason": "INVALID_ARGUMENT",
+      "sequence": 20,
+      "crc": 21794,
+      "frame_hex": "a55a01010014000202ff5522"
+    },
+    {
+      "name": "set_mode_bad_argument_and_extra_byte",
+      "note": "Length is checked before the argument value.",
+      "payload_hex": "02ff00",
+      "command_id": 2,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 21,
+      "crc": 6980,
+      "frame_hex": "a55a01010015000302ff001b44"
+    },
+    {
+      "name": "begin_downlink_extra_byte",
+      "note": "BEGIN_DOWNLINK takes no arguments.",
+      "payload_hex": "0301",
+      "command_id": 3,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 22,
+      "crc": 11329,
+      "frame_hex": "a55a01010016000203012c41"
+    },
+    {
+      "name": "enter_safe_mode_extra_byte",
+      "note": "ENTER_SAFE_MODE takes no arguments.",
+      "payload_hex": "0404",
+      "command_id": 4,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 23,
+      "crc": 20258,
+      "frame_hex": "a55a01010017000204044f22"
+    },
+    {
+      "name": "reset_extra_bytes",
+      "note": "RESET takes no arguments.",
+      "payload_hex": "05dead",
+      "command_id": 5,
+      "reason": "PAYLOAD_TOO_LONG",
+      "sequence": 24,
+      "crc": 33031,
+      "frame_hex": "a55a01010018000305dead8107"
+    }
+  ],
+  "acks": [
+    {
+      "name": "ack_ping",
+      "note": "ACK for PING, command sequence 1.",
+      "sequence": 1,
+      "command_id": 1,
+      "reason": null,
+      "payload_hex": "00010100",
+      "frame_sequence": 1,
+      "crc": 38494,
+      "frame_hex": "a55a01030001000400010100965e"
+    },
+    {
+      "name": "ack_set_mode",
+      "note": "ACK for SET_MODE, command sequence 0x1234.",
+      "sequence": 4660,
+      "command_id": 2,
+      "reason": null,
+      "payload_hex": "12340200",
+      "frame_sequence": 2,
+      "crc": 49941,
+      "frame_hex": "a55a01030002000412340200c315"
+    },
+    {
+      "name": "ack_reset_max_sequence",
+      "note": "ACK naming the largest sequence.",
+      "sequence": 65535,
+      "command_id": 5,
+      "reason": null,
+      "payload_hex": "ffff0500",
+      "frame_sequence": 3,
+      "crc": 35209,
+      "frame_hex": "a55a010300030004ffff05008989"
+    },
+    {
+      "name": "nack_unknown_command",
+      "note": "NACK with reason UNKNOWN_COMMAND (0x01).",
+      "sequence": 100,
+      "command_id": 127,
+      "reason": "UNKNOWN_COMMAND",
+      "payload_hex": "00647f01",
+      "frame_sequence": 4,
+      "crc": 42005,
+      "frame_hex": "a55a01030004000400647f01a415"
+    },
+    {
+      "name": "nack_payload_truncated",
+      "note": "NACK with reason PAYLOAD_TRUNCATED (0x02).",
+      "sequence": 101,
+      "command_id": 0,
+      "reason": "PAYLOAD_TRUNCATED",
+      "payload_hex": "00650002",
+      "frame_sequence": 5,
+      "crc": 832,
+      "frame_hex": "a55a010300050004006500020340"
+    },
+    {
+      "name": "nack_payload_too_long",
+      "note": "NACK with reason PAYLOAD_TOO_LONG (0x03).",
+      "sequence": 102,
+      "command_id": 1,
+      "reason": "PAYLOAD_TOO_LONG",
+      "payload_hex": "00660103",
+      "frame_sequence": 6,
+      "crc": 41346,
+      "frame_hex": "a55a01030006000400660103a182"
+    },
+    {
+      "name": "nack_invalid_argument",
+      "note": "NACK with reason INVALID_ARGUMENT (0x04).",
+      "sequence": 103,
+      "command_id": 2,
+      "reason": "INVALID_ARGUMENT",
+      "payload_hex": "00670204",
+      "frame_sequence": 7,
+      "crc": 2919,
+      "frame_hex": "a55a010300070004006702040b67"
+    },
+    {
+      "name": "nack_boot_in_progress",
+      "note": "NACK with reason BOOT_IN_PROGRESS (0x10).",
+      "sequence": 104,
+      "command_id": 2,
+      "reason": "BOOT_IN_PROGRESS",
+      "payload_hex": "00680210",
+      "frame_sequence": 8,
+      "crc": 65290,
+      "frame_hex": "a55a01030008000400680210ff0a"
+    },
+    {
+      "name": "nack_fault_requires_reset",
+      "note": "NACK with reason FAULT_REQUIRES_RESET (0x11).",
+      "sequence": 105,
+      "command_id": 4,
+      "reason": "FAULT_REQUIRES_RESET",
+      "payload_hex": "00690411",
+      "frame_sequence": 9,
+      "crc": 51932,
+      "frame_hex": "a55a01030009000400690411cadc"
+    },
+    {
+      "name": "nack_not_allowed_in_safe",
+      "note": "NACK with reason NOT_ALLOWED_IN_SAFE (0x12).",
+      "sequence": 106,
+      "command_id": 3,
+      "reason": "NOT_ALLOWED_IN_SAFE",
+      "payload_hex": "006a0312",
+      "frame_sequence": 10,
+      "crc": 58106,
+      "frame_hex": "a55a0103000a0004006a0312e2fa"
+    },
+    {
+      "name": "nack_safe_conditions_active",
+      "note": "NACK with reason SAFE_CONDITIONS_ACTIVE (0x13).",
+      "sequence": 107,
+      "command_id": 2,
+      "reason": "SAFE_CONDITIONS_ACTIVE",
+      "payload_hex": "006b0213",
+      "frame_sequence": 11,
+      "crc": 20155,
+      "frame_hex": "a55a0103000b0004006b02134ebb"
+    },
+    {
+      "name": "nack_target_not_commandable",
+      "note": "NACK with reason TARGET_NOT_COMMANDABLE (0x14).",
+      "sequence": 108,
+      "command_id": 2,
+      "reason": "TARGET_NOT_COMMANDABLE",
+      "payload_hex": "006c0214",
+      "frame_sequence": 12,
+      "crc": 41608,
+      "frame_hex": "a55a0103000c0004006c0214a288"
+    }
+  ],
+  "invalid_acks": [
+    {
+      "name": "empty",
+      "payload_hex": "",
+      "error": "size"
+    },
+    {
+      "name": "too_short",
+      "payload_hex": "000101",
+      "error": "size"
+    },
+    {
+      "name": "too_long",
+      "payload_hex": "0001010000",
+      "error": "size"
+    },
+    {
+      "name": "unassigned_decode_code",
+      "payload_hex": "00010105",
+      "error": "reason"
+    },
+    {
+      "name": "last_decode_slot",
+      "payload_hex": "0001010f",
+      "error": "reason"
+    },
+    {
+      "name": "unassigned_mode_code",
+      "payload_hex": "00010115",
+      "error": "reason"
+    },
+    {
+      "name": "reason_0xff",
+      "payload_hex": "000101ff",
+      "error": "reason"
+    }
+  ]
+}
