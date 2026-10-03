@@ -149,6 +149,15 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 
 **Radio traffic (ADR-0007, Proposed, implemented by #98).** Comms reads nothing, so each tick's radio traffic (bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in the controls at step a of the next tick. Comms reports tick N's traffic in tick N+1, and power sees the transmit energy in tick N+2; comms' byte count is therefore named `previous_tick_sent_bytes`. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
 
+#### The SIL target (#59)
+
+`pocketsat.targets.sil.SilTarget` puts the five subsystems (one shared `SnapshotBoard`) and the flight computer behind `TestTarget`. It is built with `SilTarget(config=..., initial=..., tick_us=...)`, and `reset(seed)` rebuilds every subsystem and a new flight computer from those, with a new `RngFactory(seed)`, simulated time 0, and BOOT's controls for tick 0.
+
+- `advance(dt_us)` runs `dt_us // tick_us` ticks, each steps a to f above; `dt_us` must be a multiple of the tick (events are quantized to ticks before a run, ADR-0003), and a partial tick raises `ValueError`. The flight computer is called with the time at the end of the tick.
+- Uplink queued by `send()` arrives in the next tick. It reaches the flight computer only if comms' receiver is on after step b; otherwise it is lost (not queued) and counted. Received frames that are not valid wire frames are dropped and counted, and never raise.
+- Step a is one merge function, `SilTarget._merge_controls()`, a documented pass-through until #60 adds the fault overrides and #98 the radio traffic.
+- Each tick is described by a `SilTick` record: the merged controls next to the `SpacecraftState` they produced, the uplink delivered, the undecodable count, the downlink, the next controls, and the tick's traffic (`TickTraffic`: bytes sent, uplink lost, outbound suppressed). `TickTraffic` has `RadioTraffic`'s fields and is held for the hand-over that #98 wires into the controls.
+
 #### Snapshot contracts (#76)
 
 Every subsystem's snapshot is defined up front in `pocketsat.spacecraft.snapshots`, so subsystems depend on the contract and not on each other's implementation. Following ADR-0004 §7, each snapshot (`PowerSnapshot`, `ThermalSnapshot`, `AttitudeSnapshot`, `PayloadSnapshot`, `CommsSnapshot`) holds a **truth** record (`PowerTruth`, ...) that physics reads and a **readings** record (`PowerReadings`, ...) that decisions and telemetry read. Payload and comms have no sensors, so their readings always equal their truth. Subsystems read each other only through `SpacecraftState`: one earlier in `STEP_ORDER` as of the current tick, one later as of the previous tick (#36). The fields, the table of cross-subsystem reads, and the shared test fakes (`pocketsat.spacecraft.fakes`) are described in [spacecraft.md](spacecraft.md). A subsystem ticket adds fields only by extending the contract in the same change.

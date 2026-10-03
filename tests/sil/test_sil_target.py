@@ -1,0 +1,597 @@
+"""Tests for ``SilTarget`` (#59): wiring, tick order, frame flow, reset, and determinism.
+
+Most tests drive ``SilTarget`` with the real subsystems and a
+:class:`ScriptedFlightComputer` (``_scripted_flight_computer.py``), because the real
+flight computer does not yet decode commands or send frames (#51, #55, #56). The tests
+that need only BOOT and the controls path use the real flight computer.
+
+Not here, by design:
+
+- Target faults, including ``transmitter_off`` and "a fault injected in tick N acts in
+  tick N", are #60. The receive-but-cannot-reply behavior is covered below with the
+  radio in ``RX_ONLY``, the mode ``transmitter_off`` produces (ADR-0007 §5).
+- The ``TestTarget`` contract suite and the 10,000-tick determinism test are #61: the
+  contract suite needs a stimulus that gets a downlink reply from the real flight
+  computer, which arrives with #51.
+- ``RadioTraffic`` in the controls and comms' counters are #98; here the per-tick
+  values are checked in ``SilTick.traffic`` and ``SilTarget.handover_traffic``.
+"""
+
+import dataclasses
+import itertools
+import time
+from collections.abc import Callable
+
+import pytest
+from _scripted_flight_computer import (
+    ScriptedFlightComputer,
+    ack_sequence,
+    is_telemetry,
+    ping,
+    set_attitude,
+    set_radio,
+)
+
+from pocketsat.core.clock import DEFAULT_TICK_US
+from pocketsat.environment import NominalEnvironment
+from pocketsat.flight import FlightComputer, Mode, SpacecraftReadings, controls_for_mode
+from pocketsat.frame import Frame, FrameType, encode_frame
+from pocketsat.spacecraft import (
+    DEFAULT_INITIAL_STATE,
+    NOMINAL_CONFIG,
+    STEP_ORDER,
+    AttitudeSnapshot,
+    CommsSnapshot,
+    PowerInitial,
+    PowerSnapshot,
+    RadioControls,
+    RadioMode,
+    SpacecraftControls,
+    SpacecraftInitialState,
+)
+from pocketsat.targets import base
+from pocketsat.targets.base import (
+    EnvironmentState,
+    TargetFault,
+    UnsupportedFaultError,
+)
+from pocketsat.targets.sil import SilTarget, SilTick, TickTraffic
+
+TICK = DEFAULT_TICK_US
+QUIET = EnvironmentState(sensor_noise_scale=0.0)
+BOOT_CONTROLS = controls_for_mode(Mode.BOOT)
+RADIO_OFF = dataclasses.replace(BOOT_CONTROLS, radio=RadioControls(mode=RadioMode.OFF))
+
+
+class Rig:
+    """A ``SilTarget`` with a scripted flight computer and a record of every tick."""
+
+    def __init__(
+        self,
+        *,
+        boot_controls: SpacecraftControls | None = None,
+        telemetry: bool = False,
+        initial: SpacecraftInitialState = DEFAULT_INITIAL_STATE,
+        seed: int = 7,
+    ) -> None:
+        self.computers: list[ScriptedFlightComputer] = []
+        self.ticks: list[SilTick] = []
+
+        def factory() -> ScriptedFlightComputer:
+            computer = ScriptedFlightComputer(boot_controls, telemetry=telemetry)
+            self.computers.append(computer)
+            return computer
+
+        self.target = SilTarget(
+            initial=initial, flight_computer_factory=factory, tick_observer=self.ticks.append
+        )
+        self.target.reset(seed)
+
+    @property
+    def fc(self) -> ScriptedFlightComputer:
+        """The flight computer of the current run."""
+        return self.computers[-1]
+
+    def tick(self, *frames: bytes) -> list[bytes]:
+        """Send ``frames``, run one tick, and return the downlink it produced."""
+        for frame in frames:
+            self.target.send(frame)
+        self.target.advance(TICK)
+        return self.target.receive()
+
+    @property
+    def last(self) -> SilTick:
+        return self.ticks[-1]
+
+
+def real_target(**kwargs: object) -> tuple[SilTarget, list[SilTick]]:
+    ticks: list[SilTick] = []
+    target = SilTarget(tick_observer=ticks.append, **kwargs)  # type: ignore[arg-type]
+    return target, ticks
+
+
+# --- Interface, capabilities, construction ---------------------------------------------
+
+
+def test_satisfies_the_testtarget_protocol_and_declares_capabilities() -> None:
+    target = SilTarget()
+    assert isinstance(target, base.TestTarget)
+    caps = target.capabilities
+    assert caps.deterministic is True
+    assert caps.real_time is False
+    assert caps.supported_faults == frozenset()  # #60 adds the SIL faults
+
+
+def test_defaults_are_the_nominal_config_and_default_starting_state() -> None:
+    target = SilTarget()
+    assert target.config is NOMINAL_CONFIG
+    assert target.initial is DEFAULT_INITIAL_STATE
+    assert target.tick_us == DEFAULT_TICK_US
+
+
+def test_constructor_rejects_wrong_record_types() -> None:
+    with pytest.raises(TypeError, match="config"):
+        SilTarget(config=DEFAULT_INITIAL_STATE)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="initial"):
+        SilTarget(initial=NOMINAL_CONFIG)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="tick_us"):
+        SilTarget(tick_us=0)
+
+
+def test_inject_rejects_every_fault_until_60() -> None:
+    target = SilTarget()
+    target.reset(0)
+    with pytest.raises(UnsupportedFaultError, match="transmitter_off") as info:
+        target.inject(TargetFault(fault_type="transmitter_off"))
+    assert info.value.supported == frozenset()
+
+
+def test_advance_requires_reset_first() -> None:
+    target = SilTarget()
+    with pytest.raises(RuntimeError, match="reset"):
+        target.advance(TICK)
+
+
+def test_connect_and_close_are_safe() -> None:
+    target = SilTarget()
+    target.connect()
+    target.reset(0)
+    target.send(ping())
+    target.close()
+    assert target.receive() == []
+
+
+# --- Time: advance(dt_us) --------------------------------------------------------------
+
+
+def test_advance_runs_one_tick_per_tick_us_and_rejects_partial_ticks() -> None:
+    target, ticks = real_target()
+    target.reset(0)
+    target.advance(0)
+    assert ticks == [] and target.now_us == 0
+    target.advance(TICK)
+    assert [t.now_us for t in ticks] == [TICK]
+    target.advance(3 * TICK)
+    assert [t.now_us for t in ticks] == [TICK, 2 * TICK, 3 * TICK, 4 * TICK]
+    assert target.now_us == 4 * TICK
+    with pytest.raises(ValueError, match="multiple of the tick"):
+        target.advance(TICK + 1)
+    with pytest.raises(ValueError, match="non-negative"):
+        target.advance(-TICK)
+    with pytest.raises(TypeError):
+        target.advance(0.1)  # type: ignore[arg-type]
+    assert target.now_us == 4 * TICK  # nothing ran
+
+
+def test_custom_tick_length() -> None:
+    target, ticks = real_target(tick_us=250_000)
+    target.reset(0)
+    target.advance(1_000_000)
+    assert [t.now_us for t in ticks] == [250_000, 500_000, 750_000, 1_000_000]
+
+
+def test_flight_computer_gets_end_of_tick_time() -> None:
+    rig = Rig()
+    rig.target.advance(2 * TICK)
+    assert [call.now_us for call in rig.fc.calls] == [TICK, 2 * TICK]
+
+
+def test_uplink_arrives_in_the_first_tick_of_a_multi_tick_advance() -> None:
+    rig = Rig()
+    rig.target.send(ping(1))
+    rig.target.advance(3 * TICK)
+    assert [len(call.uplink_frames) for call in rig.fc.calls] == [1, 0, 0]
+    assert [ack_sequence(f) for f in rig.target.receive()] == [1]
+
+
+# --- Tick order (ADR-0004 §2) ----------------------------------------------------------
+
+
+def test_subsystems_step_before_the_flight_computer_which_reads_readings_only() -> None:
+    rig = Rig()
+    rig.target.apply_environment(EnvironmentState())  # noisy readings
+    rig.target.advance(3 * TICK)
+    for tick, call in zip(rig.ticks, rig.fc.calls, strict=True):
+        assert tuple(tick.state.subsystems) == STEP_ORDER
+        # The flight computer saw this tick's post-step readings, not truth.
+        assert call.readings == SpacecraftReadings.from_state(tick.state)
+        power = tick.state.get("power", PowerSnapshot)
+        assert call.readings.power is power.readings
+
+
+def test_boot_controls_apply_to_tick_zero() -> None:
+    target, ticks = real_target()
+    target.reset(0)
+    target.advance(TICK)
+    assert ticks[0].controls == BOOT_CONTROLS
+    assert ticks[0].controls == FlightComputer().reset()
+    # Their effect is visible in tick 0: BOOT has attitude control off.
+    attitude = ticks[0].state.get("attitude", AttitudeSnapshot)
+    assert attitude.truth.control_power_w == 0.0
+
+
+def test_controls_from_tick_n_are_obeyed_in_tick_n_plus_1() -> None:
+    rig = Rig()
+    rig.tick()
+    rig.tick(set_radio(RadioMode.RX_ONLY))
+    rig.tick()
+    first, second, third = rig.ticks
+    assert second.next_controls.radio.mode is RadioMode.RX_ONLY
+    assert second.controls.radio.mode is RadioMode.RX_TX
+    assert third.controls == second.next_controls
+    assert second.controls == first.next_controls
+
+
+def test_merge_is_a_pass_through_until_faults_exist() -> None:
+    # Step a with no faults (#60) and no radio traffic field (#98): the subsystems obey
+    # exactly the controls the flight computer produced the tick before.
+    target, ticks = real_target()
+    target.reset(3)
+    target.advance(5 * TICK)
+    assert ticks[0].controls is BOOT_CONTROLS
+    for before, after in itertools.pairwise(ticks):
+        assert after.controls is before.next_controls
+
+
+def test_timeline_ack_same_tick_effect_next_tick_power_two_ticks_later() -> None:
+    # ADR-0004 §2: a command sent in tick N is ACKed in tick N, takes physical effect in
+    # tick N+1, and power (stepped before attitude) sees the draw in tick N+2.
+    rig = Rig()
+    rig.target.apply_environment(QUIET)
+    for _ in range(3):
+        rig.tick()
+    downlink_n = rig.tick(set_attitude(True, sequence=9))
+    rig.tick()
+    rig.tick()
+    tick_n, tick_n1, tick_n2 = rig.ticks[-3:]
+
+    assert [ack_sequence(f) for f in downlink_n] == [9]
+
+    def control_w(tick: SilTick) -> float:
+        return tick.state.get("attitude", AttitudeSnapshot).truth.control_power_w
+
+    def load_w(tick: SilTick) -> float:
+        return tick.state.get("power", PowerSnapshot).truth.total_load_w
+
+    assert control_w(tick_n) == 0.0
+    assert control_w(tick_n1) == NOMINAL_CONFIG.attitude.control_power_w
+    assert load_w(tick_n1) == load_w(tick_n)
+    assert load_w(tick_n2) - load_w(tick_n1) == pytest.approx(
+        NOMINAL_CONFIG.attitude.control_power_w
+    )
+
+
+# --- Frame flow ------------------------------------------------------------------------
+
+
+def test_receive_returns_frames_since_the_last_call() -> None:
+    rig = Rig()
+    assert rig.target.receive() == []
+    rig.target.send(ping(1))
+    rig.target.advance(TICK)
+    rig.target.send(ping(2))
+    rig.target.advance(TICK)
+    assert [ack_sequence(f) for f in rig.target.receive()] == [1, 2]
+    assert rig.target.receive() == []
+
+
+def test_receive_returns_exactly_the_flight_computers_downlink_in_order() -> None:
+    rig = Rig(telemetry=True)
+    downlink = rig.tick(ping(4))
+    assert downlink == list(rig.last.downlink_frames)
+    assert downlink == list(rig.fc.calls[-1].output.downlink_frames)
+    assert ack_sequence(downlink[0]) == 4 and is_telemetry(downlink[1])
+
+
+def test_frames_sent_while_the_radio_is_off_are_lost_and_counted_not_queued() -> None:
+    rig = Rig(boot_controls=RADIO_OFF)
+    rig.tick(ping(1), ping(2))
+    assert rig.fc.calls[0].uplink_frames == ()
+    assert rig.last.traffic.uplink_lost_count == 2
+    assert rig.last.undecodable_uplink_count == 0
+
+    # Still off: lost again, and nothing from tick 0 was kept for later.
+    rig.tick(ping(3))
+    assert rig.fc.calls[1].uplink_frames == ()
+    assert rig.last.traffic.uplink_lost_count == 1
+    assert rig.target.receive() == []
+
+
+def test_receiver_state_is_judged_after_the_subsystem_step() -> None:
+    # The radio is OFF in ticks 0 and 1; the flight computer turns it on at step f of
+    # tick 1, so it is on in tick 2. A frame sent before tick 2, while comms still
+    # reported OFF, is received.
+    rig = Rig(boot_controls=RADIO_OFF)
+    rig.tick()
+    rig.fc.force_controls(BOOT_CONTROLS)  # scripted: the next step f turns the radio on
+    rig.tick()
+    assert not rig.last.state.get("comms", CommsSnapshot).truth.receiver_on
+    rig.tick(ping(5))
+    assert rig.last.state.get("comms", CommsSnapshot).truth.receiver_on
+    assert rig.fc.calls[-1].uplink_frames == (ping(5),)
+    assert rig.last.traffic.uplink_lost_count == 0
+
+    # And the reverse: the tick a commanded OFF takes effect, uplink is lost.
+    rig.tick(set_radio(RadioMode.OFF))
+    lost = rig.tick(ping(6))
+    assert lost == []
+    assert rig.last.state.get("comms", CommsSnapshot).truth.receiver_on is False
+    assert rig.last.traffic.uplink_lost_count == 1
+
+
+def test_rx_only_receives_and_executes_but_cannot_reply() -> None:
+    # The transmitter_off fault (#60) puts comms in RX_ONLY (ADR-0007 §5). Commands are
+    # still received and executed, but the capacity is 0, so the ACK is suppressed by
+    # the flight computer and counted; SilTarget passes the count on.
+    rx_only = dataclasses.replace(BOOT_CONTROLS, radio=RadioControls(RadioMode.RX_ONLY))
+    rig = Rig(boot_controls=rx_only)
+    downlink = rig.tick(set_attitude(True, sequence=3))
+    assert rig.fc.calls[0].uplink_frames == (set_attitude(True, sequence=3),)
+    assert downlink == []
+    assert rig.last.traffic == TickTraffic(
+        sent_bytes=0, uplink_lost_count=0, outbound_suppressed_count=1
+    )
+    rig.tick()
+    assert rig.last.state.get("attitude", AttitudeSnapshot).truth.control_power_w > 0.0
+
+
+def test_full_duplex_commands_received_while_sending() -> None:
+    # ADR-0004 §10: the radio receives and transmits in the same tick.
+    rig = Rig(telemetry=True)
+    for sequence in range(1, 6):
+        downlink = rig.tick(ping(sequence))
+        assert rig.fc.calls[-1].uplink_frames == (ping(sequence),)
+        assert [ack_sequence(f) for f in downlink[:1]] == [sequence]
+        assert is_telemetry(downlink[-1])
+        comms = rig.last.state.get("comms", CommsSnapshot).truth
+        assert comms.receiver_on and comms.transmitter_on
+
+
+GARBAGE: dict[str, bytes] = {
+    "empty": b"",
+    "noise": b"\x00\x01\x02",
+    "bad_sync": b"\x00" * 12,
+    "truncated": ping()[:-3],
+    "bad_crc": ping()[:-1] + bytes([ping()[-1] ^ 0xFF]),
+    "bad_type": encode_frame(Frame(frame_type=FrameType.ACK, sequence=1, payload=b""))[:3]
+    + b"\x7f"
+    + encode_frame(Frame(frame_type=FrameType.ACK, sequence=1, payload=b""))[4:],
+}
+
+
+@pytest.mark.parametrize("frame", GARBAGE.values(), ids=list(GARBAGE))
+def test_undecodable_uplink_is_ignored_and_counted(frame: bytes) -> None:
+    rig = Rig()
+    downlink = rig.tick(frame, ping(2), frame)
+    assert rig.fc.calls[-1].uplink_frames == (ping(2),)
+    assert rig.last.undecodable_uplink_count == 2
+    assert rig.last.traffic.uplink_lost_count == 0
+    assert [ack_sequence(f) for f in downlink] == [2]
+
+
+def test_undecodable_uplink_while_the_radio_is_off_counts_as_lost() -> None:
+    # Undecodable frames are received frames (ADR-0007 §3); with the receiver off
+    # nothing is received, so they are lost like any other frame.
+    rig = Rig(boot_controls=RADIO_OFF)
+    rig.tick(GARBAGE["noise"], ping())
+    assert rig.last.undecodable_uplink_count == 0
+    assert rig.last.traffic.uplink_lost_count == 2
+
+
+def test_send_rejects_non_bytes() -> None:
+    target = SilTarget()
+    with pytest.raises(TypeError, match="bytes"):
+        target.send("PING")  # type: ignore[arg-type]
+
+
+# --- Per-tick traffic record (ADR-0007 hand-over, #98) ---------------------------------
+
+
+def test_traffic_record_values_per_tick() -> None:
+    rig = Rig(telemetry=True)
+    assert rig.target.handover_traffic == TickTraffic()
+
+    downlink = rig.tick(ping(1), ping(2))
+    traffic = rig.last.traffic
+    assert traffic.sent_bytes == sum(len(f) for f in downlink)
+    assert traffic.sent_bytes == rig.fc.calls[-1].output.sent_bytes
+    assert traffic.uplink_lost_count == 0
+    assert traffic.outbound_suppressed_count == rig.fc.calls[-1].output.outbound_suppressed_count
+    assert rig.target.handover_traffic is traffic
+
+    # Per tick, not a running total: an idle tick reports only its own telemetry.
+    downlink = rig.tick()
+    assert rig.last.traffic.sent_bytes == sum(len(f) for f in downlink) < traffic.sent_bytes
+
+
+def test_suppressed_count_is_passed_on_when_capacity_runs_out() -> None:
+    # 120 bytes of capacity (#44) hold ten 12-byte ACKs. With twelve commands, two ACKs
+    # and the 36-byte telemetry frame do not fit and are suppressed.
+    rig = Rig(telemetry=True)
+    downlink = rig.tick(*(ping(n) for n in range(1, 13)))
+    assert [ack_sequence(f) for f in downlink] == list(range(1, 11))
+    assert sum(len(f) for f in downlink) == NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    assert rig.last.traffic.outbound_suppressed_count == 3
+    assert rig.last.traffic.sent_bytes == sum(len(f) for f in downlink)
+
+
+def test_lost_count_is_in_the_handover_record() -> None:
+    rig = Rig(boot_controls=RADIO_OFF)
+    rig.tick(ping(), ping(), ping())
+    assert rig.target.handover_traffic == TickTraffic(uplink_lost_count=3)
+
+
+def test_reset_zeroes_the_handover_traffic() -> None:
+    rig = Rig(telemetry=True)
+    rig.tick(ping())
+    assert rig.target.handover_traffic != TickTraffic()
+    rig.target.reset(7)
+    assert rig.target.handover_traffic == TickTraffic()
+    assert rig.target.last_tick is None
+
+
+# --- Environment -----------------------------------------------------------------------
+
+
+def test_apply_environment_feeds_the_subsystems() -> None:
+    rig = Rig()
+    rig.tick()
+    assert rig.last.state.get("power", PowerSnapshot).truth.generation_w > 0.0
+    rig.target.apply_environment(EnvironmentState(sunlit=False))
+    rig.tick()
+    assert rig.last.environment == EnvironmentState(sunlit=False)
+    assert rig.last.state.get("power", PowerSnapshot).truth.generation_w == 0.0
+
+
+def test_reset_returns_to_the_nominal_environment() -> None:
+    rig = Rig()
+    rig.target.apply_environment(EnvironmentState(sunlit=False))
+    rig.target.reset(7)
+    rig.tick()
+    assert rig.last.environment == EnvironmentState()
+
+
+def test_apply_environment_rejects_other_types() -> None:
+    with pytest.raises(TypeError, match="EnvironmentState"):
+        SilTarget().apply_environment(object())  # type: ignore[arg-type]
+
+
+# --- Reset, starting state, determinism ------------------------------------------------
+
+
+def _run(target: SilTarget, seed: int, ticks: int) -> tuple[list[bytes], list[SilTick]]:
+    """Reset under ``seed`` and run ``ticks`` ticks under a sampled orbit, sending a few
+    commands; return the downlink and the tick records."""
+    records: list[SilTick] = []
+    target.reset(seed)
+    env = NominalEnvironment()
+    downlink: list[bytes] = []
+    for n in range(ticks):
+        if n % 50 == 10:
+            target.send(ping(n))
+        if n % 50 == 20:
+            target.send(set_attitude(n % 100 == 20, sequence=n))
+        target.apply_environment(env.state_at(target.now_us))
+        target.advance(target.tick_us)
+        assert target.last_tick is not None
+        records.append(target.last_tick)
+        downlink.extend(target.receive())
+    return downlink, records
+
+
+def _scripted_target(**kwargs: object) -> SilTarget:
+    factory: Callable[[], FlightComputer] = lambda: ScriptedFlightComputer(telemetry=True)  # noqa: E731
+    return SilTarget(flight_computer_factory=factory, **kwargs)  # type: ignore[arg-type]
+
+
+def test_reset_rebuilds_the_flight_computer_and_subsystems() -> None:
+    rig = Rig()
+    first = rig.fc
+    rig.tick(set_attitude(True))
+    rig.target.reset(7)
+    assert rig.fc is not first and rig.fc.calls == []
+    rig.tick()
+    assert rig.last.controls == BOOT_CONTROLS  # the attitude command is forgotten
+
+
+def test_reset_discards_queued_uplink_and_undrained_downlink() -> None:
+    rig = Rig(telemetry=True)
+    rig.target.advance(TICK)
+    rig.target.send(ping())
+    rig.target.reset(7)
+    assert rig.target.receive() == []
+    rig.tick()
+    assert rig.fc.calls[0].uplink_frames == ()
+
+
+def test_same_seed_gives_identical_downlink_bytes() -> None:
+    first, _ = _run(_scripted_target(), seed=11, ticks=600)
+    second, _ = _run(_scripted_target(), seed=11, ticks=600)
+    assert len(first) > 600  # telemetry every tick, plus ACKs
+    assert first == second
+
+
+def test_different_seed_gives_different_downlink_bytes() -> None:
+    first, _ = _run(_scripted_target(), seed=11, ticks=100)
+    second, _ = _run(_scripted_target(), seed=12, ticks=100)
+    assert first != second
+
+
+def test_reset_after_running_reproduces_the_first_run_exactly() -> None:
+    target = _scripted_target()
+    downlink_a, ticks_a = _run(target, seed=5, ticks=400)
+    _run(target, seed=99, ticks=123)  # something else in between
+    downlink_b, ticks_b = _run(target, seed=5, ticks=400)
+    assert downlink_a == downlink_b
+    assert ticks_a == ticks_b  # controls, state, and traffic, tick by tick
+
+
+def test_different_starting_states_diverge_and_reset_restores_each() -> None:
+    low = SpacecraftInitialState(power=PowerInitial(soc=0.4))
+    target_default = _scripted_target()
+    target_low = _scripted_target(initial=low)
+    assert target_low.initial is low
+
+    _, default_ticks = _run(target_default, seed=5, ticks=20)
+    _, low_ticks = _run(target_low, seed=5, ticks=20)
+
+    def soc(tick: SilTick) -> float:
+        return tick.state.get("power", PowerSnapshot).truth.soc
+
+    assert soc(low_ticks[0]) < soc(default_ticks[0])
+    assert soc(low_ticks[0]) == pytest.approx(0.4, abs=1e-3)
+    _, low_again = _run(target_low, seed=5, ticks=20)
+    assert low_again == low_ticks
+
+
+def test_real_flight_computer_runs_and_is_reproducible() -> None:
+    target = SilTarget()
+    downlink_a, ticks_a = _run(target, seed=2, ticks=200)
+    downlink_b, ticks_b = _run(target, seed=2, ticks=200)
+    assert downlink_a == downlink_b == []  # the real flight computer sends nothing yet
+    assert ticks_a == ticks_b
+    assert all(t.controls == BOOT_CONTROLS for t in ticks_a)  # BOOT until #49
+
+
+# --- Multi-orbit and performance -------------------------------------------------------
+
+ORBIT_TICKS = 92 * 60 * 10  # NominalEnvironment's default 92-minute orbit at 100 ms
+RUN_TICKS = ORBIT_TICKS + 600  # one orbit, ending in eclipse, then a minute of sunlight
+
+
+@pytest.mark.slow
+def test_one_orbit_is_deterministic_and_eclipse_reaches_the_subsystems() -> None:
+    target = _scripted_target()
+    started = time.perf_counter()
+    downlink_a, ticks_a = _run(target, seed=42, ticks=RUN_TICKS)
+    per_tick_us = (time.perf_counter() - started) / RUN_TICKS * 1e6
+    print(f"\nSilTarget, scripted flight computer with telemetry: {per_tick_us:.1f} us/tick")
+
+    generation = [t.state.get("power", PowerSnapshot).truth.generation_w for t in ticks_a]
+    sunlit = [t.environment.sunlit for t in ticks_a]
+    assert sunlit[0] and not sunlit[ORBIT_TICKS - 1] and sunlit[-1]
+    assert all(g == 0.0 for g, s in zip(generation, sunlit, strict=True) if not s)
+    assert generation[0] > 0.0 and generation[-1] > 0.0  # stops in eclipse, resumes after
+
+    downlink_b, _ = _run(target, seed=42, ticks=RUN_TICKS)
+    assert downlink_a == downlink_b
