@@ -18,10 +18,11 @@ are ADR-0004 §2 steps c to f:
    ``controls_for_mode()``, the single controls function (ADR-0004 §14). #56 adds the
    chunk release.
 
-Today every phase except ``update_mode`` and ``produce_controls`` is a documented no-op,
-and those two only call #47's :func:`~pocketsat.flight.modes.transition` (for the events
-the earlier phases raise, none yet) and :func:`~pocketsat.flight.modes.controls_for_mode`.
-Later tickets fill in one phase each.
+``evaluate_flags`` applies #48's safe-mode and fault rules
+(:mod:`pocketsat.flight.safety`); ``update_mode`` and ``produce_controls`` call #47's
+:func:`~pocketsat.flight.modes.transition` and
+:func:`~pocketsat.flight.modes.controls_for_mode`. The other phases are documented
+no-ops. Later tickets fill in one phase each.
 
 The flight computer is **not** part of ``STEP_ORDER``: it always runs after all
 subsystems, and the controls it produces in tick N apply in tick N+1 (ADR-0004 §2). It
@@ -42,6 +43,14 @@ from pocketsat.flight.modes import (
     Transition,
     controls_for_mode,
     transition,
+)
+from pocketsat.flight.safety import (
+    DEFAULT_SAFETY_CONFIG,
+    INITIAL_SAFETY_STATE,
+    SafetyConfig,
+    SafetyState,
+    SafetyVerdict,
+    evaluate,
 )
 from pocketsat.spacecraft.base import SpacecraftState
 from pocketsat.spacecraft.controls import SpacecraftControls
@@ -206,7 +215,10 @@ class TickContext:
             order by the update-mode phase.
         transitions: The result of each applied mode event, in order.
         safe_exit_allowed: Whether the flags that put the spacecraft in SAFE have
-            cleared (#48); passed to ``transition()``. False until #48 computes it.
+            cleared (#48); passed to ``transition()``. Set by the evaluate-flags phase
+            from this tick's readings; False until then.
+        safety: The safe-mode and fault rules' verdict for this tick (#48), set by the
+            evaluate-flags phase.
         downlink_frames: Encoded frames queued for transmission this tick.
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick.
     """
@@ -217,6 +229,7 @@ class TickContext:
     mode_events: list[ModeEvent] = field(default_factory=list)
     transitions: list[Transition] = field(default_factory=list)
     safe_exit_allowed: bool = False
+    safety: SafetyVerdict | None = None
     downlink_frames: list[bytes] = field(default_factory=list)
     outbound_suppressed_count: int = 0
 
@@ -240,8 +253,20 @@ class FlightComputer:
     No randomness, no wall-clock time; simulated time comes from the caller.
     """
 
-    def __init__(self) -> None:
-        """Create a flight computer in its power-on state at time 0 (see :meth:`reset`)."""
+    def __init__(self, *, safety: SafetyConfig = DEFAULT_SAFETY_CONFIG) -> None:
+        """Create a flight computer in its power-on state at time 0 (see :meth:`reset`).
+
+        Args:
+            safety: Settings of the safe-mode rules (#48), such as how many ticks a
+                flag must be sustained.
+
+        Raises:
+            TypeError: ``safety`` is not a :class:`SafetyConfig`.
+        """
+        if not isinstance(safety, SafetyConfig):
+            raise TypeError(f"safety must be a SafetyConfig, got {type(safety).__name__}")
+        self._safety_config = safety
+        self._safety_state: SafetyState = INITIAL_SAFETY_STATE
         self._mode_state: ModeState = INITIAL_STATE
         self._boot_count = 0
         self._boot_time_us = 0
@@ -323,12 +348,14 @@ class FlightComputer:
     def _clear_transient_state(self) -> None:
         """Forget everything that does not survive a reboot and restart uptime.
 
-        Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`). Later
-        tickets add their own transient state here (for example the telemetry schedule
-        and sequence counters, #55, and the downlink session, #56). The boot counter is
-        not transient.
+        Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`) and the
+        safe-mode persistence counters (#48), so a flag still set after a reboot must
+        be sustained again from BOOT. Later tickets add their own transient state here
+        (for example the telemetry schedule and sequence counters, #55, and the
+        downlink session, #56). The boot counter is not transient.
         """
         self._mode_state = INITIAL_STATE
+        self._safety_state = INITIAL_SAFETY_STATE
         self._boot_time_us = self._now_us
 
     def _advance_time(self, now_us: int) -> None:
@@ -412,11 +439,20 @@ class FlightComputer:
     def _evaluate_flags(self, tick: TickContext) -> None:
         """Phase 3 (ADR-0004 step d): turn readings flags and boot timing into events.
 
-        No-op for now. #48 adds the sustained-flag rules that append SAFE_CONDITION
-        and FAULT_DETECTED to ``tick.mode_events`` and sets
-        ``tick.safe_exit_allowed``; #49 adds BOOT_COMPLETE once the boot duration has
-        elapsed (and the SAFE-during-BOOT path, #107).
+        Applies the safe-mode and fault rules (#48, :func:`pocketsat.flight.safety.evaluate`)
+        to this tick's **readings**: appends FAULT_DETECTED when a consistency check
+        fails and SAFE_CONDITION while a safe-mode flag is sustained, after any events
+        the commands raised (so automatic events have the last word in a tick), and
+        sets ``tick.safe_exit_allowed`` for the update-mode phase. Runs in every mode;
+        the state machine ignores what doesn't apply. #49 adds BOOT_COMPLETE once the
+        boot duration has elapsed, and decides which boot steps still run on the
+        BOOT → SAFE path (#107).
         """
+        verdict = evaluate(self._safety_state, tick.readings, self._safety_config)
+        self._safety_state = verdict.state
+        tick.safety = verdict
+        tick.safe_exit_allowed = verdict.safe_exit_allowed
+        tick.mode_events.extend(verdict.events)
 
     def _update_mode(self, tick: TickContext) -> None:
         """Phase 4 (ADR-0004 step d): apply this tick's mode events, in order.
