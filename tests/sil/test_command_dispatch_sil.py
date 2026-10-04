@@ -1,9 +1,10 @@
 """End to end: COMMAND frames through ``SilTarget`` to the real flight computer (#51).
 
 The ground's view only: frames go in with ``send()``, time passes with ``advance()``,
-and the ACK frames come back from ``receive()``. Until #49 raises BOOT_COMPLETE the
-real flight computer stays in BOOT, so only PING and RESET are accepted here; every
-mode is covered in ``tests/unit/test_command_dispatcher.py``.
+and the ACK frames come back from ``receive()``. Every test here runs within the first
+5 s, so the real flight computer is still in BOOT (#49) and only PING and RESET are
+accepted; every mode is covered in ``tests/unit/test_command_dispatcher.py``, and
+commands after the boot in ``tests/sil/test_boot_reset_story.py``.
 """
 
 from pocketsat.flight import Mode, RejectReason

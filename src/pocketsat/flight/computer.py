@@ -7,11 +7,12 @@ truth, ADR-0004 §6, §7), and the simulated time. ``step()`` runs six fixed pha
 are ADR-0004 §2 steps c to f:
 
 1. ``decode_uplink`` (step c): decode COMMAND frames with #52's codec (#51).
-2. ``execute_commands`` (step c): dispatch commands and queue ACK/NACK (#51). The
-   reboot behind RESET is #49's.
+2. ``execute_commands`` (step c): dispatch commands and queue ACK/NACK (#51). RESET
+   only raises its event here; the reboot happens in ``update_mode`` (#49).
 3. ``evaluate_flags`` (step d): raise SAFE_CONDITION, FAULT_DETECTED, and BOOT_COMPLETE.
    Filled by #48 and #49.
-4. ``update_mode`` (step d): apply the mode events with #47's ``transition()``.
+4. ``update_mode`` (step d): apply the mode events with #47's ``transition()``; an
+   applied RESET reboots (#49).
 5. ``emit_telemetry`` (step e): telemetry when due, then DATA in DOWNLINK. Filled by
    #55 and #56.
 6. ``produce_controls`` (step f): the next tick's controls from #47's
@@ -20,7 +21,8 @@ are ADR-0004 §2 steps c to f:
 
 ``decode_uplink`` and ``execute_commands`` are #51's command dispatcher;
 ``evaluate_flags`` applies #48's safe-mode and fault rules
-(:mod:`pocketsat.flight.safety`); ``update_mode`` and ``produce_controls`` call #47's
+(:mod:`pocketsat.flight.safety`) and #49's boot timing (:mod:`pocketsat.flight.boot`);
+``update_mode`` and ``produce_controls`` call #47's
 :func:`~pocketsat.flight.modes.transition` and
 :func:`~pocketsat.flight.modes.controls_for_mode`. ``emit_telemetry`` is a documented
 no-op until #55 and #56.
@@ -49,12 +51,14 @@ from typing import Final, Self
 
 from pocketsat import messages
 from pocketsat.core.clock import check_us
+from pocketsat.flight.boot import DEFAULT_BOOT_CONFIG, BootConfig, boot_complete, uptime_ms
 from pocketsat.flight.modes import (
     INITIAL_STATE,
     EventKind,
     Mode,
     ModeEvent,
     ModeState,
+    Outcome,
     Transition,
     controls_for_mode,
     transition,
@@ -362,24 +366,36 @@ class FlightComputer:
     - :meth:`step` runs once per tick (see :data:`PHASE_ORDER`).
     - :meth:`reboot` is the RESET path shared by the RESET command (#49, #51) and the
       ``forced_reset`` fault (#60, ADR-0004 §9).
+    - BOOT lasts :attr:`BootConfig.duration_us` of uptime, then ``BOOT_COMPLETE``
+      moves it to NOMINAL (#49); a safe condition or fault in BOOT leaves it earlier.
 
     Deterministic: the same calls with the same arguments always give the same outputs.
     No randomness, no wall-clock time; simulated time comes from the caller.
     """
 
-    def __init__(self, *, safety: SafetyConfig = DEFAULT_SAFETY_CONFIG) -> None:
+    def __init__(
+        self,
+        *,
+        safety: SafetyConfig = DEFAULT_SAFETY_CONFIG,
+        boot: BootConfig = DEFAULT_BOOT_CONFIG,
+    ) -> None:
         """Create a flight computer in its power-on state at time 0 (see :meth:`reset`).
 
         Args:
             safety: Settings of the safe-mode rules (#48), such as how many ticks a
                 flag must be sustained.
+            boot: Settings of the boot sequence (#49): how long BOOT lasts.
 
         Raises:
-            TypeError: ``safety`` is not a :class:`SafetyConfig`.
+            TypeError: ``safety`` is not a :class:`SafetyConfig` or ``boot`` is not a
+                :class:`BootConfig`.
         """
         if not isinstance(safety, SafetyConfig):
             raise TypeError(f"safety must be a SafetyConfig, got {type(safety).__name__}")
+        if not isinstance(boot, BootConfig):
+            raise TypeError(f"boot must be a BootConfig, got {type(boot).__name__}")
         self._safety_config = safety
+        self._boot_config = boot
         self._safety_state: SafetyState = INITIAL_SAFETY_STATE
         self._mode_state: ModeState = INITIAL_STATE
         self._boot_count = 0
@@ -402,15 +418,30 @@ class FlightComputer:
 
     @property
     def boot_count(self) -> int:
-        """Reboots since power-on (:meth:`reset`); kept across :meth:`reboot` (#49)."""
+        """Reboots since power-on (#49): 0 after :meth:`reset`, +1 for every
+        :meth:`reboot` (RESET command or ``forced_reset``), never cleared by one.
+
+        Not bounded here; telemetry's uint16 field saturates at 65535.
+        """
         return self._boot_count
 
     @property
     def uptime_us(self) -> int:
-        """Simulated time since the last power-on or reboot, integer microseconds, as of
-        the last :meth:`reset`, :meth:`reboot`, or :meth:`step`. Telemetry carries it
-        in milliseconds (#49, #55)."""
+        """Simulated time since the flight software last started, integer microseconds,
+        as of the last :meth:`reset`, :meth:`reboot`, or :meth:`step`.
+
+        0 at power-on and at every reboot (#49).
+        """
         return self._now_us - self._boot_time_us
+
+    @property
+    def uptime_ms(self) -> int:
+        """:attr:`uptime_us` in whole milliseconds, for telemetry (#49, #55).
+
+        Not wrapped here: the telemetry encoder sends it modulo 2**32
+        (:func:`pocketsat.flight.boot.uptime_ms`).
+        """
+        return uptime_ms(self.uptime_us)
 
     # --- Lifecycle --------------------------------------------------------------------
 
@@ -440,13 +471,18 @@ class FlightComputer:
 
     def reboot(self, *, now_us: int) -> None:
         """Reboot through the RESET path: BOOT, transient state cleared, uptime reset,
-        boot counter incremented.
+        boot counter incremented. Takes effect immediately.
 
-        The RESET command (#49, #51) and the ``forced_reset`` fault (#60) both call this
-        (ADR-0004 §9). Subsystem physical state is not touched: it is not the flight
-        computer's. BOOT's controls are produced by the next produce-controls phase,
-        at step f of the tick the reboot completes in (ADR-0004 §9). The held-in-reset
-        period is #49's and #60's to add.
+        The RESET command (applied in the update-mode phase, #49, #51) and the
+        ``forced_reset`` fault (#60) both call this (ADR-0004 §9). Subsystem physical
+        state is not touched: it is not the flight computer's. The next produce-controls
+        phase (step f of this tick for RESET, of the next step for a call between
+        steps) produces BOOT's controls, and the boot duration counts from ``now_us``.
+
+        Held-in-reset period (ADR-0004 §9): not the flight computer's. It belongs to
+        ``SilTarget``'s ``forced_reset`` (#60): the target doesn't step the flight
+        computer during the hold and calls ``reboot(now_us=<end of the hold>)`` once, so
+        uptime counts from leaving reset. A RESET command has no hold.
 
         Args:
             now_us: Simulated time of the reboot, integer microseconds. Uptime counts
@@ -577,7 +613,8 @@ class FlightComputer:
         2. PING is ACKed in every mode and raises no event.
         3. SET_MODE, BEGIN_DOWNLINK, ENTER_SAFE_MODE, and RESET raise the mode event of
            the same name, appended to ``tick.mode_events``. The update-mode phase
-           applies it in step d (``docs/spacecraft-modes.md``); RESET's reboot is #49's.
+           applies it in step d (``docs/spacecraft-modes.md``) and, for RESET, reboots
+           there (#49).
            The ACK or NACK is the result of #47's ``transition()`` for that event: ACK
            for TRANSITION and NO_CHANGE, NACK with the ``RejectReason`` for REJECTED.
 
@@ -624,27 +661,48 @@ class FlightComputer:
         fails and SAFE_CONDITION while a safe-mode flag is sustained, after any events
         the commands raised (so automatic events have the last word in a tick), and
         sets ``tick.safe_exit_allowed`` for the update-mode phase. Runs in every mode;
-        the state machine ignores what doesn't apply. #49 adds BOOT_COMPLETE once the
-        boot duration has elapsed, and decides which boot steps still run on the
-        BOOT → SAFE path (#107).
+        the state machine ignores what doesn't apply.
+
+        Then, in BOOT, appends BOOT_COMPLETE once the uptime has reached the boot
+        duration (#49, :class:`BootConfig`). It comes last, so a SAFE_CONDITION or
+        FAULT_DETECTED in the same tick wins and BOOT_COMPLETE is ignored. Once SAFE or
+        FAULT has left BOOT, BOOT_COMPLETE is never raised: every boot step but the wait
+        already ran at the reboot (``docs/spacecraft-modes.md``, "Boot sequence").
         """
         verdict = evaluate(self._safety_state, tick.readings, self._safety_config)
         self._safety_state = verdict.state
         tick.safety = verdict
         tick.safe_exit_allowed = verdict.safe_exit_allowed
         tick.mode_events.extend(verdict.events)
+        if self._mode_state.mode is Mode.BOOT and boot_complete(self.uptime_us, self._boot_config):
+            tick.mode_events.append(ModeEvent(EventKind.BOOT_COMPLETE))
 
     def _update_mode(self, tick: TickContext) -> None:
         """Phase 4 (ADR-0004 step d): apply this tick's mode events, in order.
 
         Each event in ``tick.mode_events`` goes through #47's ``transition()``; its
-        result is recorded in ``tick.transitions``. With no events (all that the
-        earlier phases raise today) the mode stays as it is.
+        result is recorded in ``tick.transitions``, one per event. With no events the
+        mode stays as it is.
+
+        An applied RESET reboots here (#49): :meth:`reboot` at this tick's time, so the
+        boot counter goes up, uptime restarts, and transient state is cleared. Frames
+        already queued this tick (the RESET's ACK, #51) still go out, and step f
+        produces BOOT's controls. Automatic events after the RESET were raised from the
+        state the reboot discarded, so they are recorded as IGNORED and not applied;
+        later command events still go through the table (in BOOT: a NACK, or another
+        RESET).
         """
+        rebooted = False
         for event in tick.mode_events:
+            if rebooted and not event.kind.is_command:
+                tick.transitions.append(Transition(Outcome.IGNORED, self._mode_state))
+                continue
             result = transition(self._mode_state, event, safe_exit_allowed=tick.safe_exit_allowed)
             self._mode_state = result.state
             tick.transitions.append(result)
+            if event.kind is EventKind.RESET:
+                self.reboot(now_us=tick.now_us)
+                rebooted = True
 
     def _emit_telemetry(self, tick: TickContext) -> None:
         """Phase 5 (ADR-0004 step e): emit telemetry if due, and DATA in DOWNLINK.

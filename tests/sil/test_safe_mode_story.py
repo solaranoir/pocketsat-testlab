@@ -6,9 +6,10 @@ real :class:`FlightComputer` produces, one tick late, as ``SilTarget`` will run 
 its fault merge, precedence fault > flight computer). The flight computer sees only the
 readings.
 
-Commands (#51) and BOOT_COMPLETE (#49) don't exist yet, so :class:`ScriptedComputer`
-raises scripted mode events in the execute-commands phase. Without a scripted
-BOOT_COMPLETE the flight computer stays in BOOT, which exercises the BOOT → SAFE path.
+Commands (#51) don't exist yet, so :class:`ScriptedComputer` raises scripted mode
+events in the execute-commands phase. Without a scripted BOOT_COMPLETE the flight
+computer runs #49's boot sequence: BOOT for the boot duration (5 s), then NOMINAL.
+The BOOT → SAFE path is ``tests/sil/test_boot_reset_story.py``'s.
 
 The cold case is #72's contract-suite environment, -150 °C in sunlight and eclipse
 (``docs/power-thermal-budget.md``, "Cold case"): ``under_temp`` sets about 2 minutes in.
@@ -34,6 +35,7 @@ from pocketsat.flight import (
     Transition,
     controls_for_mode,
 )
+from pocketsat.flight.boot import DEFAULT_BOOT_CONFIG
 from pocketsat.flight.computer import TickContext
 from pocketsat.flight.safety import DEFAULT_SAFETY_CONFIG
 from pocketsat.spacecraft import (
@@ -165,19 +167,29 @@ def cold_until(end_s: float) -> Callable[[int], NominalEnvironment]:
     return lambda now_us: COLD_ENV if now_us < end_s * US_PER_S else NOMINAL_ENV
 
 
-# --- Cold case: BOOT -> SAFE from physics, heater keeps running -----------------------
+BOOT_TICKS = DEFAULT_BOOT_CONFIG.duration_us // SimClock().tick_us
+"""Ticks under BOOT's controls after power-on (#49): the mode is NOMINAL from the step of
+tick ``BOOT_TICKS - 1``, whose end is the boot duration."""
 
 
-def test_cold_case_goes_from_boot_to_safe_after_n_ticks_of_under_temp() -> None:
+def booted(ticks: int) -> list[Mode]:
+    """The modes of the first ``ticks`` ticks with no flags: BOOT, then NOMINAL (#49)."""
+    return [Mode.BOOT if k < BOOT_TICKS - 1 else Mode.NOMINAL for k in range(ticks)]
+
+
+# --- Cold case: SAFE from physics, heater keeps running ------------------------------
+
+
+def test_cold_case_goes_to_safe_after_n_ticks_of_under_temp() -> None:
     result = run(ticks_of(240), environment=lambda now_us: COLD_ENV)
     flagged = result.first(lambda k: result.thermal(k).readings.under_temp)
     assert flagged < ticks_of(300), "under_temp within 5 minutes (#72)"
     entered = result.first(lambda k: result.modes[k] is Mode.SAFE)
     assert entered == flagged + N - 1
-    assert result.modes[:entered] == [Mode.BOOT] * entered
+    assert result.modes[:entered] == booted(entered)
     assert all(m is Mode.SAFE for m in result.modes[entered:])
     # SAFE's controls apply from the next tick.
-    assert result.controls[entered] == controls_for_mode(Mode.BOOT)
+    assert result.controls[entered] == controls_for_mode(Mode.NOMINAL)
     assert result.controls[entered + 1] == controls_for_mode(Mode.SAFE)
 
 
@@ -226,7 +238,7 @@ def test_frozen_thermal_sensor_delays_safe_entry() -> None:
     past = [k for k in range(release) if below_under_temp(result, k)]
     assert len(past) > ticks_of(60)
     assert not any(result.thermal(k).readings.under_temp for k in range(release))
-    assert result.modes[:release] == [Mode.BOOT] * release
+    assert result.modes[:release] == booted(release)
     # On release the live readings show it, and SAFE follows N ticks later.
     flagged = result.first(lambda k: result.thermal(k).readings.under_temp)
     assert flagged == release  # the first tick stepped without the freeze
@@ -240,7 +252,7 @@ def test_frozen_thermal_sensor_prevents_safe_entry() -> None:
         overrides=thermal_frozen_until(None),
     )
     assert all(below_under_temp(result, k) for k in range(ticks_of(300), len(result.modes)))
-    assert set(result.modes) == {Mode.BOOT}
+    assert result.modes == booted(len(result.modes))
 
 
 # --- Battery drain: SAFE from physics, out of SAFE by command once clear -----------------

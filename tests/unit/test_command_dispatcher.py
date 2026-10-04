@@ -122,8 +122,8 @@ def frame_for(command: Command, sequence: int = 1) -> bytes:
 def in_state(state: ModeState) -> FlightComputer:
     """A flight computer in ``state``.
 
-    Set directly: until #49 raises BOOT_COMPLETE, BOOT is the only mode reachable
-    through the public interface.
+    Set directly, so each test reaches its mode in one step instead of waiting out
+    the 5 s boot (#49) and commanding the mode first.
     """
     fc = FlightComputer()
     fc._mode_state = state
@@ -215,8 +215,8 @@ def test_ping_is_acked_in_every_mode_and_raises_no_event(
 
 
 def test_reset_is_acked_and_raised_as_a_mode_event(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The reboot itself (uptime, boot counter, held-in-reset) is #49's: the dispatcher
-    # only raises the event, which the update-mode phase applies.
+    # The dispatcher only raises the event; the update-mode phase applies it and
+    # reboots (#49, tests/unit/test_boot_reset.py).
     fc = in_state(ModeState(Mode.SCIENCE))
     ticks = capture_ticks(fc, monkeypatch)
     out = fc.step([frame_for(Command.reset(), sequence=3)], READINGS, 0)
