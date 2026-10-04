@@ -166,6 +166,7 @@ def test_scan_covers_simulation_code() -> None:
         "flight/safety.py",
         "targets/base.py",
         "targets/echo.py",
+        "targets/sil.py",
     } <= names
     assert not any(name.startswith("reporting/") for name in names)
 
