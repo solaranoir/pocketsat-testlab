@@ -208,9 +208,11 @@ class Outcome(Enum):
 class RejectReason(IntEnum):
     """Why a command was rejected, as carried in the NACK payload (#51, #52).
 
-    Values are uint8 wire codes. 0x00 is reserved (never sent) and 0x01-0x0F are left
-    for #52's decoding and argument errors (unknown command, truncated payload, invalid
-    argument); mode reasons use 0x10-0x1F. Codes are never renumbered or reused.
+    Values are uint8 wire codes. 0x00 is never a NACK reason: it is the reason byte of
+    an ACK (``pocketsat.messages.ACK_REASON``). 0x01-0x0F are #52's decoding and
+    argument errors (``pocketsat.messages.DecodeReason``: unknown command, truncated or
+    over-long payload, invalid argument), checked before the mode; mode reasons use
+    0x10-0x1F. Codes are never renumbered or reused.
     """
 
     BOOT_IN_PROGRESS = 0x10

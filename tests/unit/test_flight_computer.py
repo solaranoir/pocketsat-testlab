@@ -1,8 +1,9 @@
 """Tests for the FlightComputer skeleton and its step() interface (#101).
 
-Every phase is a no-op or pass-through today, so these tests pin the seams later tickets
-fill in: the phase order, the single controls function, BOOT on reset, the RESET path
-(reboot), the output record ADR-0007 relies on, and the readings-only input.
+These tests pin the seams the phases are filled in through: the phase order, the single
+controls function, BOOT on reset, the RESET path (reboot), the output record ADR-0007
+relies on, and the readings-only input. The command dispatcher (#51) is tested in
+``test_command_dispatcher.py``.
 """
 
 import random
@@ -42,7 +43,8 @@ STATE = fake_stack().snapshot()
 READINGS = SpacecraftReadings.from_state(STATE)
 
 COMMAND_FRAME = encode_frame(Frame(FrameType.COMMAND, sequence=7, payload=b"\x01\x02"))
-"""A well-formed COMMAND frame. Its payload means nothing yet (#52)."""
+"""A well-formed COMMAND frame: PING with a stray argument byte, so it is NACKed
+``PAYLOAD_TOO_LONG`` (#52) and changes nothing."""
 
 UPLINK_SAMPLES: list[tuple[bytes, ...]] = [
     (),
@@ -128,19 +130,19 @@ def test_phases_share_one_tick_context(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("frames", UPLINK_SAMPLES)
-def test_uplink_frames_pass_through_the_no_op_phases(frames: tuple[bytes, ...]) -> None:
+def test_any_uplink_is_handled_without_raising(frames: tuple[bytes, ...]) -> None:
+    # Only the valid COMMAND frames are answered (#51); the rest are ignored.
     fc = FlightComputer()
     for tick in range(3):
         out = fc.step(frames, READINGS, tick * TICK_US)
-        assert out.downlink_frames == ()
+        assert len(out.downlink_frames) == frames.count(COMMAND_FRAME)
         assert out.controls == controls_for_mode(Mode.BOOT)
     assert fc.mode is Mode.BOOT
 
 
 def test_uplink_accepts_any_iterable_of_bytes() -> None:
-    fc = FlightComputer()
-    out = fc.step(iter([COMMAND_FRAME, b"\xff"]), READINGS, 0)
-    assert out == fc.step([COMMAND_FRAME, b"\xff"], READINGS, 0)
+    out = FlightComputer().step(iter([COMMAND_FRAME, b"\xff"]), READINGS, 0)
+    assert out == FlightComputer().step([COMMAND_FRAME, b"\xff"], READINGS, 0)
 
 
 def test_no_mode_events_means_the_mode_stays(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,14 +302,14 @@ def test_reboot_produces_boot_controls_at_the_next_step_f(
 # --- Output record ------------------------------------------------------------------
 
 
-def test_output_traffic_counts_are_zero_today() -> None:
+def test_output_traffic_counts_match_the_frames_sent() -> None:
     fc = FlightComputer()
     for tick, frames in enumerate(UPLINK_SAMPLES):
         out = fc.step(frames, READINGS, tick * TICK_US)
         assert isinstance(out, FlightComputerOutput)
-        assert out.downlink_frames == ()
-        assert out.sent_bytes == 0
-        assert out.outbound_suppressed_count == 0
+        assert len(out.downlink_frames) == frames.count(COMMAND_FRAME)  # one NACK each
+        assert out.sent_bytes == sum(len(frame) for frame in out.downlink_frames)
+        assert out.outbound_suppressed_count == 0  # the fake's capacity fits them all
 
 
 def test_output_sent_bytes_is_the_wire_length_of_every_frame() -> None:
