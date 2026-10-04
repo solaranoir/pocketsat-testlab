@@ -39,8 +39,8 @@ The state machine consumes one `ModeEvent` at a time through `transition(state, 
 | `ENTER_SAFE_MODE` | command | #51 |
 | `RESET` | command | #51, and the `forced_reset` fault (#60) through the same path (ADR-0004 §9). The reboot itself (uptime, boot counter, transient state, held-in-reset period) is #49 |
 | `BOOT_COMPLETE` | automatic | Boot sequence, after the configured boot duration (#49) |
-| `SAFE_CONDITION` | automatic | Safe-mode rules: `critical_battery`, `over_temp`, or `under_temp` sustained for the configured number of ticks, judged from reported values (#48) |
-| `FAULT_DETECTED` | automatic | Fault rules: an internal consistency failure (#48) |
+| `SAFE_CONDITION` | automatic | Safe-mode rules: `critical_battery`, `over_temp`, or `under_temp` sustained for the configured number of ticks, judged from reported values (#48; see [Safe and fault entry rules](#safe-and-fault-entry-rules)) |
+| `FAULT_DETECTED` | automatic | Fault rules: an internal consistency failure in the readings (#48; see [Safe and fault entry rules](#safe-and-fault-entry-rules)) |
 | `DOWNLINK_COMPLETE` | automatic | Downlink session: no unsent chunks remain (#56) |
 
 The `safe_exit_allowed` input is the guard for leaving SAFE: whether the flags that put the spacecraft in SAFE have cleared. #48 computes it. It is a required argument, so no caller can leave SAFE by forgetting it; it is read only for SET_MODE NOMINAL in SAFE.
@@ -169,12 +169,66 @@ The payload is off in DOWNLINK, so each mode does one job and the controls depen
 
 Keeping it on would instead keep science continuous through passes and match the budget's calibrated numbers exactly. That is a one-row change in `controls_for_mode` and in the table above.
 
+## Safe and fault entry rules
+
+The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED` and compute the `safe_exit_allowed` guard (#48). The rule logic is pure functions in `pocketsat.flight.safety` (`evaluate(state, readings, config)`); the flight computer's evaluate-flags phase (ADR-0004 §2 step d) calls it once per tick and appends the events after any the tick's commands raised. Tests: `tests/unit/test_safety.py` (the rules, table-driven, and the flight computer fed readings from fake snapshots) and `tests/sil/test_safe_mode_story.py` (the real subsystems under the cold case, a frozen sensor, and a battery drain).
+
+**Decisions read reported values only** (ADR-0004 §6). The rules see `SpacecraftReadings`, never a truth record: the flags below are the readings flags computed by power (#36) and thermal (#39) from noisy, possibly frozen, reported values. A frozen sensor (`sensor_freeze`) therefore holds its flags too, and delays SAFE entry for as long as the freeze lasts, or prevents it, however far the true value is past its threshold.
+
+| Rule | Condition, on this tick's readings | Raises | Persistence |
+|---|---|---|---|
+| Critical battery | `power.critical_battery` | `SAFE_CONDITION` | set for `sustain_tick_count` consecutive ticks (default 10) |
+| Over-temperature | `thermal.over_temp` (battery or electronics) | `SAFE_CONDITION` | same, own counter |
+| Under-temperature | `thermal.under_temp` (battery or electronics) | `SAFE_CONDITION` | same, own counter |
+| Reading not finite | a reported power, thermal, or attitude value is NaN or infinite | `FAULT_DETECTED` | none: the first tick |
+| Battery flag order | `critical_battery` set without `low_battery` | `FAULT_DETECTED` | none |
+| Payload bookkeeping | `buffered_bytes` is not `total_produced_bytes - total_released_bytes`, or outside 0..`buffer_capacity_bytes`, or `oldest_unreleased_chunk_id` > `next_chunk_id` | `FAULT_DETECTED` | none |
+| Comms capacity | `sent_bytes` outside 0..`transmit_capacity_bytes`, a non-zero capacity with the transmitter off, or a negative counter | `FAULT_DETECTED` | none |
+| Exit guard | `safe_exit_allowed` is true when none of `critical_battery`, `over_temp`, `under_temp` is set | (guard for SET_MODE NOMINAL in SAFE) | none: this tick's flags |
+
+### Safe-mode flags and persistence
+
+- **Which flags.** `critical_battery`, `over_temp`, and `under_temp`. `low_battery` is not one: it is a warning for the ground and the payload's inhibit (#43), and SAFE would not change what it protects against (SAFE's controls equal NOMINAL's).
+- **Counting.** Each flag has its own counter, in ticks of simulated time (no wall clock). It counts from the tick the flag first appears in the readings (which already include the ADR-0004 latencies, #71): 1 in that tick, +1 for each further tick the flag stays set, back to 0 in any tick it is clear. `SAFE_CONDITION` is raised in every tick in which some counter has reached `sustain_tick_count`. The counter saturates there, so it never grows without bound (a firmware-sized integer is enough).
+- **Configurable.** `SafetyConfig(sustain_tick_count=...)`, passed as `FlightComputer(safety=...)`, at least 1 (1 means the first flagged tick). The default, 10 ticks, is 1 s at the default 100 ms tick. The flags already have hysteresis bands wider than their full noise spread (#36, #39), so a steady value near a threshold can't make them flap; the persistence additionally ignores a flag that appears for fewer than 10 ticks in a row. Because it is counted in ticks, its duration scales with the tick length.
+- **No hand-off.** Counters are per flag: 5 ticks of `critical_battery` followed by 5 of `under_temp` raise nothing. Overlapping flags trigger on the first one sustained.
+- **Level-triggered, every mode.** The rules run in every mode, BOOT included (SAFE_CONDITION in BOOT goes straight to SAFE, #47 decision 7; which boot steps still run on that path is #49's). The state machine ignores `SAFE_CONDITION` in SAFE and FAULT, so raising it every tick is harmless and means nothing is lost if a sustained flag outlives a mode change.
+- **Reboots.** The counters are transient flight computer state: `reset()` and `reboot()` (RESET, `forced_reset`) set them to 0, so a flag still set after a reboot is sustained again from BOOT before SAFE is re-entered.
+
+**Worst-case time from a physical condition to SAFE.** With the defaults (10 ticks, 100 ms tick):
+
+| Step | Time |
+|---|---|
+| True value crosses its threshold → the reported value crosses it | 0 ticks plus the time the true value takes to move a further noise bound past the threshold: at most 6σ, **±0.02 SOC** or **±1.2 °C** at nominal noise; unbounded while the sensor is frozen |
+| Reported value crosses → the flag is set in `SpacecraftState` | same tick (power and thermal compute their flags from the same tick's readings) |
+| Flag first set (tick t0) → `SAFE_CONDITION` and the mode is SAFE | tick t0 + 9, the 10th consecutive flagged tick: **0.9 s**; telemetry from that tick shows SAFE |
+| Mode SAFE → SAFE's controls in effect | +1 tick (ADR-0004 §2): tick t0 + 10, **1.0 s** after the flag first appears |
+
+In general the mode is SAFE `sustain_tick_count - 1` ticks after the flag first appears and its controls apply `sustain_tick_count` ticks after it. A flag that clears even for one tick restarts the count, so a flag that flickers at its threshold delays SAFE until it holds for 10 ticks in a row. In #72's cold case `under_temp` appears about 115 s in and SAFE follows 0.9 s later.
+
+### Leaving SAFE
+
+- **Only by command.** Nothing automatic leaves SAFE. SET_MODE NOMINAL (#51) leaves it, and only while `safe_exit_allowed` is true: **none** of the three safe-mode flags is set in this tick's readings. Otherwise it gets a NACK with `SAFE_CONDITIONS_ACTIVE` (#47). RESET also leaves SAFE, to BOOT.
+- **All flags, not just the one that triggered.** Whichever flag (or ENTER_SAFE_MODE) put the spacecraft in SAFE, every safe-mode flag must be clear: leaving SAFE while another condition is building would only mean entering it again. A flag that has just appeared, not yet sustained, blocks the exit too. `low_battery` does not.
+- **This tick's flags.** The guard is computed in step d from the same readings as the rules, and the command's event (from step c) is applied in step d, so the NACK and the flags in that tick's telemetry agree.
+- **No chatter.** When SAFE is left every counter is 0 (all flags were clear in that tick), so a flag that comes back must hold for `sustain_tick_count` fresh ticks before SAFE is entered again. Together with the flags' own hysteresis (the clear thresholds sit a band above the set thresholds), the mode can't oscillate at a threshold.
+- **The survival heater keeps running in SAFE.** It is hardwired to a thermostat on the true battery temperature (ADR-0004 §12) and has no control field, so no mode, SAFE included, can switch it off. Under a sustained cold environment it stays on throughout SAFE (`test_survival_heater_keeps_running_in_safe_under_sustained_cold`).
+
+### FAULT: internal consistency failures
+
+`FAULT_DETECTED` means the data the flight software works from contradicts itself, which can't happen while the software and its inputs are sound. Each check is an invariant the snapshot contracts state (`docs/spacecraft.md`) and the subsystems keep in every tick, under every fault in the catalogue (`sensor_freeze` holds consistent values; `transmitter_off` zeroes the capacity with the transmitter; `battery_drain` and `forced_reset` don't touch these fields). A bad *physical* state is not a fault: that is what the safe-mode flags are for.
+
+- **No persistence.** A contradiction is not noise, so the first tick that fails raises `FAULT_DETECTED`.
+- **FAULT outranks SAFE.** In a tick with both, `FAULT_DETECTED` is raised first and `SAFE_CONDITION` is then ignored in FAULT.
+- **Only RESET leaves FAULT** (#47). Consistent readings, cleared flags, and every other command leave it in FAULT; RESET (or `forced_reset`) reboots to BOOT. If the inconsistency persists after the reboot, the next tick enters FAULT again.
+- **Checks today:** non-finite reported values (a NaN would also silently clear a flag, since every comparison with it is false), `critical_battery` without `low_battery`, payload bookkeeping, and comms capacity (the table above). Further checks are added to `ConsistencyCheck` as later tickets give the flight computer state of its own to check (for example the downlink session against the payload's chunk IDs, #56).
+
 ## What other tickets add
 
 | Ticket | Adds |
 |---|---|
 | #101 | The `FlightComputer` component (`pocketsat.flight.computer`) that holds a `ModeState`, calls `transition()` in step d for the events earlier phases raise, and `controls_for_mode()` in step f and at `reset()`; telemetry carries `Mode` itself |
-| #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared) |
+| #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared): done, see [Safe and fault entry rules](#safe-and-fault-entry-rules) |
 | #49 | When `BOOT_COMPLETE` fires, the reboot behind RESET and `forced_reset` (uptime, boot counter, held-in-reset), and BOOT's controls applying from tick 0 |
 | #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F |
 | #55 | Telemetry cadence per mode |

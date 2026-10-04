@@ -163,6 +163,7 @@ def test_scan_covers_simulation_code() -> None:
         "flight/__init__.py",
         "flight/computer.py",
         "flight/modes.py",
+        "flight/safety.py",
         "targets/base.py",
         "targets/echo.py",
     } <= names
