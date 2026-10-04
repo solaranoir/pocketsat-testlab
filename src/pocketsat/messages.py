@@ -17,18 +17,28 @@ The telemetry ``mode`` field carries the flight computer's :class:`~pocketsat.fl
 from the enum (#101). This module imports ``Mode`` from :mod:`pocketsat.flight.modes`,
 which depends only on :mod:`pocketsat.spacecraft.controls`; see :mod:`pocketsat.flight`
 for how its modules import this one without a cycle.
+
+Commands (#52): :func:`encode_command` builds a COMMAND payload from a :class:`Command`
+(ground side), and :func:`decode_command` parses and validates one on the spacecraft,
+returning a :class:`ParsedCommand` or a :class:`MalformedCommand` with a
+:class:`DecodeReason`; it never raises. :func:`encode_ack` and :func:`decode_ack` handle
+the ACK frame payload (:class:`CommandAck`), whose NACK reason is a :data:`NackReason`:
+a :class:`DecodeReason` (0x01-0x0F) or the mode state machine's
+:class:`~pocketsat.flight.RejectReason` (0x10-0x1F), reused rather than redefined. The
+layouts and every code are in ``docs/protocol.md`` ("Commands"); the vectors are
+``tests/vectors/commands.json``. The command dispatcher that uses them is #51.
 """
 
 import math
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import IntFlag
+from enum import IntEnum, IntFlag
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Self
 
-from pocketsat.flight.modes import Mode
-from pocketsat.frame import MIN_FRAME_SIZE
+from pocketsat.flight.modes import Mode, RejectReason
+from pocketsat.frame import MAX_SEQUENCE, MIN_FRAME_SIZE
 from pocketsat.spacecraft.controls import RadioMode
 from pocketsat.spacecraft.snapshots import (
     AttitudeReadings,
@@ -39,19 +49,6 @@ from pocketsat.spacecraft.snapshots import (
     PowerReadings,
     ThermalReadings,
 )
-
-
-@dataclass(frozen=True)
-class Command:
-    """A ground-originated request, encoded into a COMMAND frame by the ground station.
-
-    Attributes:
-        command_id: Command identifier. Assigned values are listed in ``docs/protocol.md``.
-        payload: Command-specific argument bytes.
-    """
-
-    command_id: int
-    payload: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -77,6 +74,354 @@ class Packet:
     snr_db: float | None = None
     loss_probability: float | None = None
     latency_s: float | None = None
+
+
+# --- Commands and ACK/NACK (#52) -------------------------------------------------------
+
+
+class CommandId(IntEnum):
+    """Command identifier: the first byte of every COMMAND payload (#52).
+
+    Values are uint8 wire codes and part of the firmware contract: a code is never
+    renumbered or reused. ``0x00`` is reserved and never assigned, so an ACK for a
+    COMMAND payload too short to carry an ID can name ``0x00``. The argument layout of
+    each command is :data:`COMMAND_ARGUMENT_SIZES` and ``docs/protocol.md``.
+    """
+
+    PING = 0x01
+    """No arguments. Answered with an ACK in every mode; never changes the mode (#51)."""
+
+    SET_MODE = 0x02
+    """One argument byte: the target :class:`~pocketsat.flight.Mode` value."""
+
+    BEGIN_DOWNLINK = 0x03
+    """No arguments. Starts a downlink session (#56)."""
+
+    ENTER_SAFE_MODE = 0x04
+    """No arguments. Enters SAFE."""
+
+    RESET = 0x05
+    """No arguments. Reboots the flight computer into BOOT (#49)."""
+
+
+COMMAND_ARGUMENT_SIZES: Final[Mapping[CommandId, int]] = MappingProxyType(
+    {
+        CommandId.PING: 0,
+        CommandId.SET_MODE: 1,
+        CommandId.BEGIN_DOWNLINK: 0,
+        CommandId.ENTER_SAFE_MODE: 0,
+        CommandId.RESET: 0,
+    }
+)
+"""Exact argument size of each command, bytes. A COMMAND payload is the command ID byte
+followed by exactly this many argument bytes."""
+
+COMMAND_ID_SIZE: Final = 1
+"""Size of the command ID at the start of a COMMAND payload, bytes."""
+
+RESERVED_COMMAND_ID: Final = 0x00
+"""Command ID that is never assigned. An ACK names it when the COMMAND payload was
+empty, so there was no ID to echo."""
+
+UINT8_MAX: Final = 0xFF
+
+
+class DecodeReason(IntEnum):
+    """Why a COMMAND payload could not be decoded or its arguments are invalid (#52).
+
+    NACK reason codes 0x01-0x0F. The mode state machine's
+    :class:`~pocketsat.flight.RejectReason` holds 0x10-0x1F, so the two enums together
+    (:data:`NackReason`) are every NACK reason, with no code in both. 0x00 is reserved:
+    it is the ``reason`` byte of an ACK and never a NACK reason. Codes are never
+    renumbered or reused.
+    """
+
+    UNKNOWN_COMMAND = 0x01
+    """The command ID is not an assigned :class:`CommandId` (``0x00`` included). The
+    arguments are not inspected."""
+
+    PAYLOAD_TRUNCATED = 0x02
+    """The COMMAND payload is shorter than its command's layout, including an empty
+    payload with no command ID at all."""
+
+    PAYLOAD_TOO_LONG = 0x03
+    """The COMMAND payload has bytes beyond its command's layout."""
+
+    INVALID_ARGUMENT = 0x04
+    """An argument has a value with no meaning: for example a SET_MODE byte that is not
+    a :class:`~pocketsat.flight.Mode` value. A real mode that cannot be commanded is the
+    state machine's ``TARGET_NOT_COMMANDABLE`` (0x14), not this."""
+
+
+type NackReason = DecodeReason | RejectReason
+"""Every NACK reason: decoding and argument errors (:class:`DecodeReason`, 0x01-0x0F)
+and mode rejections (:class:`~pocketsat.flight.RejectReason`, 0x10-0x1F)."""
+
+NACK_REASONS: Final[Mapping[int, DecodeReason | RejectReason]] = MappingProxyType(
+    {int(reason): reason for reason in (*DecodeReason, *RejectReason)}
+)
+"""Every NACK reason by wire code, ascending. ``docs/protocol.md`` lists exactly these."""
+
+
+def _require_uint8(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    if not 0 <= value <= UINT8_MAX:
+        raise ValueError(f"{name} out of range 0..{UINT8_MAX}: {value}")
+
+
+@dataclass(frozen=True)
+class Command:
+    """A ground-originated request, encoded into a COMMAND payload by the ground station.
+
+    ``command_id`` and ``payload`` are raw so a test can build a command the spacecraft
+    must NACK (an unknown ID, a short or long payload, a bad argument). The class
+    methods build the five valid commands.
+
+    Attributes:
+        command_id: Command identifier, a uint8. Assigned values are :class:`CommandId`
+            (``docs/protocol.md``).
+        payload: Argument bytes, which follow the command ID in the COMMAND payload.
+
+    Raises:
+        TypeError: ``command_id`` is not an ``int`` or ``payload`` is not ``bytes``.
+        ValueError: ``command_id`` is outside 0..255.
+    """
+
+    command_id: int
+    payload: bytes = b""
+
+    def __post_init__(self) -> None:
+        _require_uint8("command_id", self.command_id)
+        if not isinstance(self.payload, bytes):
+            raise TypeError(f"payload must be bytes, got {self.payload!r}")
+
+    @classmethod
+    def ping(cls) -> Self:
+        """PING: no arguments."""
+        return cls(CommandId.PING)
+
+    @classmethod
+    def set_mode(cls, target: Mode) -> Self:
+        """SET_MODE to ``target``. Any mode is encodable; the spacecraft NACKs a mode
+        that is not commandable (``TARGET_NOT_COMMANDABLE``)."""
+        if not isinstance(target, Mode):
+            raise TypeError(f"target must be a Mode, got {target!r}")
+        return cls(CommandId.SET_MODE, bytes([target.value]))
+
+    @classmethod
+    def begin_downlink(cls) -> Self:
+        """BEGIN_DOWNLINK: no arguments."""
+        return cls(CommandId.BEGIN_DOWNLINK)
+
+    @classmethod
+    def enter_safe_mode(cls) -> Self:
+        """ENTER_SAFE_MODE: no arguments."""
+        return cls(CommandId.ENTER_SAFE_MODE)
+
+    @classmethod
+    def reset(cls) -> Self:
+        """RESET: no arguments."""
+        return cls(CommandId.RESET)
+
+
+def encode_command(command: Command) -> bytes:
+    """Encode a COMMAND payload: the command ID byte followed by the argument bytes.
+
+    No validation beyond :class:`Command`'s own, so invalid commands can be sent on
+    purpose; the frame codec limits the total size.
+
+    Args:
+        command: The command to encode.
+
+    Returns:
+        The COMMAND frame payload.
+    """
+    return bytes([command.command_id]) + command.payload
+
+
+@dataclass(frozen=True)
+class ParsedCommand:
+    """A COMMAND payload that decoded and passed argument validation (#52).
+
+    Whether the command is allowed in the current mode is not decided here: that is the
+    state machine's (``pocketsat.flight.transition``), called by the dispatcher (#51).
+
+    Attributes:
+        command_id: The command.
+        target: For SET_MODE, the requested mode (any :class:`~pocketsat.flight.Mode`,
+            commandable or not); ``None`` for every other command.
+
+    Raises:
+        TypeError: A field has the wrong type.
+        ValueError: ``target`` is missing for SET_MODE or given for another command.
+    """
+
+    command_id: CommandId
+    target: Mode | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.command_id, CommandId):
+            raise TypeError(f"command_id must be a CommandId, got {self.command_id!r}")
+        if self.target is not None and not isinstance(self.target, Mode):
+            raise TypeError(f"target must be a Mode or None, got {self.target!r}")
+        if (self.command_id is CommandId.SET_MODE) != (self.target is not None):
+            raise ValueError(f"target is required for SET_MODE and only for it, got {self!r}")
+
+
+@dataclass(frozen=True)
+class MalformedCommand:
+    """A COMMAND payload that could not be decoded or has an invalid argument (#52).
+
+    The dispatcher (#51) answers it with a NACK carrying ``command_id`` and ``reason``.
+
+    Attributes:
+        command_id: The received command ID byte, echoed in the NACK, assigned or not;
+            :data:`RESERVED_COMMAND_ID` (``0x00``) when the payload was empty.
+        reason: Why it was rejected.
+    """
+
+    command_id: int
+    reason: DecodeReason
+
+
+def decode_command(payload: bytes) -> ParsedCommand | MalformedCommand:
+    """Decode and validate a COMMAND payload (the frame's payload, not the whole frame).
+
+    Never raises for any ``bytes``: every problem becomes a :class:`MalformedCommand`.
+    Checks run in this order, so the reason is the first that applies:
+
+    1. Empty payload: ``PAYLOAD_TRUNCATED``, command ID ``0x00``.
+    2. Command ID not a :class:`CommandId`: ``UNKNOWN_COMMAND`` (arguments not read).
+    3. Fewer argument bytes than the layout: ``PAYLOAD_TRUNCATED``.
+    4. More argument bytes than the layout: ``PAYLOAD_TOO_LONG``.
+    5. An argument value with no meaning (a SET_MODE byte that is not a mode):
+       ``INVALID_ARGUMENT``.
+
+    Args:
+        payload: The COMMAND frame payload.
+
+    Returns:
+        The parsed command, or why it is malformed.
+    """
+    if not payload:
+        return MalformedCommand(RESERVED_COMMAND_ID, DecodeReason.PAYLOAD_TRUNCATED)
+    code = payload[0]
+    try:
+        command_id = CommandId(code)
+    except ValueError:
+        return MalformedCommand(code, DecodeReason.UNKNOWN_COMMAND)
+    arguments = payload[COMMAND_ID_SIZE:]
+    expected = COMMAND_ARGUMENT_SIZES[command_id]
+    if len(arguments) < expected:
+        return MalformedCommand(code, DecodeReason.PAYLOAD_TRUNCATED)
+    if len(arguments) > expected:
+        return MalformedCommand(code, DecodeReason.PAYLOAD_TOO_LONG)
+    if command_id is CommandId.SET_MODE:
+        try:
+            target = Mode(arguments[0])
+        except ValueError:
+            return MalformedCommand(code, DecodeReason.INVALID_ARGUMENT)
+        return ParsedCommand(command_id, target)
+    return ParsedCommand(command_id)
+
+
+ACK_FORMAT: Final = ">HBB"
+"""``struct`` format of the ACK payload: sequence (uint16), command ID (uint8), reason
+(uint8). Big-endian, no padding."""
+
+ACK_PAYLOAD_SIZE: Final = struct.calcsize(ACK_FORMAT)
+"""ACK payload size, bytes (4), for both ACK and NACK."""
+
+ACK_FRAME_SIZE: Final = MIN_FRAME_SIZE + ACK_PAYLOAD_SIZE
+"""Size of a whole ACK frame on the wire, bytes (14)."""
+
+ACK_REASON: Final = 0x00
+"""The ``reason`` byte of an ACK (accepted). Never a NACK reason."""
+
+
+class AckDecodeError(ValueError):
+    """An ACK payload has the wrong size or an unknown reason code."""
+
+
+@dataclass(frozen=True)
+class CommandAck:
+    """The answer to one COMMAND frame, carried in an ACK frame (#52): an ACK, or a
+    NACK with a reason.
+
+    Built by the dispatcher (#51), decoded by the ground station. ACK and NACK share the
+    ACK frame type (``0x03``) and one fixed 4-byte layout; ``reason`` tells them apart.
+
+    Attributes:
+        sequence: The sequence number of the COMMAND frame being answered (not the ACK
+            frame's own downlink sequence), ``0..0xFFFF``.
+        command_id: The command ID byte received, echoed whether assigned or not;
+            ``0x00`` when the COMMAND payload was empty.
+        reason: ``None`` for an ACK; the NACK reason otherwise.
+
+    Raises:
+        TypeError: A field has the wrong type.
+        ValueError: ``sequence`` or ``command_id`` is out of range.
+    """
+
+    sequence: int
+    command_id: int
+    reason: NackReason | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise TypeError(f"sequence must be an int, got {self.sequence!r}")
+        if not 0 <= self.sequence <= MAX_SEQUENCE:
+            raise ValueError(f"sequence out of range 0..{MAX_SEQUENCE}: {self.sequence}")
+        _require_uint8("command_id", self.command_id)
+        if self.reason is not None and not isinstance(self.reason, DecodeReason | RejectReason):
+            raise TypeError(
+                f"reason must be a DecodeReason, a RejectReason, or None, got {self.reason!r}"
+            )
+
+    @property
+    def accepted(self) -> bool:
+        """True for an ACK, False for a NACK."""
+        return self.reason is None
+
+
+def encode_ack(ack: CommandAck) -> bytes:
+    """Encode an ACK frame payload.
+
+    Args:
+        ack: The ACK or NACK.
+
+    Returns:
+        The :data:`ACK_PAYLOAD_SIZE`-byte payload: sequence, command ID, reason
+        (:data:`ACK_REASON` for an ACK).
+    """
+    reason = ACK_REASON if ack.reason is None else int(ack.reason)
+    return struct.pack(ACK_FORMAT, ack.sequence, ack.command_id, reason)
+
+
+def decode_ack(payload: bytes) -> CommandAck:
+    """Decode an ACK frame payload (the frame's payload, not the whole frame).
+
+    Args:
+        payload: Exactly :data:`ACK_PAYLOAD_SIZE` bytes.
+
+    Returns:
+        The ACK or NACK.
+
+    Raises:
+        AckDecodeError: The payload has the wrong size, or the reason code is neither
+            ``0x00`` nor a code in :data:`NACK_REASONS`.
+    """
+    if len(payload) != ACK_PAYLOAD_SIZE:
+        raise AckDecodeError(f"ACK payload must be {ACK_PAYLOAD_SIZE} bytes, got {len(payload)}")
+    sequence, command_id, code = struct.unpack(ACK_FORMAT, payload)
+    if code == ACK_REASON:
+        return CommandAck(sequence, command_id)
+    try:
+        reason = NACK_REASONS[code]
+    except KeyError:
+        raise AckDecodeError(f"unknown NACK reason code 0x{code:02X}") from None
+    return CommandAck(sequence, command_id, reason)
 
 
 # --- Telemetry (#54) -------------------------------------------------------------------

@@ -116,7 +116,7 @@ stateDiagram-v2
 
 ## Reason codes
 
-A rejected command's NACK carries a uint8 reason code (#51). The mode reasons use 0x10 to 0x1F. 0x00 is reserved and never sent, and 0x01 to 0x0F are left for #52's decoding and argument errors (unknown command, truncated payload, invalid argument, for example a SET_MODE byte that is not a mode at all). `docs/protocol.md` will list every code (#52). Codes are never renumbered or reused.
+A rejected command's NACK carries a uint8 reason code (#51). The mode reasons use 0x10 to 0x1F. 0x00 is reserved: it is the reason byte of an ACK and never a NACK reason. 0x01 to 0x0F are #52's decoding and argument errors (`DecodeReason`: unknown command, truncated or over-long payload, invalid argument, for example a SET_MODE byte that is not a mode at all), checked before the state machine sees the command. [docs/protocol.md](protocol.md#nack-reason-codes) lists every code. Codes are never renumbered or reused.
 
 <!-- reason-codes:start -->
 | Code | Reason |
