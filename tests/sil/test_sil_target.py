@@ -8,9 +8,9 @@ flight computer; its command handling end to end is ``test_command_dispatch_sil.
 
 Not here, by design:
 
-- Target faults, including ``transmitter_off`` and "a fault injected in tick N acts in
-  tick N", are #60. The receive-but-cannot-reply behavior is covered below with the
-  radio in ``RX_ONLY``, the mode ``transmitter_off`` produces (ADR-0007 §5).
+- Target faults are tested in ``test_sil_faults.py`` (#60). The fault half of the
+  ADR-0004 §2 timeline ("a fault injected before tick N acts in tick N") is here, next
+  to the command half.
 - The ``TestTarget`` contract suite and the 10,000-tick determinism test are #61. Since
   #51 a PING frame gets an ACK from the real flight computer, the stimulus the contract
   suite needs.
@@ -37,7 +37,7 @@ from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.environment import NominalEnvironment
 from pocketsat.flight import FlightComputer, Mode, SpacecraftReadings, controls_for_mode
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
-from pocketsat.messages import DecodeReason, decode_ack
+from pocketsat.messages import Command, DecodeReason, decode_ack, encode_command
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -50,6 +50,7 @@ from pocketsat.spacecraft import (
     RadioMode,
     SpacecraftControls,
     SpacecraftInitialState,
+    ThermalSnapshot,
 )
 from pocketsat.targets import base
 from pocketsat.targets.base import (
@@ -121,7 +122,12 @@ def test_satisfies_the_testtarget_protocol_and_declares_capabilities() -> None:
     caps = target.capabilities
     assert caps.deterministic is True
     assert caps.real_time is False
-    assert caps.supported_faults == frozenset()  # #60 adds the SIL faults
+    assert caps.supported_faults == {
+        "forced_reset",
+        "sensor_freeze",
+        "transmitter_off",
+        "battery_drain",
+    }
 
 
 def test_defaults_are_the_nominal_config_and_default_starting_state() -> None:
@@ -140,12 +146,12 @@ def test_constructor_rejects_wrong_record_types() -> None:
         SilTarget(tick_us=0)
 
 
-def test_inject_rejects_every_fault_until_60() -> None:
+def test_inject_rejects_unsupported_fault_types() -> None:
     target = SilTarget()
     target.reset(0)
-    with pytest.raises(UnsupportedFaultError, match="transmitter_off") as info:
-        target.inject(TargetFault(fault_type="transmitter_off"))
-    assert info.value.supported == frozenset()
+    with pytest.raises(UnsupportedFaultError, match="attitude_control_failure") as info:
+        target.inject(TargetFault(fault_type="attitude_control_failure"))
+    assert info.value.supported == target.capabilities.supported_faults
 
 
 def test_advance_requires_reset_first() -> None:
@@ -244,8 +250,8 @@ def test_controls_from_tick_n_are_obeyed_in_tick_n_plus_1() -> None:
     assert second.controls == first.next_controls
 
 
-def test_merge_is_a_pass_through_until_faults_exist() -> None:
-    # Step a with no faults (#60) and no radio traffic field (#98): the subsystems obey
+def test_merge_is_a_pass_through_without_faults() -> None:
+    # Step a with no active fault and no radio traffic field (#98): the subsystems obey
     # exactly the controls the flight computer produced the tick before.
     target, ticks = real_target()
     target.reset(3)
@@ -281,6 +287,43 @@ def test_timeline_ack_same_tick_effect_next_tick_power_two_ticks_later() -> None
     assert load_w(tick_n2) - load_w(tick_n1) == pytest.approx(
         NOMINAL_CONFIG.attitude.control_power_w
     )
+
+
+def test_timeline_fault_injected_before_tick_n_acts_in_tick_n() -> None:
+    # ADR-0004 §2, the other half (#60): a fault injected before tick N is merged at
+    # step a of tick N and acts in tick N itself, with no command latency. The real
+    # flight computer (#51), in BOOT, where PING is accepted.
+    target, ticks = real_target()
+    target.reset(7)  # nominal sensor noise, so a frozen reading is visibly held
+    target.advance(3 * TICK)
+    tick_before = ticks[-1]
+    target.inject(TargetFault("battery_drain", {"load_w": 2.0}))
+    target.inject(TargetFault("transmitter_off"))
+    target.inject(TargetFault("sensor_freeze", {"subsystem": "thermal"}))
+    ping_9 = encode_frame(Frame(FrameType.COMMAND, 9, encode_command(Command.ping())))
+    target.send(ping_9)
+    target.advance(TICK)
+    downlink_n = target.receive()
+    tick_n = ticks[-1]
+
+    # All three overrides are in tick N's merged controls...
+    assert tick_n.controls.extra_load_w == 2.0
+    assert tick_n.controls.radio.mode is RadioMode.RX_ONLY
+    assert tick_n.controls.frozen_sensors == {"thermal"}
+    # ...and act in tick N: power (first in STEP_ORDER) carries the drain, comms has
+    # its transmitter off, so the ping is executed but its ACK is suppressed, and the
+    # thermal readings hold tick N-1's values.
+    power_before = tick_before.state.get("power", PowerSnapshot).truth
+    power_n = tick_n.state.get("power", PowerSnapshot).truth
+    assert power_n.total_load_w - power_before.total_load_w == pytest.approx(2.0)
+    assert not tick_n.state.get("comms", CommsSnapshot).truth.transmitter_on
+    assert tick_n.delivered_uplink == (ping_9,)
+    assert downlink_n == []
+    assert tick_n.traffic.outbound_suppressed_count == 1  # the PING's ACK
+    thermal_before = tick_before.state.get("thermal", ThermalSnapshot)
+    thermal_n = tick_n.state.get("thermal", ThermalSnapshot)
+    assert thermal_n.readings == thermal_before.readings
+    assert thermal_n.truth != thermal_before.truth
 
 
 # --- Frame flow ------------------------------------------------------------------------
@@ -342,9 +385,10 @@ def test_receiver_state_is_judged_after_the_subsystem_step() -> None:
 
 
 def test_rx_only_receives_and_executes_but_cannot_reply() -> None:
-    # The transmitter_off fault (#60) puts comms in RX_ONLY (ADR-0007 §5). Commands are
-    # still received and executed, but the capacity is 0, so the ACK is suppressed by
-    # the flight computer and counted; SilTarget passes the count on.
+    # RX_ONLY is the mode the transmitter_off fault produces (ADR-0007 §5; the fault
+    # itself is tested in test_sil_faults.py). Commands are still received and
+    # executed, but the capacity is 0, so the ACK is suppressed by the flight computer
+    # and counted; SilTarget passes the count on.
     rx_only = dataclasses.replace(BOOT_CONTROLS, radio=RadioControls(RadioMode.RX_ONLY))
     rig = Rig(boot_controls=rx_only)
     downlink = rig.tick(set_attitude(True, sequence=3))
