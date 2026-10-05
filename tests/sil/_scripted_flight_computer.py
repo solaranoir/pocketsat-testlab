@@ -1,9 +1,11 @@
 """A scripted flight computer for testing ``SilTarget``'s wiring (#59).
 
-The real :class:`~pocketsat.flight.FlightComputer` does not yet decode commands, send
-ACK/NACK, or emit telemetry (#51, #55, #56), so it produces no downlink at all. To test
-the frame flow, the tick timing, and the radio rules now, these tests give
-``SilTarget`` this subclass through its ``flight_computer_factory`` seam.
+The real :class:`~pocketsat.flight.FlightComputer` answers commands (#51) but does not
+yet emit telemetry (#55, #56), and no real command switches the radio or attitude
+control directly. To test the frame flow, the tick timing, and the radio rules now,
+these tests give ``SilTarget`` this subclass through its ``flight_computer_factory``
+seam. The real flight computer's commands through ``SilTarget`` are tested in
+``test_command_dispatch_sil.py``.
 
 It is deliberately small and is **not** a model of the real flight software:
 

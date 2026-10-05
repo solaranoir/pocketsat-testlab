@@ -373,6 +373,36 @@ enums; a test checks this table against it.
 | `0x13` | `SAFE_CONDITIONS_ACTIVE` | `RejectReason` | SET_MODE NOMINAL from SAFE while the triggering flags have not cleared |
 | `0x14` | `TARGET_NOT_COMMANDABLE` | `RejectReason` | SET_MODE asked for BOOT, DOWNLINK, SAFE, or FAULT |
 
+### Dispatch and ACK timing
+
+Implemented by the command dispatcher (#51), the flight computer's decode-uplink and
+execute-commands phases (`pocketsat.flight.computer`, ADR-0004 §2 step c).
+
+- **One answer per command.** Every COMMAND frame received in a tick is answered in that
+  tick, in arrival order, with one ACK frame naming its header sequence and command ID.
+  A frame that fails frame decoding gets no answer (above); so does a valid frame of
+  another type (TELEMETRY or ACK), which only the spacecraft sends.
+- **Check order.** Decoding first ([Decoding and validation](#decoding-and-validation),
+  reasons 0x01–0x04), then the mode: PING is ACKed in every mode and changes nothing;
+  SET_MODE, BEGIN_DOWNLINK, ENTER_SAFE_MODE, and RESET raise the mode event of the same
+  name, and the [transition table](spacecraft-modes.md#transition-table) decides ACK or
+  NACK (reasons 0x10–0x14). Commands in one tick are judged in arrival order, each
+  against the mode the commands before it left: after ENTER_SAFE_MODE, a SET_MODE
+  SCIENCE in the same tick is NACKed `NOT_ALLOWED_IN_SAFE`; after RESET, everything but
+  PING and RESET is NACKed `BOOT_IN_PROGRESS`.
+- **Timing.** A command received in tick N is ACKed in tick N's downlink (ADR-0004 §2:
+  command → ACK, same tick). The ACK means the command was accepted and the mode it
+  asked for is in force at the end of tick N (or already was, for a `NO_CHANGE`), so
+  telemetry from tick N shows the new mode. The new mode's controls take effect in tick
+  N+1 (commands act one tick later), so the physical effect follows the ACK by one tick.
+  An automatic event in the same tick (`SAFE_CONDITION`, `FAULT_DETECTED`) is applied
+  after the commands and can still override an ACKed mode change; the ACK reports what
+  the command did, and telemetry the final mode. The RESET ACK goes out in the tick of
+  the reset, before the reboot (#49) restarts the downlink sequence.
+- **Transmitter off.** With no transmit capacity (radio `RX_ONLY` or `OFF`, or the
+  `transmitter_off` fault) commands are still received and executed, but every ACK and
+  NACK is suppressed and counted (below); none is sent later.
+
 ### Command wire-contract rules
 
 - A command ID, an argument layout, or a reason code is never renumbered, reassigned,
@@ -387,3 +417,24 @@ enums; a test checks this table against it.
   layout for an existing command would be a new command ID.
 - Changing an existing layout, or reusing a code, requires a protocol version change
   (the frame Version byte) and an ADR.
+
+## Downlink sequence and transmit capacity
+
+Every frame the spacecraft sends goes through one outbound queue in the flight computer
+(`FlightComputer._queue_outbound`, #51), which applies ADR-0004 §10 and ADR-0007 §4:
+
+- **Capacity.** Each tick the frames sent fit within comms' `transmit_capacity_bytes`
+  for that tick (wire bytes: header, payload, and CRC), read from comms' readings. A
+  capacity of 0 sends nothing.
+- **Priority.** Frames are offered in priority order: ACK/NACK (step c), then telemetry
+  (#55), then DATA (#56) (step e). Each is sent if it fits what is left; one that does
+  not is dropped, not queued for a later tick. A frame that does not fit does not block
+  a later, smaller one.
+- **Suppression.** ACK/NACK and telemetry frames that do not fit are counted in the
+  tick's `outbound_suppressed_count` (`FlightComputerOutput`, ADR-0007 §3). DATA that does
+  not fit is not counted: its chunk stays in the payload buffer for a later tick.
+- **Sequence.** The header sequence of every downlink frame, all types, comes from one
+  counter (the spacecraft → ground direction) that starts at 0 on power-on and after
+  every reboot, goes up by one per frame **sent**, and wraps `0xFFFF` → `0x0000`. A
+  suppressed frame uses no number, so a gap seen on the ground means a frame lost on the
+  way down. The ground pairs a restart at 0 with the boot counter in telemetry.

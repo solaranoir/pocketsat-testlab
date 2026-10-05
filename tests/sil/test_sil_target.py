@@ -2,17 +2,18 @@
 
 Most tests drive ``SilTarget`` with the real subsystems and a
 :class:`ScriptedFlightComputer` (``_scripted_flight_computer.py``), because the real
-flight computer does not yet decode commands or send frames (#51, #55, #56). The tests
-that need only BOOT and the controls path use the real flight computer.
+flight computer does not yet send telemetry (#55, #56) and has no command that switches
+the radio directly. The tests that need only BOOT and the controls path use the real
+flight computer; its command handling end to end is ``test_command_dispatch_sil.py``.
 
 Not here, by design:
 
 - Target faults, including ``transmitter_off`` and "a fault injected in tick N acts in
   tick N", are #60. The receive-but-cannot-reply behavior is covered below with the
   radio in ``RX_ONLY``, the mode ``transmitter_off`` produces (ADR-0007 §5).
-- The ``TestTarget`` contract suite and the 10,000-tick determinism test are #61: the
-  contract suite needs a stimulus that gets a downlink reply from the real flight
-  computer, which arrives with #51.
+- The ``TestTarget`` contract suite and the 10,000-tick determinism test are #61. Since
+  #51 a PING frame gets an ACK from the real flight computer, the stimulus the contract
+  suite needs.
 - ``RadioTraffic`` in the controls and comms' counters are #98; here the per-tick
   values are checked in ``SilTick.traffic`` and ``SilTarget.handover_traffic``.
 """
@@ -35,7 +36,8 @@ from _scripted_flight_computer import (
 from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.environment import NominalEnvironment
 from pocketsat.flight import FlightComputer, Mode, SpacecraftReadings, controls_for_mode
-from pocketsat.frame import Frame, FrameType, encode_frame
+from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
+from pocketsat.messages import DecodeReason, decode_ack
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -568,7 +570,14 @@ def test_real_flight_computer_runs_and_is_reproducible() -> None:
     target = SilTarget()
     downlink_a, ticks_a = _run(target, seed=2, ticks=200)
     downlink_b, ticks_b = _run(target, seed=2, ticks=200)
-    assert downlink_a == downlink_b == []  # the real flight computer sends nothing yet
+    assert downlink_a == downlink_b
+    # The real flight computer answers each command (#51): the scripted PING opcode is
+    # the real PING (ACK); the scripted attitude opcode is an unknown command (NACK).
+    answers = [decode_ack(decode_frame(frame).payload) for frame in downlink_a]
+    assert [(a.command_id, a.reason) for a in answers] == [
+        (0x01, None),
+        (0x20, DecodeReason.UNKNOWN_COMMAND),
+    ] * 4
     assert ticks_a == ticks_b
     assert all(t.controls == BOOT_CONTROLS for t in ticks_a)  # BOOT until #49
 

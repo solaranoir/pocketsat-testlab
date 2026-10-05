@@ -230,7 +230,7 @@ In general the mode is SAFE `sustain_tick_count - 1` ticks after the flag first 
 | #101 | The `FlightComputer` component (`pocketsat.flight.computer`) that holds a `ModeState`, calls `transition()` in step d for the events earlier phases raise, and `controls_for_mode()` in step f and at `reset()`; telemetry carries `Mode` itself |
 | #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared): done, see [Safe and fault entry rules](#safe-and-fault-entry-rules) |
 | #49 | When `BOOT_COMPLETE` fires, the reboot behind RESET and `forced_reset` (uptime, boot counter, held-in-reset), and BOOT's controls applying from tick 0 |
-| #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F |
+| #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F: done, see [docs/protocol.md](protocol.md#dispatch-and-ack-timing) |
 | #55 | Telemetry cadence per mode |
 | #56 | The downlink session: raising `DOWNLINK_COMPLETE`, setting `release_through_chunk_id`, and resuming after an early exit |
 | #59 | Merging fault overrides into these controls and applying BOOT's controls at `reset(seed)` |

@@ -6,9 +6,9 @@ once with the uplink frames received that tick, the subsystems' **readings** (ne
 truth, ADR-0004 §6, §7), and the simulated time. ``step()`` runs six fixed phases, which
 are ADR-0004 §2 steps c to f:
 
-1. ``decode_uplink`` (step c): decode COMMAND frames. Filled by #51 and #52.
-2. ``execute_commands`` (step c): dispatch commands and queue ACK/NACK. Filled by #51
-   (and #49 for RESET).
+1. ``decode_uplink`` (step c): decode COMMAND frames with #52's codec (#51).
+2. ``execute_commands`` (step c): dispatch commands and queue ACK/NACK (#51). The
+   reboot behind RESET is #49's.
 3. ``evaluate_flags`` (step d): raise SAFE_CONDITION, FAULT_DETECTED, and BOOT_COMPLETE.
    Filled by #48 and #49.
 4. ``update_mode`` (step d): apply the mode events with #47's ``transition()``.
@@ -18,11 +18,23 @@ are ADR-0004 §2 steps c to f:
    ``controls_for_mode()``, the single controls function (ADR-0004 §14). #56 adds the
    chunk release.
 
+``decode_uplink`` and ``execute_commands`` are #51's command dispatcher;
 ``evaluate_flags`` applies #48's safe-mode and fault rules
 (:mod:`pocketsat.flight.safety`); ``update_mode`` and ``produce_controls`` call #47's
 :func:`~pocketsat.flight.modes.transition` and
-:func:`~pocketsat.flight.modes.controls_for_mode`. The other phases are documented
-no-ops. Later tickets fill in one phase each.
+:func:`~pocketsat.flight.modes.controls_for_mode`. ``emit_telemetry`` is a documented
+no-op until #55 and #56.
+
+**Outbound frames (ADR-0004 §10, ADR-0007 §4).** Every downlink frame goes through
+:meth:`FlightComputer._queue_outbound`, which gives it the next downlink sequence number
+and appends it to the tick's frames only if it fits what is left of comms'
+``transmit_capacity_bytes`` for this tick (read from the readings). Frames are offered
+in :class:`OutboundClass` order, ACK/NACK (step c), then telemetry and DATA (step e), so
+the order of the phases is the priority order; offering a higher class after a lower one
+is a programming error and raises. A frame that does not fit is not queued; ACK/NACK
+and telemetry that don't fit are counted in ``outbound_suppressed_count``, DATA is not
+(it stays in the payload buffer, ADR-0007 §3). #55 and #56 add their frames through the
+same method, with no change to this rule.
 
 The flight computer is **not** part of ``STEP_ORDER``: it always runs after all
 subsystems, and the controls it produces in tick N apply in tick N+1 (ADR-0004 §2). It
@@ -32,11 +44,14 @@ uses no randomness and no wall-clock time; simulated time is passed in by the ca
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Final, Self
 
+from pocketsat import messages
 from pocketsat.core.clock import check_us
 from pocketsat.flight.modes import (
     INITIAL_STATE,
+    EventKind,
     Mode,
     ModeEvent,
     ModeState,
@@ -50,7 +65,17 @@ from pocketsat.flight.safety import (
     SafetyConfig,
     SafetyState,
     SafetyVerdict,
+    active_flags,
     evaluate,
+)
+from pocketsat.frame import (
+    MAX_SEQUENCE,
+    MIN_FRAME_SIZE,
+    Frame,
+    FrameError,
+    FrameType,
+    decode_frame,
+    encode_frame,
 )
 from pocketsat.spacecraft.base import SpacecraftState
 from pocketsat.spacecraft.controls import SpacecraftControls
@@ -150,17 +175,18 @@ class FlightComputerOutput:
 
     Attributes:
         downlink_frames: Encoded frames to transmit this tick, in transmit order
-            (ACK/NACK, then telemetry, then DATA; ADR-0004 §10). ``SilTarget`` returns
-            them from ``receive()``. Filled by #51 (ACK/NACK), #55 (telemetry), and #56
-            (DATA); always empty today.
+            (ACK/NACK, then telemetry, then DATA; ADR-0004 §10), together no longer
+            than comms' ``transmit_capacity_bytes`` for the tick. ``SilTarget`` returns
+            them from ``receive()``. ACK/NACK frames come from #51; telemetry (#55) and
+            DATA (#56) are added later.
         controls: The :class:`SpacecraftControls` for the next tick (ADR-0004 §2 step
             f), from the single controls function. ``SilTarget`` merges fault overrides
             and the radio traffic into them at step a of the next tick (#59, #98).
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick
             because they did not fit comms' transmit capacity (ADR-0004 §10,
             ADR-0007 §3). Per tick, not a running total; ``SilTarget`` passes it on in
-            ``RadioTraffic.outbound_suppressed_count`` (#98). Counted by #51 and #55;
-            always 0 today.
+            ``RadioTraffic.outbound_suppressed_count`` (#98). Counted for ACK/NACK
+            (#51) and, later, telemetry (#55).
 
     Raises:
         TypeError: A field has the wrong type.
@@ -194,9 +220,53 @@ class FlightComputerOutput:
 
         This is ADR-0007's ``RadioTraffic.sent_bytes`` (header, payload, and CRC of
         every frame type), derived from the frames so the two can never disagree.
-        ``SilTarget`` passes it on (#98). 0 until #51, #55, and #56 send frames.
+        ``SilTarget`` passes it on (#98). Never more than comms'
+        ``transmit_capacity_bytes`` for the tick.
         """
         return sum(len(frame) for frame in self.downlink_frames)
+
+
+class OutboundClass(IntEnum):
+    """The priority class of a downlink frame (ADR-0004 §10): lower goes first.
+
+    :meth:`FlightComputer._queue_outbound` takes frames in this order within a tick
+    (the order of the phases that produce them guarantees it) and raises if a frame of
+    a higher class is offered after a lower one, so a later ticket cannot reorder the
+    downlink by accident.
+    """
+
+    ACK = 0
+    """ACK and NACK frames (#51), queued in the execute-commands phase (step c)."""
+
+    TELEMETRY = 1
+    """TELEMETRY frames (#55), queued in the emit-telemetry phase (step e)."""
+
+    DATA = 2
+    """DATA frames (#56), queued in the emit-telemetry phase after telemetry."""
+
+    @property
+    def counts_suppression(self) -> bool:
+        """Whether a frame of this class that does not fit is counted as suppressed.
+
+        True for ACK/NACK and telemetry, which are not queued for later. False for
+        DATA: a chunk that does not fit stays in the payload buffer and is sent in a
+        later tick (ADR-0004 §10, ADR-0007 §3).
+        """
+        return self is not OutboundClass.DATA
+
+
+@dataclass(frozen=True)
+class UplinkCommand:
+    """One COMMAND frame received this tick, decoded by the decode-uplink phase (#51).
+
+    Attributes:
+        sequence: The COMMAND frame's header sequence number, echoed in the ACK/NACK.
+        command: The decoded payload (#52): a ``ParsedCommand``, or a
+            ``MalformedCommand`` with the ``DecodeReason`` its NACK carries.
+    """
+
+    sequence: int
+    command: "messages.ParsedCommand | messages.MalformedCommand"
 
 
 @dataclass
@@ -205,12 +275,13 @@ class TickContext:
 
     Created at the start of ``step()`` and dropped at its end; nothing in it survives
     the tick. Phases read what earlier phases wrote and add their own results. Later
-    tickets add the fields they need (for example decoded commands, #51).
+    tickets add the fields they need.
 
     Attributes:
         now_us: Simulated time of this tick, integer microseconds (``SimClock.now_us``).
         readings: The subsystems' readings after this tick's subsystem step.
         uplink_frames: Raw uplink frames received this tick, in arrival order.
+        commands: The COMMAND frames among them, decoded, in arrival order (#51).
         mode_events: Mode events raised this tick (by #48, #49, #51, #56), applied in
             order by the update-mode phase.
         transitions: The result of each applied mode event, in order.
@@ -219,8 +290,13 @@ class TickContext:
             from this tick's readings; False until then.
         safety: The safe-mode and fault rules' verdict for this tick (#48), set by the
             evaluate-flags phase.
-        downlink_frames: Encoded frames queued for transmission this tick.
+        downlink_frames: Encoded frames queued for transmission this tick, in transmit
+            order. Appended only by :meth:`FlightComputer._queue_outbound`.
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick.
+        outbound_remaining_bytes: What is left of comms' ``transmit_capacity_bytes``
+            (from ``readings``) after the frames queued so far.
+        outbound_class: The class of the last frame offered for transmission; frames
+            must be offered in :class:`OutboundClass` order.
     """
 
     now_us: int
@@ -232,6 +308,44 @@ class TickContext:
     safety: SafetyVerdict | None = None
     downlink_frames: list[bytes] = field(default_factory=list)
     outbound_suppressed_count: int = 0
+    commands: list[UplinkCommand] = field(default_factory=list)
+    outbound_remaining_bytes: int = field(init=False)
+    outbound_class: OutboundClass = field(init=False, default=OutboundClass.ACK)
+
+    def __post_init__(self) -> None:
+        self.outbound_remaining_bytes = self.readings.comms.transmit_capacity_bytes
+
+    def reserve_outbound(self, size: int, outbound_class: OutboundClass) -> bool:
+        """Claim ``size`` bytes of this tick's transmit capacity for one frame.
+
+        The capacity rule of ADR-0004 §10 and ADR-0007 §4, in one place. Frames are
+        offered in priority order and each is taken if it fits what is left; one that
+        doesn't is not queued (and counted as suppressed unless it is DATA). A frame
+        that does not fit does not block a later, smaller one.
+
+        Args:
+            size: The frame's size on the wire, bytes (header, payload, and CRC).
+            outbound_class: The frame's priority class.
+
+        Returns:
+            True if the frame fits and its bytes are now reserved; False if it is
+            suppressed (or, for DATA, left for a later tick).
+
+        Raises:
+            RuntimeError: A frame of a higher class is offered after a lower one.
+        """
+        if outbound_class < self.outbound_class:
+            raise RuntimeError(
+                f"{outbound_class.name} frame offered after a {self.outbound_class.name} "
+                "frame; outbound frames go in OutboundClass order (ADR-0004 §10)"
+            )
+        self.outbound_class = outbound_class
+        if size <= self.outbound_remaining_bytes:
+            self.outbound_remaining_bytes -= size
+            return True
+        if outbound_class.counts_suppression:
+            self.outbound_suppressed_count += 1
+        return False
 
 
 class FlightComputer:
@@ -271,6 +385,7 @@ class FlightComputer:
         self._boot_count = 0
         self._boot_time_us = 0
         self._now_us = 0
+        self._downlink_sequence = 0
         self.reset()
 
     # --- State ------------------------------------------------------------------------
@@ -348,15 +463,17 @@ class FlightComputer:
     def _clear_transient_state(self) -> None:
         """Forget everything that does not survive a reboot and restart uptime.
 
-        Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`) and the
+        Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`), the
         safe-mode persistence counters (#48), so a flag still set after a reboot must
-        be sustained again from BOOT. Later tickets add their own transient state here
-        (for example the telemetry schedule and sequence counters, #55, and the
+        be sustained again from BOOT, and the downlink sequence counter (#51), so the
+        first frame after a reboot has sequence 0. Later tickets add their own
+        transient state here (for example the telemetry schedule, #55, and the
         downlink session, #56). The boot counter is not transient.
         """
         self._mode_state = INITIAL_STATE
         self._safety_state = INITIAL_SAFETY_STATE
         self._boot_time_us = self._now_us
+        self._downlink_sequence = 0
 
     def _advance_time(self, now_us: int) -> None:
         check_us("now_us", now_us)
@@ -380,8 +497,10 @@ class FlightComputer:
 
         Args:
             uplink_frames: Raw frames received this tick, in arrival order. ``SilTarget``
-                passes only frames that arrived while the receiver was on (#59).
-                Undecodable frames are the decode phase's to handle and never raise.
+                passes only frames that arrived while the receiver was on and that
+                decode as wire frames, and counts the rest (#59). Any frame given here
+                that does not decode, or is not a COMMAND frame, is ignored without a
+                reply and never raises.
             readings: The subsystems' readings after this tick's subsystem step
                 (:meth:`SpacecraftReadings.from_state`).
             now_us: Simulated time of this tick, integer microseconds
@@ -419,22 +538,83 @@ class FlightComputer:
     # --- Phases, in PHASE_ORDER -------------------------------------------------------
 
     def _decode_uplink(self, tick: TickContext) -> None:
-        """Phase 1 (ADR-0004 step c): decode the uplink frames into commands.
+        """Phase 1 (ADR-0004 step c): decode the uplink frames into commands (#51).
 
-        No-op for now: ``tick.uplink_frames`` are passed through untouched. #51 decodes
-        COMMAND frames with the frame codec and #52 validates their payloads;
-        undecodable frames are counted and never raise.
+        Each frame that decodes as a COMMAND frame is decoded with #52's
+        ``decode_command`` into ``tick.commands``, in arrival order, with its header
+        sequence number. A payload that is malformed inside a valid frame becomes a
+        ``MalformedCommand`` and is NACKed by the next phase.
+
+        Frames that fail frame decoding (sync, length, CRC, type) get no reply, because
+        their sequence number cannot be trusted (``docs/protocol.md``). ``SilTarget``
+        already drops and counts them (#59), so the flight computer only skips any it is
+        given directly, without counting. Frames of another type (TELEMETRY or ACK,
+        which only the spacecraft sends) are skipped the same way. Never raises.
         """
+        for raw in tick.uplink_frames:
+            try:
+                frame = decode_frame(raw)
+            except FrameError:
+                continue
+            if frame.frame_type is not FrameType.COMMAND:
+                continue
+            tick.commands.append(
+                UplinkCommand(frame.sequence, messages.decode_command(frame.payload))
+            )
 
     def _execute_commands(self, tick: TickContext) -> None:
-        """Phase 2 (ADR-0004 step c): dispatch decoded commands and queue ACK/NACK.
+        """Phase 2 (ADR-0004 step c): dispatch the decoded commands and queue ACK/NACK.
 
-        No-op for now. #51 adds the dispatcher: PING, and the command mode events
-        (SET_MODE, BEGIN_DOWNLINK, ENTER_SAFE_MODE, RESET) for the mode machine, with
-        ACK/NACK frames (reason codes from ``RejectReason`` and #52) queued first in
-        ``tick.downlink_frames`` within comms' transmit capacity, counting what is
-        suppressed. RESET reboots through :meth:`reboot` (#49).
+        Every command in ``tick.commands`` gets exactly one ACK frame (an ACK, or a NACK
+        with a reason), naming its sequence number and command ID, queued with
+        ``OutboundClass.ACK`` priority through :meth:`_queue_outbound`, so it goes
+        out first and within comms' transmit capacity, or is suppressed and counted.
+        In arrival order:
+
+        1. A ``MalformedCommand`` is NACKed with its ``DecodeReason`` (0x01-0x04). The
+           decoding reasons are checked before the mode (#52): an unknown command in
+           BOOT is ``UNKNOWN_COMMAND``, not ``BOOT_IN_PROGRESS``.
+        2. PING is ACKed in every mode and raises no event.
+        3. SET_MODE, BEGIN_DOWNLINK, ENTER_SAFE_MODE, and RESET raise the mode event of
+           the same name, appended to ``tick.mode_events``. The update-mode phase
+           applies it in step d (``docs/spacecraft-modes.md``); RESET's reboot is #49's.
+           The ACK or NACK is the result of #47's ``transition()`` for that event: ACK
+           for TRANSITION and NO_CHANGE, NACK with the ``RejectReason`` for REJECTED.
+
+        **ACK timing.** The ACK is sent in the same tick the command arrives
+        (ADR-0004 §2: command → ACK, same tick). To answer in step c for an event
+        applied in step d, this phase runs ``transition()`` on a working copy of the
+        mode state, from the current state through this tick's commands in order, with
+        ``safe_exit_allowed`` from this tick's readings (:func:`active_flags`, the guard
+        #48's ``evaluate`` reports). The update-mode phase then applies the same events
+        to the same state with the same guard, before any automatic event, so it gets
+        the same results: the ACK states what the command did to the mode this tick.
+        An ACK means the command was accepted and the mode changed (or already was what
+        was asked) by the end of this tick, and telemetry from this tick shows it; the
+        new mode's controls take effect in the next tick (ADR-0004 §2), so the physical
+        effect follows one tick after the ACK. An automatic event later in the same
+        tick (SAFE_CONDITION, FAULT_DETECTED) can still override an ACKed change; the
+        ACK reports the command, and telemetry the final mode. A RESET ACK goes out in
+        the tick of the reset, numbered in the downlink sequence from before the
+        reboot; commands after a RESET in the same tick are answered as in BOOT.
         """
+        state = self._mode_state
+        safe_exit_allowed = not active_flags(tick.readings)
+        for received in tick.commands:
+            command = received.command
+            reason: messages.NackReason | None
+            if isinstance(command, messages.MalformedCommand):
+                reason = command.reason
+            elif command.command_id is messages.CommandId.PING:
+                reason = None
+            else:
+                event = _mode_event(command)
+                result = transition(state, event, safe_exit_allowed=safe_exit_allowed)
+                state = result.state
+                tick.mode_events.append(event)
+                reason = result.reason
+            ack = messages.CommandAck(received.sequence, command.command_id, reason)
+            self._queue_outbound(tick, FrameType.ACK, messages.encode_ack(ack), OutboundClass.ACK)
 
     def _evaluate_flags(self, tick: TickContext) -> None:
         """Phase 3 (ADR-0004 step d): turn readings flags and boot timing into events.
@@ -469,10 +649,12 @@ class FlightComputer:
     def _emit_telemetry(self, tick: TickContext) -> None:
         """Phase 5 (ADR-0004 step e): emit telemetry if due, and DATA in DOWNLINK.
 
-        No-op for now. #55 adds the per-mode cadence and appends TELEMETRY frames
-        after any ACK/NACK, within the remaining transmit capacity, counting
-        suppressed ones in ``tick.outbound_suppressed_count``. #56 then fills what
-        capacity is left with DATA frames.
+        No-op for now. #55 adds the per-mode cadence and sends TELEMETRY frames with
+        ``self._queue_outbound(tick, FrameType.TELEMETRY, payload,
+        OutboundClass.TELEMETRY)``, which puts them after any ACK/NACK, within the
+        remaining transmit capacity, and counts suppressed ones. #56 then fills what
+        capacity is left with DATA frames the same way (``OutboundClass.DATA``, not
+        counted when they don't fit).
         """
 
     def _produce_controls(self) -> SpacecraftControls:
@@ -484,3 +666,50 @@ class FlightComputer:
         step d. #56 adds ``release_through_chunk_id`` here.
         """
         return controls_for_mode(self._mode_state.mode)
+
+    # --- Outbound -----------------------------------------------------------------------
+
+    def _queue_outbound(
+        self,
+        tick: TickContext,
+        frame_type: FrameType,
+        payload: bytes,
+        outbound_class: OutboundClass,
+    ) -> bool:
+        """Send one downlink frame this tick if it fits the transmit capacity.
+
+        The single way any phase sends a frame (ACK/NACK #51, telemetry #55, DATA #56).
+        The capacity and priority rule is :meth:`TickContext.reserve_outbound`. A frame
+        that fits gets the next downlink sequence number (one counter for every frame
+        type, wrapping from 0xFFFF to 0, ``docs/protocol.md``), is encoded, and is
+        appended to ``tick.downlink_frames``. A frame that does not fit is never
+        encoded and uses no sequence number, so a gap in the ground's sequence means a
+        frame lost on the way down, not one the spacecraft never sent.
+
+        Args:
+            tick: This tick's working data.
+            frame_type: The frame type.
+            payload: The frame payload.
+            outbound_class: Its priority class.
+
+        Returns:
+            True if the frame was queued, False if it did not fit.
+
+        Raises:
+            RuntimeError: Frames were offered out of :class:`OutboundClass` order.
+        """
+        if not tick.reserve_outbound(MIN_FRAME_SIZE + len(payload), outbound_class):
+            return False
+        frame = Frame(frame_type, self._downlink_sequence, payload)
+        tick.downlink_frames.append(encode_frame(frame))
+        self._downlink_sequence = (self._downlink_sequence + 1) & MAX_SEQUENCE
+        return True
+
+
+def _mode_event(command: "messages.ParsedCommand") -> ModeEvent:
+    """The mode event a command raises: the :class:`EventKind` of the same name.
+
+    Every :class:`~pocketsat.messages.CommandId` except PING names a command event
+    (``docs/protocol.md``, "Command IDs"); SET_MODE carries its target mode.
+    """
+    return ModeEvent(EventKind[command.command_id.name], command.target)
