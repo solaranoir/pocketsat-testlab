@@ -4,6 +4,8 @@ Tests only use the public TestTarget interface and the case data from conftest.p
 so the same suite applies to EchoTarget, SilTarget, and HilTarget.
 """
 
+import dataclasses
+
 import pytest
 from contract_support import CONTRACT_ENVIRONMENTS, STEP_US, TargetCase
 
@@ -58,6 +60,42 @@ def test_inject_unsupported_fault_raises_clear_error(target: base.TestTarget) ->
         target.inject(base.TargetFault(fault_type=unsupported))
     assert exc_info.value.fault_type == unsupported
     assert exc_info.value.supported == target.capabilities.supported_faults
+
+
+def _require_faults(target: base.TestTarget) -> None:
+    if not target.capabilities.supported_faults:
+        pytest.skip("target declares no supported faults")
+
+
+def test_every_supported_fault_is_released_after_its_duration(
+    target: base.TestTarget, target_case: TargetCase
+) -> None:
+    # Selected by capabilities.supported_faults: runs once per declared fault type.
+    _require_faults(target)
+    for sample in target_case.sample_faults:
+        target.reset(seed=0)
+        target.inject(dataclasses.replace(sample, duration_us=2 * STEP_US))
+        for _ in range(3):
+            target.advance(STEP_US)
+        target.receive()
+        frames = _stimulate(target, target_case)
+        assert frames, f"no reply to the stimulus after {sample.fault_type} was released"
+        for frame in frames:
+            decode_frame(frame)
+
+
+def test_reset_clears_every_supported_fault(
+    target: base.TestTarget, target_case: TargetCase
+) -> None:
+    # A fault without a duration lasts until reset (TargetFault.duration_us); only a
+    # reset clears it.
+    _require_faults(target)
+    for sample in target_case.sample_faults:
+        target.inject(dataclasses.replace(sample, duration_us=None))
+        target.advance(STEP_US)
+        target.reset(seed=0)
+        frames = _stimulate(target, target_case)
+        assert frames, f"no reply to the stimulus after reset with {sample.fault_type} active"
 
 
 # --- Environment ----------------------------------------------------------------------
@@ -159,3 +197,39 @@ def test_deterministic_target_repeats_output_for_same_seed(
         return outputs
 
     assert run() == run()
+
+
+def test_deterministic_target_reset_mid_run_reproduces_a_fresh_run(
+    target: base.TestTarget, target_case: TargetCase
+) -> None:
+    if not target.capabilities.deterministic:
+        pytest.skip("target does not declare deterministic=True")
+
+    def script(instance: base.TestTarget) -> list[list[bytes]]:
+        outputs = []
+        for env in CONTRACT_ENVIRONMENTS.values():
+            instance.apply_environment(env)
+            outputs.append(_stimulate(instance, target_case))
+            for fault in target_case.sample_faults:
+                instance.inject(fault)
+        return outputs
+
+    # Interrupt a run with uplink pending, output undrained, and faults active, then
+    # reset with the seed of a fresh target: what follows must match the fresh run.
+    target.reset(seed=3)
+    script(target)
+    for fault in target_case.sample_faults:
+        target.inject(dataclasses.replace(fault, duration_us=None))
+    target.send(target_case.stimulus)
+    target.advance(STEP_US)
+    target.send(target_case.stimulus)
+    target.reset(seed=42)
+    resumed = script(target)
+
+    fresh = target_case.factory()
+    fresh.connect()
+    try:
+        fresh.reset(seed=42)
+        assert resumed == script(fresh)
+    finally:
+        fresh.close()
