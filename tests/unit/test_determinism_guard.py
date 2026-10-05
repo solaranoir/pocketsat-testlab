@@ -161,6 +161,7 @@ def test_scan_covers_simulation_code() -> None:
         "core/rng.py",
         "environment/nominal.py",
         "flight/__init__.py",
+        "flight/boot.py",
         "flight/computer.py",
         "flight/modes.py",
         "flight/safety.py",

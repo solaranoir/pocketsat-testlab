@@ -4,8 +4,9 @@ The flight computer is part of the SIL spacecraft model but outside ``STEP_ORDER
 runs after every subsystem each tick and produces the controls for the next one
 (ADR-0004 §2). :class:`FlightComputer` (#101) is the component, with the single
 ``step()`` entry point; :mod:`pocketsat.flight.modes` (#47) is its mode state machine,
-and :mod:`pocketsat.flight.safety` (#48) its automatic safe-mode and fault entry rules
-(import it from that module).
+:mod:`pocketsat.flight.safety` (#48) its automatic safe-mode and fault entry rules, and
+:mod:`pocketsat.flight.boot` (#49) its boot settings and uptime counter (import those
+two from their modules).
 
 Import order: :mod:`pocketsat.messages` imports :class:`Mode` from
 :mod:`pocketsat.flight.modes`, which imports only :mod:`pocketsat.spacecraft.controls`,

@@ -7,8 +7,10 @@ Two levels:
 - the :class:`FlightComputer` running them in its evaluate-flags phase, fed
   :class:`SpacecraftReadings` from fake snapshots, with the resulting mode and controls.
 
-Commands (#51) and BOOT_COMPLETE (#49) don't exist yet, so the flight-computer tests
-script those mode events into the execute-commands phase (:class:`ScriptedComputer`).
+Commands (#51) don't exist yet, so the flight-computer tests script those mode events
+into the execute-commands phase (:class:`ScriptedComputer`). They also script
+BOOT_COMPLETE to reach a mode in one tick; #49's own BOOT_COMPLETE comes only after the
+boot duration (5 s, 50 ticks), longer than these tests run unless they say otherwise.
 """
 
 import dataclasses
@@ -495,8 +497,10 @@ def test_flight_computer_rejects_a_bad_safety_config() -> None:
 
 def test_nominal_readings_raise_nothing() -> None:
     driver = Driver(ScriptedComputer())
-    assert driver.step(ticks=100) is Mode.BOOT
-    assert all(t.mode_events == [] for t in driver.fc.ticks)
+    driver.step(ticks=100)
+    assert all(t.safety is not None and t.safety.events == () for t in driver.fc.ticks)
+    # The only event is #49's BOOT_COMPLETE, once, when the boot duration has elapsed.
+    assert [e for t in driver.fc.ticks for e in t.mode_events] == [BOOT_COMPLETE]
     assert all(t.safe_exit_allowed for t in driver.fc.ticks)
 
 

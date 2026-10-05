@@ -579,7 +579,9 @@ def test_real_flight_computer_runs_and_is_reproducible() -> None:
         (0x20, DecodeReason.UNKNOWN_COMMAND),
     ] * 4
     assert ticks_a == ticks_b
-    assert all(t.controls == BOOT_CONTROLS for t in ticks_a)  # BOOT until #49
+    # BOOT for the boot duration (5 s = 50 ticks), then NOMINAL (#49).
+    nominal = controls_for_mode(Mode.NOMINAL)
+    assert [t.controls for t in ticks_a] == [BOOT_CONTROLS] * 50 + [nominal] * 150
 
 
 # --- Multi-orbit and performance -------------------------------------------------------
