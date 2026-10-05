@@ -67,13 +67,25 @@ jobs:
 
   slow-tests:
     # Multi-orbit story and integration tests, marked `slow` and skipped by a plain
-    # `pytest` run. They run on every PR in parallel with the fast suite (#78).
-    name: Slow tests (${{ matrix.os }})
+    # `pytest` run. They run on every PR in parallel with the fast suite and block
+    # merging (#78). To keep each job well inside the 5-minute CI budget, the slow
+    # suite is split into two shards per OS: shard 1 runs the files listed in
+    # SLOW_SHARD_1_FILES, shard 2 runs every other slow test (`--ignore` of the same
+    # list). So a new slow test always runs (in shard 2 unless listed), and a listed
+    # file that no longer exists fails shard 1 ("file or directory not found").
+    name: Slow tests (${{ matrix.os }}, shard ${{ matrix.shard }}/2)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [1, 2]
+    env:
+      SLOW_SHARD_1_FILES: >-
+        tests/sil/test_epic_30_closeout.py
+        tests/sil/test_payload_comms_story.py
+        tests/sil/test_power_story.py
+        tests/sil/test_thermal_story.py
     steps:
       - uses: actions/checkout@v7
 
@@ -88,5 +100,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Pytest (slow)
-        run: uv run pytest -m slow
+      - name: Pytest (slow, shard ${{ matrix.shard }}/2)
+        shell: bash
+        run: |
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            args=($SLOW_SHARD_1_FILES)
+          else
+            args=()
+            for file in $SLOW_SHARD_1_FILES; do args+=("--ignore=$file"); done
+          fi
+          uv run pytest -m slow --durations=10 "${args[@]}"

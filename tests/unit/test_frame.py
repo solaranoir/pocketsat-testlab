@@ -1,8 +1,13 @@
 """Unit tests for pocketsat.frame beyond the shared vectors."""
 
+import binascii
+import random
+
 import pytest
 
 from pocketsat.frame import (
+    CRC16_INIT,
+    CRC16_POLY,
     MAX_PAYLOAD_SIZE,
     MIN_FRAME_SIZE,
     Frame,
@@ -12,6 +17,7 @@ from pocketsat.frame import (
     FrameSyncError,
     FrameType,
     FrameTypeError,
+    crc16_ccitt_false,
     decode_frame,
     encode_frame,
 )
@@ -64,3 +70,45 @@ def test_error_messages_are_explicit() -> None:
 def test_frame_rejects_out_of_range_fields(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         Frame(frame_type=FrameType.ACK, **kwargs)  # type: ignore[arg-type]
+
+
+# --- Table-driven CRC (#78) -----------------------------------------------------------
+
+
+def _bitwise_crc16_ccitt_false(data: bytes) -> int:
+    """The bit-by-bit reference the lookup table replaced (#78)."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if crc & 0x8000 else (crc << 1)
+            crc &= 0xFFFF
+    return crc
+
+
+def _crc_inputs() -> list[bytes]:
+    """Every length 0 to 300 of seeded random bytes, every single byte, and edge
+    patterns (all zeros, all ones, the check string)."""
+    rng = random.Random(78)
+    inputs = [bytes(rng.getrandbits(8) for _ in range(n)) for n in range(301)]
+    inputs += [bytes([b]) for b in range(256)]
+    inputs += [b"\x00" * 64, b"\xff" * 64, b"123456789", bytes(range(256)) * 4]
+    return inputs
+
+
+def test_crc_parameters_are_ccitt_false() -> None:
+    assert (CRC16_POLY, CRC16_INIT) == (0x1021, 0xFFFF)
+    assert crc16_ccitt_false(b"123456789") == 0x29B1
+    assert crc16_ccitt_false(b"") == 0xFFFF
+
+
+def test_table_crc_matches_the_bitwise_reference() -> None:
+    for data in _crc_inputs():
+        assert crc16_ccitt_false(data) == _bitwise_crc16_ccitt_false(data), data.hex()
+
+
+def test_table_crc_matches_binascii_crc_hqx_from_init_0xffff() -> None:
+    # binascii.crc_hqx is the same polynomial (0x1021, unreflected, no final XOR) with
+    # the initial value as its second argument, so from 0xFFFF it is CCITT-FALSE.
+    for data in _crc_inputs():
+        assert crc16_ccitt_false(data) == binascii.crc_hqx(data, 0xFFFF), data.hex()

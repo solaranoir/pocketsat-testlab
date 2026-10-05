@@ -37,6 +37,14 @@ sync    ver  type  seq    len     payload  crc
 CRC-16/CCITT-FALSE: width 16, poly `0x1021`, init `0xFFFF`, no input or output
 reflection, no final XOR. Check value: CRC of ASCII `"123456789"` is `0x29B1`.
 
+`pocketsat.frame` computes it with a 256-entry lookup table, one table lookup per byte
+(#78); entry `n` is the register after shifting byte `n` through it bit by bit from zero.
+The output is identical to the bit-by-bit definition, which the unit tests keep as a
+reference. The table mirrors what the Phase 7 MCU firmware will do. Python's
+`binascii.crc_hqx(data, 0xFFFF)` computes the same CRC in C, about 20 times faster than
+the table; it is an equivalent drop-in if CRC cost ever matters again (the unit tests
+already check the equivalence).
+
 ## Decoding and errors
 
 A decoder takes exactly one complete frame and checks, in order:
