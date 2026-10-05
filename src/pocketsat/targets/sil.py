@@ -8,9 +8,9 @@ only bytes in and bytes out (ADR-0002).
 **One tick** of ``advance()`` runs ADR-0004 §2 steps a to f, in this order:
 
 a. :meth:`SilTarget._merge_controls`: the flight computer's controls from the previous
-   tick (BOOT's controls on tick 0), merged with fault overrides. No faults exist yet,
-   so it passes the controls through unchanged; #60 adds the overrides and #98 the
-   radio traffic (ADR-0007), both in that one function.
+   tick (BOOT's controls on tick 0), merged with the active fault overrides, with
+   precedence fault > flight computer (#60, see below). #98 adds the radio traffic
+   (ADR-0007) in the same function.
 b. The subsystems step in ``STEP_ORDER`` with the merged controls, publishing each
    snapshot to the board.
 c. to f. The uplink frames sent since the last tick are delivered to the flight
@@ -28,6 +28,45 @@ tick's controls are kept for step a, and the tick's radio traffic is kept as a
 tick is described by a :class:`SilTick` record: the controls the subsystems obeyed,
 next to the :class:`~pocketsat.spacecraft.SpacecraftState` they produced (ADR-0004
 §14).
+
+**Target faults (#60; ADR-0002 §4, ADR-0004 §5, §8 to §11).** :meth:`SilTarget.inject`
+validates a fault and records it with the simulated time it was injected, which is
+the start of the next tick, so a fault injected before tick N acts in tick N
+(ADR-0004 §2: faults act on the same tick, commands one tick later). A fault injected
+at ``t`` with ``duration_us = d`` is active in every tick that starts in
+``[t, t + d)``, then released; ``duration_us = None`` lasts until ``reset(seed)``.
+Faults belong to the target, not to the flight computer, so they survive the RESET
+command and ``forced_reset``; only ``reset(seed)`` clears them.
+
+- ``transmitter_off`` (no parameters): the merge downgrades ``radio.mode`` from
+  ``RX_TX`` to ``RX_ONLY`` (``OFF`` and ``RX_ONLY`` are left as they are). Comms'
+  transmit capacity is then 0, so the flight computer suppresses and counts its
+  outbound frames by its ordinary rule; ``SilTarget`` adds no suppression path of its
+  own (ADR-0007 §5). The receiver keeps working.
+- ``sensor_freeze`` (optional ``subsystem``: ``power``, ``thermal``, or ``attitude``;
+  default all three): the merge adds the subsystems to ``frozen_sensors``.
+- ``battery_drain`` (required ``load_w``, watts, finite and > 0): the merge sets
+  ``extra_load_w`` to the sum of the active drains, in injection order.
+- ``forced_reset`` (no parameters): the flight computer is held in reset for
+  ``duration_us`` (``None`` or 0: a momentary pulse), then rebooted through
+  :meth:`FlightComputer.reboot`, the RESET path (ADR-0004 §9). Subsystem physical
+  state is never touched.
+
+Overlapping faults combine: ``frozen_sensors`` is the union, the drains add up, and
+``transmitter_off`` applies while any instance is active. Each is released on its own
+expiry.
+
+**Held in reset.** While a ``forced_reset`` holds it, the flight computer is not
+stepped: no command handling, no telemetry, no new controls. The subsystems keep
+stepping under the controls in force when the reset began (still merged with the
+active faults). Uplink the receiver hears is dropped, because no software is running
+to take it, and counted in :attr:`SilTick.uplink_dropped_in_reset_count`. The reboot
+happens in the first tick that starts at or after the end of the hold (the injection
+tick itself for a pulse): :meth:`FlightComputer.reboot` is called with that tick's
+start time, so uptime counts from the moment the processor leaves reset, and the
+flight computer then steps as usual in that tick and produces BOOT's controls at step
+f. A ``forced_reset`` injected while another is pending extends the hold to the later
+end; the two make one reboot.
 
 **Time.** Simulated time is integer microseconds on the target's own ``SimClock``
 (ADR-0003), which starts at 0 on ``reset(seed)``. ``advance(dt_us)`` runs
@@ -50,8 +89,9 @@ downlink bytes. No wall-clock time and no global randomness; every random stream
 comes from the run's ``RngFactory`` (ADR-0003).
 """
 
+import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from pocketsat.core.clock import DEFAULT_TICK_US, SimClock, check_us
@@ -67,7 +107,12 @@ from pocketsat.spacecraft.config import (
     SpacecraftConfig,
     SpacecraftInitialState,
 )
-from pocketsat.spacecraft.controls import SpacecraftControls
+from pocketsat.spacecraft.controls import (
+    SENSOR_SUBSYSTEMS,
+    RadioControls,
+    RadioMode,
+    SpacecraftControls,
+)
 from pocketsat.spacecraft.payload import Payload
 from pocketsat.spacecraft.power import Power
 from pocketsat.spacecraft.snapshots import CommsSnapshot
@@ -79,15 +124,41 @@ from pocketsat.targets.base import (
     UnsupportedFaultError,
 )
 
-__all__ = ["SIL_CAPABILITIES", "SilTarget", "SilTick", "TickObserver", "TickTraffic"]
+__all__ = [
+    "BATTERY_DRAIN",
+    "FORCED_RESET",
+    "SENSOR_FREEZE",
+    "SIL_CAPABILITIES",
+    "TRANSMITTER_OFF",
+    "SilTarget",
+    "SilTick",
+    "TickObserver",
+    "TickTraffic",
+]
+
+FORCED_RESET: Final = "forced_reset"
+"""Reboot the flight computer through the RESET path; ``duration_us`` is the time held
+in reset (``None`` or 0: a momentary pulse). No parameters (ADR-0004 §9)."""
+
+SENSOR_FREEZE: Final = "sensor_freeze"
+"""Hold readings at their last reported value. Optional parameter ``subsystem``:
+``power``, ``thermal``, or ``attitude``; default all three (ADR-0004 §8)."""
+
+TRANSMITTER_OFF: Final = "transmitter_off"
+"""Transmitter off, receiver still on: ``RX_TX`` becomes ``RX_ONLY``. No parameters
+(ADR-0004 §10)."""
+
+BATTERY_DRAIN: Final = "battery_drain"
+"""An extra electrical load. Required parameter ``load_w``: watts, finite and > 0
+(ADR-0004 §11)."""
 
 SIL_CAPABILITIES: Final = TargetCapabilities(
     deterministic=True,
     real_time=False,
-    supported_faults=frozenset(),
+    supported_faults=frozenset({FORCED_RESET, SENSOR_FREEZE, TRANSMITTER_OFF, BATTERY_DRAIN}),
 )
-"""What :class:`SilTarget` declares. No target faults yet: #60 adds ``forced_reset``,
-``sensor_freeze``, ``transmitter_off``, and ``battery_drain``."""
+"""What :class:`SilTarget` declares: deterministic, not real time, and the four SIL
+target faults (#60)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +212,18 @@ class SilTick:
         downlink_frames: The frames the flight computer sent, in transmit order; the
             same frames :meth:`SilTarget.receive` returns.
         next_controls: The controls the flight computer produced for the next tick
-            (step f), before any merge.
+            (step f), before any merge. While the flight computer is held in reset,
+            the controls in force when the reset began, unchanged.
+        active_faults: The override faults (``transmitter_off``, ``sensor_freeze``,
+            ``battery_drain``) merged into :attr:`controls` this tick, in injection
+            order. A ``forced_reset`` shows in the next two fields instead.
+        flight_computer_held: A ``forced_reset`` held the flight computer in reset,
+            so it did not step this tick.
+        flight_computer_rebooted: A ``forced_reset`` ended at the start of this tick:
+            the flight computer was rebooted, then stepped.
+        uplink_dropped_in_reset_count: Frames the receiver heard while the flight
+            computer was held in reset; dropped and never passed on. Not part of
+            ``uplink_lost_count``, because the receiver was on.
     """
 
     now_us: int
@@ -153,6 +235,63 @@ class SilTick:
     traffic: TickTraffic
     downlink_frames: tuple[bytes, ...]
     next_controls: SpacecraftControls
+    active_faults: tuple[TargetFault, ...]
+    flight_computer_held: bool
+    flight_computer_rebooted: bool
+    uplink_dropped_in_reset_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveFault:
+    """An injected override fault, validated, with the time it is released."""
+
+    fault: TargetFault
+    end_us: int | None  # exclusive; None lasts until reset(seed)
+    frozen_sensors: frozenset[str]
+    extra_load_w: float
+
+
+def _check_param_names(fault: TargetFault, allowed: frozenset[str]) -> None:
+    unknown = sorted(set(fault.params) - allowed)
+    if unknown:
+        takes = ", ".join(sorted(allowed)) or "no parameters"
+        raise ValueError(f"{fault.fault_type} takes {takes}; got unknown parameters {unknown}")
+
+
+def _validate_fault(fault: TargetFault) -> tuple[frozenset[str], float]:
+    """Check a supported fault's parameters (#60) and return what it merges in.
+
+    Returns:
+        The fault's ``frozen_sensors`` and ``extra_load_w`` contributions.
+
+    Raises:
+        ValueError: A parameter is unknown, missing, of the wrong type, or out of range.
+    """
+    kind = fault.fault_type
+    if kind == SENSOR_FREEZE:
+        _check_param_names(fault, frozenset({"subsystem"}))
+        if "subsystem" not in fault.params:
+            return SENSOR_SUBSYSTEMS, 0.0
+        subsystem = fault.params["subsystem"]
+        if not isinstance(subsystem, str) or subsystem not in SENSOR_SUBSYSTEMS:
+            raise ValueError(
+                f"sensor_freeze subsystem must be one of {sorted(SENSOR_SUBSYSTEMS)}, "
+                f"got {subsystem!r}"
+            )
+        return frozenset({subsystem}), 0.0
+    if kind == BATTERY_DRAIN:
+        _check_param_names(fault, frozenset({"load_w"}))
+        if "load_w" not in fault.params:
+            raise ValueError("battery_drain requires load_w (watts, > 0)")
+        load = fault.params["load_w"]
+        if isinstance(load, bool) or not isinstance(load, int | float):
+            raise ValueError(f"battery_drain load_w must be a number of watts, got {load!r}")
+        if not math.isfinite(load) or load <= 0:
+            raise ValueError(f"battery_drain load_w must be finite and > 0, got {load}")
+        return frozenset(), float(load)
+    # forced_reset and transmitter_off take no parameters.
+    _check_param_names(fault, frozenset())
+    return frozenset(), 0.0
 
 
 TickObserver = Callable[[SilTick], None]
@@ -182,7 +321,8 @@ class SilTarget:
     Call :meth:`reset` before :meth:`advance`: the seed is never implicit.
 
     Attributes:
-        capabilities: Deterministic, not real time, no target faults yet (#60).
+        capabilities: Deterministic, not real time, and the four SIL target faults
+            (:data:`SIL_CAPABILITIES`).
     """
 
     capabilities: TargetCapabilities = SIL_CAPABILITIES
@@ -229,6 +369,8 @@ class SilTarget:
         self._uplink: list[bytes] = []
         self._outbox: list[bytes] = []
         self._last_tick: SilTick | None = None
+        self._faults: list[_ActiveFault] = []
+        self._reset_release_us: int | None = None
 
     # --- Read-only views -----------------------------------------------------------------
 
@@ -277,8 +419,9 @@ class SilTarget:
         The subsystems are rebuilt from the target's ``config`` and ``initial``
         (ADR-0005) and reset with a new ``RngFactory(seed)``, so every named stream
         restarts. A new flight computer powers on in BOOT and its BOOT controls apply to
-        tick 0 (ADR-0004 §2). Simulated time returns to 0; queued uplink, undrained
-        downlink, the traffic hand-over, and the last tick record are discarded; the
+        tick 0 (ADR-0004 §2). Simulated time returns to 0; every active or pending
+        fault, queued uplink, undrained downlink, the traffic hand-over, and the last
+        tick record are discarded; the
         environment returns to the nominal ``EnvironmentState()`` until the next
         :meth:`apply_environment`.
 
@@ -298,6 +441,8 @@ class SilTarget:
         self._uplink.clear()
         self._outbox.clear()
         self._last_tick = None
+        self._faults = []
+        self._reset_release_us = None
 
     def send(self, frame: bytes) -> None:
         """Queue one uplink frame for the next tick.
@@ -329,13 +474,37 @@ class SilTarget:
         self._environment = env
 
     def inject(self, fault: TargetFault) -> None:
-        """Apply a target fault. No fault types are supported yet (#60).
+        """Apply a target fault from the next tick on (#60).
+
+        The fault starts at the current simulated time, the start of the next tick, and
+        acts in that tick. The target owns its expiry (ADR-0004 §5): it is released
+        after ``fault.duration_us``, or at ``reset(seed)`` if that is ``None``. For
+        ``forced_reset`` the duration is the time held in reset, and ``None`` or 0 is a
+        momentary pulse. See the module docstring for each fault's effect.
 
         Raises:
-            UnsupportedFaultError: Always, until #60 adds the SIL faults.
+            TypeError: ``fault`` is not a :class:`TargetFault`.
+            UnsupportedFaultError: The fault type is not in
+                ``capabilities.supported_faults`` (ADR-0002 §4).
+            ValueError: A parameter is unknown, missing, of the wrong type, or out of
+                range.
+            RuntimeError: :meth:`reset` has not been called.
         """
+        if not isinstance(fault, TargetFault):
+            raise TypeError(f"fault must be a TargetFault, got {type(fault).__name__}")
         if fault.fault_type not in self.capabilities.supported_faults:
             raise UnsupportedFaultError(fault.fault_type, self.capabilities.supported_faults)
+        frozen, load = _validate_fault(fault)
+        if self._stack is None:
+            raise RuntimeError("call reset(seed) before inject()")
+        now_us = self._clock.now_us
+        if fault.fault_type == FORCED_RESET:
+            release_us = now_us + (fault.duration_us or 0)
+            pending = self._reset_release_us
+            self._reset_release_us = release_us if pending is None else max(pending, release_us)
+            return
+        end_us = None if fault.duration_us is None else now_us + fault.duration_us
+        self._faults.append(_ActiveFault(fault, end_us, frozen, load))
 
     def advance(self, dt_us: int) -> None:
         """Run ``dt_us // tick_us`` ticks, each ADR-0004 §2 steps a to f.
@@ -370,25 +539,68 @@ class SilTarget:
     def _merge_controls(self, flight_controls: SpacecraftControls) -> SpacecraftControls:
         """Step a: merge the flight computer's controls with the target-supplied fields.
 
-        The single merge function of ADR-0004 §5 and §14. Today it is a documented
-        pass-through, because no target faults exist and the traffic field does not:
+        The single merge function of ADR-0004 §5 and §14, run at the start of the tick
+        (``now_us`` is the tick's start time):
 
-        - **#60 (fault overrides)** fills it with precedence fault > flight computer:
-          ``transmitter_off`` downgrades ``radio.mode`` from ``RX_TX`` to ``RX_ONLY``,
-          ``sensor_freeze`` adds to ``frozen_sensors``, ``battery_drain`` sets
-          ``extra_load_w``. It also tracks each fault's ``duration_us`` and releases it
-          on expiry, so faults injected before tick N act in tick N.
+        - **Expiry (#60).** Every override fault whose ``duration_us`` has run out by
+          the start of this tick is released first, so a fault injected at ``t`` with
+          duration ``d`` acts in the ticks starting in ``[t, t + d)``.
+        - **Fault overrides (#60), fault > flight computer.** ``transmitter_off``
+          downgrades ``radio.mode`` from ``RX_TX`` to ``RX_ONLY`` (the receiver keeps
+          working; ``OFF`` and ``RX_ONLY`` already have the transmitter off).
+          ``sensor_freeze`` adds its subsystems to ``frozen_sensors``.
+          ``battery_drain`` sets ``extra_load_w`` to the sum of the active drains'
+          ``load_w``, in injection order. With no fault active, the flight
+          computer's controls pass through unchanged (the same object).
         - **#98 (ADR-0007)** sets ``radio_traffic`` from :attr:`handover_traffic`, the
           previous tick's :class:`TickTraffic` (zeros on tick 0).
 
+        ``forced_reset`` is not a control override: it is handled in the tick itself
+        (see the module docstring), and the controls it holds are these merged ones.
+
         Args:
             flight_controls: The flight computer's controls from the previous tick
-                (BOOT's on tick 0).
+                (BOOT's on tick 0, or the held controls during a ``forced_reset``).
 
         Returns:
             The controls every subsystem obeys this tick.
         """
-        return flight_controls
+        now_us = self._clock.now_us
+        self._faults = [f for f in self._faults if f.end_us is None or now_us < f.end_us]
+        if not self._faults:
+            return flight_controls
+
+        transmitter_off = False
+        frozen = flight_controls.frozen_sensors
+        drain_w: float | None = None
+        for active in self._faults:
+            kind = active.fault.fault_type
+            if kind == TRANSMITTER_OFF:
+                transmitter_off = True
+            elif kind == SENSOR_FREEZE:
+                frozen = frozen | active.frozen_sensors
+            else:  # BATTERY_DRAIN
+                drain_w = active.extra_load_w if drain_w is None else drain_w + active.extra_load_w
+
+        controls = flight_controls
+        if transmitter_off and controls.radio.mode is RadioMode.RX_TX:
+            controls = replace(controls, radio=RadioControls(mode=RadioMode.RX_ONLY))
+        if frozen != controls.frozen_sensors:
+            controls = replace(controls, frozen_sensors=frozen)
+        if drain_w is not None:
+            controls = replace(controls, extra_load_w=drain_w)
+        return controls
+
+    def _reset_hold(self) -> tuple[bool, bool]:
+        """Whether a ``forced_reset`` holds the flight computer this tick, and whether
+        it is rebooted at the start of this tick (the hold has ended)."""
+        release_us = self._reset_release_us
+        if release_us is None:
+            return False, False
+        if self._clock.now_us < release_us:
+            return True, False
+        self._reset_release_us = None
+        return False, True
 
     def _run_tick(self) -> None:
         stack = self._stack
@@ -396,8 +608,12 @@ class SilTarget:
         assert stack is not None and flight_computer is not None
         env = self._environment
 
+        start_us = self._clock.now_us
+
         # a. Merge the previous tick's controls with the fault overrides.
         controls = self._merge_controls(self._next_controls)
+        active_faults = tuple(active.fault for active in self._faults)
+        held, rebooted = self._reset_hold()
 
         # b. Step the subsystems in STEP_ORDER.
         stack.step(self._clock.tick_us, env, controls)
@@ -405,12 +621,18 @@ class SilTarget:
         now_us = self._clock.now_us
         state = stack.snapshot()
 
-        # Uplink: received only if the receiver is on after step b (ADR-0004 §10).
+        # Uplink: received only if the receiver is on after step b (ADR-0004 §10), and
+        # taken only if the flight computer is running.
         arrived, self._uplink = self._uplink, []
         lost = 0
         undecodable = 0
+        dropped_in_reset = 0
         delivered: list[bytes] = []
-        if state.get("comms", CommsSnapshot).truth.receiver_on:
+        if not state.get("comms", CommsSnapshot).truth.receiver_on:
+            lost = len(arrived)
+        elif held:
+            dropped_in_reset = len(arrived)
+        else:
             for frame in arrived:
                 try:
                     decode_frame(frame)
@@ -418,20 +640,26 @@ class SilTarget:
                     undecodable += 1
                 else:
                     delivered.append(frame)
-        else:
-            lost = len(arrived)
-
-        # c. to f. The flight computer: commands, mode, telemetry, next controls.
         uplink = tuple(delivered)
-        output = flight_computer.step(uplink, SpacecraftReadings.from_state(state), now_us)
 
-        self._outbox.extend(output.downlink_frames)
-        self._next_controls = output.controls
-        traffic = TickTraffic(
-            sent_bytes=output.sent_bytes,
-            uplink_lost_count=lost,
-            outbound_suppressed_count=output.outbound_suppressed_count,
-        )
+        # c. to f. The flight computer: commands, mode, telemetry, next controls. Held
+        # in reset, it does nothing and the controls in force stay in force.
+        if held:
+            downlink: tuple[bytes, ...] = ()
+            traffic = TickTraffic(uplink_lost_count=lost)
+        else:
+            if rebooted:
+                flight_computer.reboot(now_us=start_us)
+            output = flight_computer.step(uplink, SpacecraftReadings.from_state(state), now_us)
+            downlink = output.downlink_frames
+            self._next_controls = output.controls
+            traffic = TickTraffic(
+                sent_bytes=output.sent_bytes,
+                uplink_lost_count=lost,
+                outbound_suppressed_count=output.outbound_suppressed_count,
+            )
+
+        self._outbox.extend(downlink)
         self._handover_traffic = traffic
         record = SilTick(
             now_us=now_us,
@@ -441,8 +669,12 @@ class SilTarget:
             delivered_uplink=uplink,
             undecodable_uplink_count=undecodable,
             traffic=traffic,
-            downlink_frames=output.downlink_frames,
-            next_controls=output.controls,
+            downlink_frames=downlink,
+            next_controls=self._next_controls,
+            active_faults=active_faults,
+            flight_computer_held=held,
+            flight_computer_rebooted=rebooted,
+            uplink_dropped_in_reset_count=dropped_in_reset,
         )
         self._last_tick = record
         if self._tick_observer is not None:

@@ -21,7 +21,9 @@ It is deliberately small and is **not** a model of the real flight software:
 - It follows ADR-0004 §10's outbound rule: frames go out in priority order (ACK, then
   telemetry) while they fit ``transmit_capacity_bytes``; the rest are dropped and
   counted in ``outbound_suppressed_count``.
-- It records every call, so tests can see exactly what ``SilTarget`` delivered.
+- It records every call, so tests can see exactly what ``SilTarget`` delivered, and
+  every :meth:`reboot` (the ``forced_reset`` path, #60), after which it produces its
+  boot controls again, as the real flight computer produces BOOT's.
 """
 
 from collections.abc import Iterable
@@ -113,6 +115,7 @@ class ScriptedFlightComputer(FlightComputer):
         self._telemetry = telemetry
         self._controls = self._boot_controls
         self.calls: list[StepCall] = []
+        self.reboots: list[int] = []
         self.reset_count = 0
         super().__init__()
 
@@ -120,8 +123,17 @@ class ScriptedFlightComputer(FlightComputer):
         super().reset(now_us=now_us)
         self._controls = self._boot_controls
         self.calls = []
+        self.reboots = []
         self.reset_count += 1
         return self._controls
+
+    def reboot(self, *, now_us: int) -> None:
+        """The RESET path (``forced_reset``, #60): the base reboot, then BOOT's controls
+        at the next step f, as the real flight computer produces them (ADR-0004 §9).
+        Records the reboot time."""
+        super().reboot(now_us=now_us)
+        self._controls = self._boot_controls
+        self.reboots.append(now_us)
 
     def force_controls(self, controls: SpacecraftControls) -> None:
         """Make the next step produce ``controls`` (plus any command effects)."""

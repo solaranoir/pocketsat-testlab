@@ -155,8 +155,23 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 
 - `advance(dt_us)` runs `dt_us // tick_us` ticks, each steps a to f above; `dt_us` must be a multiple of the tick (events are quantized to ticks before a run, ADR-0003), and a partial tick raises `ValueError`. The flight computer is called with the time at the end of the tick.
 - Uplink queued by `send()` arrives in the next tick. It reaches the flight computer only if comms' receiver is on after step b; otherwise it is lost (not queued) and counted. Received frames that are not valid wire frames are dropped and counted, and never raise.
-- Step a is one merge function, `SilTarget._merge_controls()`, a documented pass-through until #60 adds the fault overrides and #98 the radio traffic.
-- Each tick is described by a `SilTick` record: the merged controls next to the `SpacecraftState` they produced, the uplink delivered, the undecodable count, the downlink, the next controls, and the tick's traffic (`TickTraffic`: bytes sent, uplink lost, outbound suppressed). `TickTraffic` has `RadioTraffic`'s fields and is held for the hand-over that #98 wires into the controls.
+- Step a is one merge function, `SilTarget._merge_controls()`. It applies the fault overrides (#60, below) and, with #98, the radio traffic. With no fault active it passes the flight computer's controls through unchanged.
+- Each tick is described by a `SilTick` record: the merged controls next to the `SpacecraftState` they produced, the uplink delivered, the undecodable count, the downlink, the next controls, and the tick's traffic (`TickTraffic`: bytes sent, uplink lost, outbound suppressed). `TickTraffic` has `RadioTraffic`'s fields and is held for the hand-over that #98 wires into the controls. It also records the active override faults, whether a `forced_reset` held or rebooted the flight computer, and the uplink dropped while it was held.
+
+#### SIL target faults (#60)
+
+`SilTarget` declares `forced_reset`, `sensor_freeze`, `transmitter_off`, and `battery_drain` in `capabilities.supported_faults`. Any other type raises `UnsupportedFaultError` (ADR-0002 §4), and invalid parameters raise `ValueError` at `inject()`.
+
+| Fault | Parameters | Effect |
+|---|---|---|
+| `transmitter_off` | none | The merge downgrades `radio.mode` from `RX_TX` to `RX_ONLY` (`OFF` and `RX_ONLY` are left alone). The capacity is 0, so the flight computer suppresses and counts its outbound frames by its ordinary rule; `SilTarget` adds no suppression path (ADR-0007 §5). |
+| `sensor_freeze` | `subsystem`: `power`, `thermal`, or `attitude` (default all) | The merge adds the subsystems to `frozen_sensors` (ADR-0004 §8). |
+| `battery_drain` | `load_w`: watts, finite, > 0 (required) | The merge sets `extra_load_w` to the sum of the active drains. `battery_soc_override` still wins (ADR-0004 §11). |
+| `forced_reset` | none | The flight computer is held in reset for `duration_us` (`None` or 0: a momentary pulse), then rebooted through `FlightComputer.reboot()`. Subsystem physical state is never touched (ADR-0004 §9). |
+
+- **Timing.** `inject()` records the fault at the current simulated time, the start of the next tick, so a fault injected before tick N acts in tick N (faults act on the same tick, ADR-0004 §2). A fault injected at `t` with `duration_us = d` is active in the ticks that start in `[t, t + d)`, then released by the merge function; `None` lasts until `reset(seed)`. Faults survive the RESET command and `forced_reset`; only `reset(seed)` clears them.
+- **Overlap.** Frozen sensors are the union, drains add up, and `transmitter_off` holds while any instance is active. Each fault is released on its own expiry.
+- **Held in reset.** While held, the flight computer is not stepped: no command handling, no telemetry, no new controls. Subsystems keep stepping under the controls in force when the reset began, still merged with the active faults. Uplink heard by the receiver is dropped (no software is running to take it) and counted in `SilTick.uplink_dropped_in_reset_count`. `reboot()` is called once, at the start of the first tick that starts at or after the end of the hold, with that tick's start time (the end of the hold itself, since scenario durations are quantized to ticks), so uptime and the boot duration (#49) count from leaving reset; the flight computer then steps as usual and produces BOOT's controls at step f. A `forced_reset` injected while one is pending extends the hold to the later end, and the two make one reboot.
 
 #### Snapshot contracts (#76)
 
