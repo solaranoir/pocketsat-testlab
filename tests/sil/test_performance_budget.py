@@ -18,13 +18,14 @@ Each measurement is the median of :data:`REPEATS` runs, each a fresh ``reset(see
 followed by a fixed number of timed ticks. Wall-clock timing is allowed here: the
 determinism guard covers only simulation code in ``src/pocketsat`` (ADR-0003).
 
-Two full-stack runs are reported:
+Two full-stack runs are reported, both with the real flight computer in SCIENCE,
+answering a PING every 10 s:
 
-- the **real flight computer** in SCIENCE, answering a PING every 10 s. This is the
-  budgeted figure.
-- the **scripted flight computer encoding a telemetry frame every tick**, the most
-  telemetry #55 can ask for. Each frame is encoded with the frame CRC, so this run
-  guards the lookup-table CRC (#78) until the real flight computer emits telemetry.
+- at the **default telemetry cadence** (#55: one frame per second in SCIENCE). This is
+  the budgeted figure.
+- with **telemetry every tick** (``TelemetryConfig.uniform(tick)``), the most telemetry
+  the scheduler can be configured for. Each frame is encoded with the frame CRC, so
+  this run guards the lookup-table CRC (#78) and the telemetry encoder.
 """
 
 import os
@@ -34,12 +35,12 @@ from collections.abc import Callable, Mapping
 from typing import Final
 
 import pytest
-from _scripted_flight_computer import ScriptedFlightComputer
 
 from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment import NominalEnvironment
-from pocketsat.flight import FlightComputer, Mode, controls_for_mode
+from pocketsat.flight import FlightComputer, FlightComputerConfig, Mode, controls_for_mode
+from pocketsat.flight.telemetry import TelemetryConfig
 from pocketsat.frame import Frame, FrameType, encode_frame
 from pocketsat.messages import Command, encode_command
 from pocketsat.spacecraft import (
@@ -133,10 +134,12 @@ def _median_us[*A](run: Callable[[*A], float], *args: *A) -> float:
 @pytest.mark.parametrize(
     ("label", "factory"),
     [
-        ("real flight computer, SCIENCE", FlightComputer),
+        ("real flight computer, SCIENCE, telemetry 1 Hz", FlightComputer),
         (
-            "scripted flight computer, telemetry every tick",
-            lambda: ScriptedFlightComputer(telemetry=True),
+            "real flight computer, SCIENCE, telemetry every tick",
+            lambda: FlightComputer(
+                FlightComputerConfig(telemetry=TelemetryConfig.uniform(DEFAULT_TICK_US))
+            ),
         ),
     ],
     ids=["real-flight-computer", "telemetry-every-tick"],

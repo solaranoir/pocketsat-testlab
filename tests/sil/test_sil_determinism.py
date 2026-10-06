@@ -9,9 +9,9 @@ faults (#60), so the comparison covers the command, mode, fault, and reboot path
 
 What is compared:
 
-- **Downlink bytes**, the ground's view: every frame, with the tick it came out in.
-  Until #55 the real flight computer sends only ACK frames, so the seeded sensor noise
-  is not in the downlink yet; it is in the tick records.
+- **Downlink bytes**, the ground's view: every frame, with the tick it came out in:
+  the ACK/NACK frames and the real flight computer's TELEMETRY frames (#55), whose
+  reported values carry the seeded sensor noise.
 - **Every** :class:`SilTick`: merged controls, every subsystem's truth and readings
   (seeded noise included), uplink, traffic, faults, and reboots, tick by tick.
 
@@ -32,7 +32,7 @@ from pocketsat.core.clock import DEFAULT_TICK_US, SimClock
 from pocketsat.environment import NominalEnvironment
 from pocketsat.flight import Mode
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
-from pocketsat.messages import Command, decode_ack, encode_command
+from pocketsat.messages import Command, decode_ack, decode_telemetry, encode_command
 from pocketsat.spacecraft import AttitudeSnapshot, PowerSnapshot, ThermalSnapshot
 from pocketsat.targets.base import TargetFault
 from pocketsat.targets.sil import (
@@ -155,9 +155,15 @@ def fresh_run(seed: int, ticks: int) -> Run:
     return drive(target, ticks)
 
 
+def _frames(run: Run, frame_type: FrameType) -> list[bytes]:
+    """The payloads of the downlink frames of one type, in order."""
+    frames = [decode_frame(frame) for _, frame in run.downlink]
+    return [frame.payload for frame in frames if frame.frame_type is frame_type]
+
+
 def _check_the_script_was_exercised(run: Run) -> None:
     """Guard against a comparison that passes because nothing happened."""
-    answers = [decode_ack(decode_frame(frame).payload) for _, frame in run.downlink]
+    answers = [decode_ack(payload) for payload in _frames(run, FrameType.ACK)]
     assert any(answer.accepted for answer in answers)
     assert any(not answer.accepted for answer in answers)
     assert any(t.active_faults for t in run.ticks)
@@ -167,6 +173,16 @@ def _check_the_script_was_exercised(run: Run) -> None:
     assert any(t.undecodable_uplink_count for t in run.ticks)
     radio_modes = {t.controls.radio.mode for t in run.ticks}
     assert len(radio_modes) > 1  # the commanded and fault-merged controls changed
+    # Real telemetry (#55) in the downlink, from every mode the script visits and
+    # across reboots, so the comparison covers its bytes.
+    telemetry = [decode_telemetry(payload) for payload in _frames(run, FrameType.TELEMETRY)]
+    assert {t.mode for t in telemetry} == {
+        Mode.NOMINAL,
+        Mode.SCIENCE,
+        Mode.DOWNLINK,
+        Mode.SAFE,
+    }
+    assert len({t.boot_count for t in telemetry}) > 1
 
 
 # --- Same seed: byte-identical ------------------------------------------------------------
@@ -184,7 +200,8 @@ def test_same_seed_gives_byte_identical_downlink_over_10000_ticks() -> None:
     assert all(g == 0.0 for g, s in zip(generation, sunlit, strict=True) if not s)
     assert generation[0] > 0.0 and generation[-1] > 0.0  # stops in eclipse, resumes after
 
-    assert len(first.downlink) >= 60  # at least six answered commands per cycle
+    assert len(_frames(first, FrameType.ACK)) >= 60  # at least six answered per cycle
+    assert len(_frames(first, FrameType.TELEMETRY)) >= 600  # about 1 Hz outside BOOT
     assert first.downlink == second.downlink
     assert first.ticks == second.ticks
 
@@ -227,13 +244,27 @@ def _idle_run(seed: int) -> Run:
 )
 def test_different_seed_gives_different_sensor_noise(subsystem: str, field: str) -> None:
     # Guards against an ignored seed: the noise on every noisy reading changes with the
-    # seed, and repeats with it. Until #55 the noise is not in the downlink, so it is
-    # read from the tick records.
+    # seed, and repeats with it. Read from the tick records, per reading; the downlink
+    # check is below.
     seed_a = _noise(_idle_run(seed=1), subsystem, field)
     seed_b = _noise(_idle_run(seed=2), subsystem, field)
     assert any(seed_a)
     assert seed_a != seed_b
     assert _noise(_idle_run(seed=1), subsystem, field) == seed_a
+
+
+def test_different_seed_gives_different_telemetry_bytes() -> None:
+    # The ground's view: the same script under another seed sends the same frames at
+    # the same ticks, but the telemetry payloads differ (the seeded noise) while the
+    # ACKs, which carry no reported values, are identical.
+    first = fresh_run(seed=61, ticks=200)
+    second = fresh_run(seed=62, ticks=200)
+    assert [n for n, _ in first.downlink] == [n for n, _ in second.downlink]
+    assert _frames(first, FrameType.ACK) == _frames(second, FrameType.ACK)
+    first_telemetry = _frames(first, FrameType.TELEMETRY)
+    assert len(first_telemetry) >= 10
+    assert first_telemetry != _frames(second, FrameType.TELEMETRY)
+    assert _frames(fresh_run(seed=61, ticks=200), FrameType.TELEMETRY) == first_telemetry
 
 
 def test_different_seed_gives_a_different_run_with_the_same_script() -> None:

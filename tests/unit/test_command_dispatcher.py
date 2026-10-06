@@ -119,13 +119,26 @@ def frame_for(command: Command, sequence: int = 1) -> bytes:
     return command_frame(encode_command(command), sequence)
 
 
+class AckOnlyComputer(FlightComputer):
+    """The flight computer with its emit-telemetry phase switched off.
+
+    These tests check the dispatcher and the outbound queue through ACK/NACK frames
+    alone; telemetry (#55) would add a frame at every mode change. Telemetry's place in
+    the queue (after the ACKs, sharing the capacity and the sequence counter) is tested
+    in ``test_telemetry_scheduler.py``.
+    """
+
+    def _emit_telemetry(self, tick: TickContext) -> None:
+        pass
+
+
 def in_state(state: ModeState) -> FlightComputer:
-    """A flight computer in ``state``.
+    """A flight computer in ``state``, with telemetry off (:class:`AckOnlyComputer`).
 
     Set directly, so each test reaches its mode in one step instead of waiting out
     the 5 s boot (#49) and commanding the mode first.
     """
-    fc = FlightComputer()
+    fc = AckOnlyComputer()
     fc._mode_state = state
     return fc
 

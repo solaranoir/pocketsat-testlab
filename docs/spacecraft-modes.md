@@ -190,7 +190,7 @@ The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED` and compute the `safe
 
 - **Which flags.** `critical_battery`, `over_temp`, and `under_temp`. `low_battery` is not one: it is a warning for the ground and the payload's inhibit (#43), and SAFE would not change what it protects against (SAFE's controls equal NOMINAL's).
 - **Counting.** Each flag has its own counter, in ticks of simulated time (no wall clock). It counts from the tick the flag first appears in the readings (which already include the ADR-0004 latencies, #71): 1 in that tick, +1 for each further tick the flag stays set, back to 0 in any tick it is clear. `SAFE_CONDITION` is raised in every tick in which some counter has reached `sustain_tick_count`. The counter saturates there, so it never grows without bound (a firmware-sized integer is enough).
-- **Configurable.** `SafetyConfig(sustain_tick_count=...)`, passed as `FlightComputer(safety=...)`, at least 1 (1 means the first flagged tick). The default, 10 ticks, is 1 s at the default 100 ms tick. The flags already have hysteresis bands wider than their full noise spread (#36, #39), so a steady value near a threshold can't make them flap; the persistence additionally ignores a flag that appears for fewer than 10 ticks in a row. Because it is counted in ticks, its duration scales with the tick length.
+- **Configurable.** `SafetyConfig(sustain_tick_count=...)`, passed as `FlightComputer(FlightComputerConfig(safety=...))`, at least 1 (1 means the first flagged tick). The default, 10 ticks, is 1 s at the default 100 ms tick. The flags already have hysteresis bands wider than their full noise spread (#36, #39), so a steady value near a threshold can't make them flap; the persistence additionally ignores a flag that appears for fewer than 10 ticks in a row. Because it is counted in ticks, its duration scales with the tick length.
 - **No hand-off.** Counters are per flag: 5 ticks of `critical_battery` followed by 5 of `under_temp` raise nothing. Overlapping flags trigger on the first one sustained.
 - **Level-triggered, every mode.** The rules run in every mode, BOOT included (SAFE_CONDITION in BOOT goes straight to SAFE, #47 decision 7; see [SAFE or FAULT during BOOT](#safe-or-fault-during-boot)). The state machine ignores `SAFE_CONDITION` in SAFE and FAULT, so raising it every tick is harmless and means nothing is lost if a sustained flag outlives a mode change.
 - **Reboots.** The counters are transient flight computer state: `reset()` and `reboot()` (RESET, `forced_reset`) set them to 0, so a flag still set after a reboot is sustained again from BOOT before SAFE is re-entered.
@@ -225,7 +225,7 @@ In general the mode is SAFE `sustain_tick_count - 1` ticks after the flag first 
 
 ## Boot sequence and RESET
 
-The boot sequence, the reboot behind RESET and `forced_reset`, and the uptime counter (#49). Settings and helpers are in `pocketsat.flight.boot` (`BootConfig`, passed as `FlightComputer(boot=...)`); the rest is `FlightComputer.reset()`, `reboot()`, and the evaluate-flags and update-mode phases. Tests: `tests/unit/test_boot_reset.py` (the flight computer fed fake readings) and `tests/sil/test_boot_reset_story.py` (`SilTarget` with the real subsystems).
+The boot sequence, the reboot behind RESET and `forced_reset`, and the uptime counter (#49). Settings and helpers are in `pocketsat.flight.boot` (`BootConfig`, passed as `FlightComputer(FlightComputerConfig(boot=...))`); the rest is `FlightComputer.reset()`, `reboot()`, and the evaluate-flags and update-mode phases. Tests: `tests/unit/test_boot_reset.py` (the flight computer fed fake readings) and `tests/sil/test_boot_reset_story.py` (`SilTarget` with the real subsystems).
 
 ### Power-on and BOOT_COMPLETE
 
@@ -249,7 +249,7 @@ The boot counter persists across RESET and `forced_reset` and is cleared only by
 `reboot(*, now_us)` is the one RESET path (ADR-0004 §9). It takes effect immediately and:
 
 1. increments the boot counter;
-2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; later tickets add theirs (telemetry schedule #55, downlink session #56);
+2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; and the telemetry schedule (#55), so the next frame is the boot-complete beacon; later tickets add theirs (downlink session #56);
 3. restarts uptime, and with it the boot duration.
 
 Subsystem physical state (battery charge, temperatures, attitude, the payload buffer) is never touched: it isn't the flight computer's. Active target faults also survive (#60).
@@ -260,7 +260,7 @@ Subsystem physical state (battery charge, temperatures, attitude, the payload bu
 |---|---|
 | c | The RESET's ACK is queued in the tick's downlink, first (ADR-0004 §10) |
 | d | Events before the RESET apply normally; the RESET enters BOOT and reboots. Automatic events after it (`SAFE_CONDITION`, `FAULT_DETECTED`, `BOOT_COMPLETE` raised from the state the reboot discarded) are recorded as ignored and not applied. Command events after it still go through the table, now in BOOT (a NACK with `BOOT_IN_PROGRESS`, or another RESET) |
-| e | The frames already queued, the ACK included, go out in this tick: the ground sees the ACK. No telemetry in BOOT except the boot-complete beacon (#55) |
+| e | The frames already queued, the ACK included, go out in this tick: the ground sees the ACK. No telemetry: the mode is BOOT, which sends none except the boot-complete beacon at the end of the boot (#55) |
 | f | BOOT's controls, which apply from the next tick |
 
 The ACK therefore always precedes the reboot's effect: it is sent in the RESET tick, and the subsystems see BOOT's controls from the tick after.
@@ -276,9 +276,35 @@ A safe condition sustained during BOOT goes straight to SAFE without `BOOT_COMPL
 - the boot counter and uptime are kept (uptime keeps counting from the boot; SAFE doesn't restart it);
 - `BOOT_COMPLETE` is never raised afterwards, even once the boot duration has passed, because it is raised only in BOOT;
 - SAFE's (or FAULT's) controls apply from the next tick, so attitude control comes on early;
-- there is no NOMINAL hop and no boot-complete beacon; SAFE's own telemetry cadence (#55) tells the ground instead.
+- there is no NOMINAL hop and no boot-complete beacon; SAFE's first frame, sent in the SAFE entry tick, and its 0.5 s cadence tell the ground instead ([Telemetry cadence](#telemetry-cadence), #55).
 
 At the defaults a flag present from power-on enters SAFE in tick 9 (1 s of persistence), well inside the 5 s boot.
+
+## Telemetry cadence
+
+The telemetry scheduler (#55): the flight computer's emit-telemetry phase (ADR-0004 §2 step e) sends a TELEMETRY frame (#54's 36-byte frame, `docs/protocol.md`) when one is due. The cadence and schedule are in `pocketsat.flight.telemetry` (`TelemetryConfig`, `telemetry_due`); the phase is `FlightComputer._emit_telemetry`. Tests: `tests/unit/test_telemetry_scheduler.py` (the flight computer fed fake readings) and the `SilTarget` stories in `tests/sil` (`test_boot_reset_story.py`, `test_sil_faults.py`, `test_sil_target.py`, `test_sil_determinism.py`).
+
+**Default cadence** (`TelemetryConfig`, passed as `FlightComputer(FlightComputerConfig(telemetry=...))`):
+
+<!-- telemetry-cadence:start -->
+| Mode | Period | Ticks at 100 ms |
+|---|---|---|
+| BOOT | none: the boot-complete beacon only | — |
+| NOMINAL | 1.0 s | 10 |
+| SCIENCE | 1.0 s | 10 |
+| DOWNLINK | 1.0 s | 10 |
+| SAFE | 0.5 s | 5 |
+| FAULT | 0.5 s | 5 |
+<!-- telemetry-cadence:end -->
+
+- **Why these values.** One frame a second in the normal modes is the beacon rate #72's power budget assumed (it priced a 64-byte frame; the real one is 36 bytes). SAFE is faster so the ground follows a recovery closely. The cost is small: a frame draws 36 B × `transmit_power_per_byte_w` (0.02 W per byte) = 0.72 W for one 100 ms tick, about 0.07 J, so 1 frame/s averages about 0.07 W and SAFE's 2 frames/s about 0.14 W, once #98 charges comms for real traffic; FAULT keeps SAFE's controls and its cadence, so the ground can diagnose it before sending RESET. DOWNLINK keeps 1 s: each frame costs 36 of a tick's 120 bytes that DATA (#56) would otherwise use, so faster telemetry there would cost pass capacity.
+- **Periods are simulated time.** Each period is integer microseconds (ADR-0003), not a tick count, so the rate per second doesn't change with the tick length. A frame is due in the first step whose time has reached the previous frame's time plus the period, so, like the boot duration, a period rounds up to whole ticks (250 ms at a 100 ms tick sends every 3 ticks). The defaults are whole numbers of 100 ms ticks.
+- **No telemetry in BOOT, except the boot-complete beacon.** The beacon is the first frame of the mode BOOT leaves for, sent in the step that raises `BOOT_COMPLETE` (uptime 5.0 s at the defaults, tick 49 after power-on), so it shows NOMINAL, the boot count, and the uptime. A RESET tick sends its ACK but no telemetry (the mode after step d is BOOT). See [Boot sequence and RESET](#boot-sequence-and-reset).
+- **A frame at every mode change.** The step whose step d changes the mode sends a frame at once, after the tick's ACK/NACK, and the new mode's period counts from there. So telemetry from a command's ACK tick shows the new mode (ADR-0004 §2), SAFE and FAULT entry reach the ground at once, and the beacon is this same rule leaving BOOT. A command that changes nothing (`NO_CHANGE`) adds no frame. SAFE or FAULT entered during BOOT sends SAFE's (or FAULT's) first frame instead of a beacon.
+- **Content.** `encode_telemetry` (#54) from this tick's readings only (ADR-0004 §7) plus the flight computer's own state: the mode after step d, `uptime_ms`, and `boot_count`.
+- **Outbound priority and capacity** (ADR-0004 §10, ADR-0007 §3; `docs/protocol.md`, "Downlink sequence and transmit capacity"). Telemetry goes through the outbound queue after any ACK/NACK and before DATA (#56), within what is left of comms' `transmit_capacity_bytes`, and takes the next number of the shared downlink sequence. A due frame that doesn't fit is **suppressed**: not queued, never sent later, counted in `outbound_suppressed_count`, and given no sequence number. Its slot is used, so the next frame is due one period later: the cadence resumes as soon as capacity returns, without a burst of missed frames. Under `transmitter_off` (capacity 0) every due frame is suppressed and counted.
+- **Transient.** The schedule is cleared by power-on and every reboot (RESET, `forced_reset`), with the mode; the next frame is the beacon.
+- **A NaN reading** has no telemetry encoding (`docs/protocol.md`). The same tick raises `FAULT_DETECTED` (`NON_FINITE_READING`, #48), and the due frame is dropped, uncounted, rather than stopping the flight computer; FAULT's cadence carries on from that slot.
 
 ## What other tickets add
 
@@ -288,6 +314,6 @@ At the defaults a flag present from power-on enters SAFE in tick 9 (1 s of persi
 | #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared): done, see [Safe and fault entry rules](#safe-and-fault-entry-rules) |
 | #49 | `BOOT_COMPLETE` after the boot duration, the reboot behind RESET and `forced_reset` (uptime, boot counter, transient state), and BOOT's controls applying from tick 0: done, see [Boot sequence and RESET](#boot-sequence-and-reset). The held-in-reset period belongs to `SilTarget`'s `forced_reset` (#60); a RESET command has no hold |
 | #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F: done, see [docs/protocol.md](protocol.md#dispatch-and-ack-timing) |
-| #55 | Telemetry cadence per mode |
+| #55 | Telemetry cadence per mode, the boot-complete beacon, and one `FlightComputerConfig(safety, boot, telemetry)`: done, see [Telemetry cadence](#telemetry-cadence) |
 | #56 | The downlink session: raising `DOWNLINK_COMPLETE`, setting `release_through_chunk_id`, and resuming after an early exit |
 | #59 | Merging fault overrides into these controls and applying BOOT's controls at `reset(seed)` |

@@ -8,15 +8,14 @@ and are released on expiry in simulated time.
 Flight computers used here:
 
 - The real :class:`~pocketsat.flight.FlightComputer` (``RealRig``) for the physics,
-  the RESET path (boot counter, uptime, BOOT and the boot duration, #49), and every
-  ACK (#51): the ``transmitter_off`` command test and the ``forced_reset`` pulse and
-  hold tests. Where a test needs to leave BOOT quickly it builds the flight computer
-  with a short ``BootConfig``.
-- :class:`ScriptedFlightComputer` (``Rig``) only where the real one still lacks the
-  behaviour: telemetry (#55; the suppressed-telemetry count under ``transmitter_off``),
-  a command that switches the radio directly, and controls forced from the test (to
-  check which controls are held). DATA under ``transmitter_off`` waits for #56: no DATA
-  frame exists to suppress yet.
+  the RESET path (boot counter, uptime, BOOT and the boot duration, #49), every ACK
+  (#51), and telemetry (#55): the ``transmitter_off`` command and telemetry tests and
+  the ``forced_reset`` pulse and hold tests. Where a test needs to leave BOOT quickly
+  it builds the flight computer with a short boot (``SHORT_BOOT``).
+- :class:`ScriptedFlightComputer` (``Rig``) only where the real one lacks the
+  behaviour: a command that switches the radio or attitude control directly, and
+  controls forced from the test (to check which controls are held). DATA under
+  ``transmitter_off`` waits for #56: no DATA frame exists to suppress yet.
 
 The same-tick half of the ADR-0004 §2 timeline is in ``test_sil_target.py``, next to
 the command half.
@@ -29,17 +28,29 @@ import pytest
 from _scripted_flight_computer import (
     ScriptedFlightComputer,
     ack_sequence,
-    is_telemetry,
     ping,
-    set_attitude,
     set_radio,
 )
 
 from pocketsat.core.clock import DEFAULT_TICK_US
-from pocketsat.flight import FlightComputer, Mode, controls_for_mode
+from pocketsat.flight import (
+    DEFAULT_FLIGHT_COMPUTER_CONFIG,
+    FlightComputer,
+    FlightComputerConfig,
+    Mode,
+    controls_for_mode,
+)
 from pocketsat.flight.boot import BootConfig
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
-from pocketsat.messages import Command, CommandAck, CommandId, decode_ack, encode_command
+from pocketsat.messages import (
+    Command,
+    CommandAck,
+    CommandId,
+    Telemetry,
+    decode_ack,
+    decode_telemetry,
+    encode_command,
+)
 from pocketsat.spacecraft import (
     SENSOR_SUBSYSTEMS,
     AttitudeControls,
@@ -122,12 +133,14 @@ class Rig:
 class RealRig:
     """A ``SilTarget`` with the real flight computer and a record of every tick."""
 
-    def __init__(self, *, boot: BootConfig | None = None, seed: int = 7) -> None:
+    def __init__(
+        self, *, config: FlightComputerConfig = DEFAULT_FLIGHT_COMPUTER_CONFIG, seed: int = 7
+    ) -> None:
         self.computers: list[FlightComputer] = []
         self.ticks: list[SilTick] = []
 
         def factory() -> FlightComputer:
-            computer = FlightComputer() if boot is None else FlightComputer(boot=boot)
+            computer = FlightComputer(config)
             self.computers.append(computer)
             return computer
 
@@ -150,8 +163,9 @@ class RealRig:
         return self.target.receive()
 
 
-SHORT_BOOT = BootConfig(duration_us=10 * TICK)
-"""A 1 s boot, so the real flight computer reaches NOMINAL after 10 ticks."""
+SHORT_BOOT = FlightComputerConfig(boot=BootConfig(duration_us=10 * TICK))
+"""A 1 s boot, so the real flight computer reaches NOMINAL after 10 ticks; the default
+telemetry cadence."""
 
 
 def command_frame(command: Command, sequence: int) -> bytes:
@@ -159,9 +173,15 @@ def command_frame(command: Command, sequence: int) -> bytes:
 
 
 def acks(frames: list[bytes]) -> list[CommandAck]:
+    """The ACK frames among ``frames``, decoded."""
     decoded = [decode_frame(frame) for frame in frames]
-    assert all(frame.frame_type is FrameType.ACK for frame in decoded)
-    return [decode_ack(frame.payload) for frame in decoded]
+    return [decode_ack(f.payload) for f in decoded if f.frame_type is FrameType.ACK]
+
+
+def telemetry(frames: list[bytes]) -> list[Telemetry]:
+    """The TELEMETRY frames among ``frames``, decoded."""
+    decoded = [decode_frame(frame) for frame in frames]
+    return [decode_telemetry(f.payload) for f in decoded if f.frame_type is FrameType.TELEMETRY]
 
 
 def power(state: SpacecraftState) -> PowerSnapshot:
@@ -361,7 +381,7 @@ def test_under_transmitter_off_commands_are_executed_but_not_acknowledged() -> N
     # #60 / ADR-0007 §5, with the real flight computer (#51): capacity 0, so it
     # suppresses the ACK by its ordinary outbound rule and counts it; SilTarget adds no
     # suppression of its own and passes the count on in the hand-over to tick N+1.
-    rig = RealRig(boot=SHORT_BOOT)
+    rig = RealRig(config=SHORT_BOOT)
     rig.target.advance(10 * TICK)
     assert mode_of(rig) is Mode.NOMINAL
     rig.target.receive()
@@ -374,9 +394,10 @@ def test_under_transmitter_off_commands_are_executed_but_not_acknowledged() -> N
     assert mode_of(rig) is Mode.SCIENCE  # executed
     assert downlink_n == [] and tick_n.downlink_frames == ()
     assert tick_n.traffic.sent_bytes == 0
-    assert tick_n.traffic.outbound_suppressed_count == 1  # the ACK
+    # The ACK, and the telemetry frame the mode change makes due (#55).
+    assert tick_n.traffic.outbound_suppressed_count == 2
     assert tick_n.traffic.uplink_lost_count == 0
-    assert rig.target.handover_traffic.outbound_suppressed_count == 1  # for tick N+1
+    assert rig.target.handover_traffic.outbound_suppressed_count == 2  # for tick N+1
 
     # Its effect lands in tick N+1, like any command: the payload is switched on.
     assert rig.tick(command_frame(Command.ping(), sequence=4)) == []
@@ -384,7 +405,8 @@ def test_under_transmitter_off_commands_are_executed_but_not_acknowledged() -> N
     assert rig.last.controls.radio.mode is RadioMode.RX_ONLY
     assert rig.last.traffic.outbound_suppressed_count == 1
 
-    # Nothing to send, nothing suppressed (telemetry arrives with #55).
+    # Nothing to send (no telemetry due until 1 s after the mode change), nothing
+    # suppressed.
     assert rig.tick() == []
     assert rig.last.traffic.outbound_suppressed_count == 0
 
@@ -395,38 +417,35 @@ def test_under_transmitter_off_commands_are_executed_but_not_acknowledged() -> N
     assert rig.last.traffic.outbound_suppressed_count == 0
 
 
-def test_under_transmitter_off_telemetry_is_suppressed_and_counted() -> None:
-    # Telemetry (#55) is not emitted by the real flight computer yet, so the scripted
-    # double stands in: ACK and telemetry are both suppressed and counted. Switch to the
-    # real flight computer with #55 (and add DATA with #56).
-    rig = Rig(telemetry=True)
-    rig.tick()
-    rig.target.inject(fault(TRANSMITTER_OFF, duration_us=3 * TICK))
+def test_under_transmitter_off_telemetry_is_suppressed_and_counted_then_resumes() -> None:
+    # The real flight computer's telemetry (#55) under transmitter_off (#60): the frame
+    # due in a tick with no capacity is suppressed and counted (with the ACK), never
+    # sent later, and the cadence resumes when capacity returns: the next frame is one
+    # period after the suppressed one, with no burst of missed frames. DATA under
+    # transmitter_off waits for #56.
+    rig = RealRig(config=SHORT_BOOT)
+    rig.target.advance(10 * TICK)  # ticks 0-9: the boot-complete beacon in tick 9 (1.0 s)
+    assert [t.mode for t in telemetry(rig.target.receive())] == [Mode.NOMINAL]
+    rig.target.advance(5 * TICK)  # ticks 10-14: next frame due at 2.0 s (tick 19)
+    assert rig.target.receive() == []
+    rig.target.inject(fault(TRANSMITTER_OFF, duration_us=10 * TICK))  # ticks 15-24
 
-    downlink_n = rig.tick(set_attitude(True, sequence=3))
-    tick_n = rig.last
-    assert rig.fc.calls[-1].uplink_frames == (set_attitude(True, sequence=3),)  # received
-    assert downlink_n == [] and tick_n.downlink_frames == ()
-    assert tick_n.traffic.sent_bytes == 0
-    assert tick_n.traffic.outbound_suppressed_count == 2  # the ACK and the telemetry
-    assert tick_n.traffic.uplink_lost_count == 0
-    assert rig.target.handover_traffic.outbound_suppressed_count == 2  # for tick N+1
+    held = [rig.tick(command_frame(Command.ping(), sequence=3))]
+    held += [rig.tick() for _ in range(9)]
+    assert held == [[]] * 10
+    faulted = rig.ticks[-10:]
+    assert all(t.traffic.sent_bytes == 0 for t in faulted)
+    # The ping's ACK in tick 15, the telemetry frame due in tick 19; nothing queued.
+    assert [t.traffic.outbound_suppressed_count for t in faulted] == [1, 0, 0, 0, 1] + [0] * 5
+    assert rig.target.handover_traffic.outbound_suppressed_count == 0
 
-    # Executed: attitude control comes on in tick N+1, like any command.
-    downlink_n1 = rig.tick(ping(4))
-    assert tick_n.next_controls.attitude.enabled
-    assert rig.last.controls.attitude.enabled
-    assert attitude_power(rig.last) > 0.0
-    assert downlink_n1 == []
-    assert rig.last.traffic.outbound_suppressed_count == 2
-
-    # Telemetry alone is suppressed in every tick the fault holds.
-    assert rig.tick() == []
-    assert rig.last.traffic.outbound_suppressed_count == 1
-
-    # Released: ACK and telemetry go out again.
-    downlink = rig.tick(ping(5))
-    assert ack_sequence(downlink[0]) == 5 and is_telemetry(downlink[1])
+    # Capacity is back from tick 25; the next frame is due at 3.0 s (tick 29).
+    after = [rig.tick() for _ in range(5)]
+    assert after[:4] == [[]] * 4
+    [frame] = telemetry(after[4])
+    assert (frame.mode, frame.uptime_ms) == (Mode.NOMINAL, 3000)
+    # Suppressed frames used no sequence number: the beacon was 0, this is 1.
+    assert decode_frame(after[4][0]).sequence == 1
     assert rig.last.traffic.outbound_suppressed_count == 0
 
 
@@ -592,7 +611,7 @@ NOMINAL_CONTROLS = controls_for_mode(Mode.NOMINAL)
 
 def nominal_real_rig() -> RealRig:
     """The real flight computer with a 1 s boot, run until NOMINAL's controls apply."""
-    rig = RealRig(boot=SHORT_BOOT)
+    rig = RealRig(config=SHORT_BOOT)
     rig.target.advance(12 * TICK)
     assert mode_of(rig) is Mode.NOMINAL
     assert rig.last.controls == NOMINAL_CONTROLS
@@ -672,7 +691,7 @@ def test_forced_reset_holds_the_flight_computer_for_its_duration() -> None:
 def test_forced_reset_hold_keeps_scripted_controls_and_reboots_at_the_hold_end() -> None:
     # The same hold with the scripted double, which records its reboot time and
     # whose controls can be forced, to show exactly which controls are held.
-    rig = Rig(boot_controls=BOOT_CONTROLS, telemetry=True)
+    rig = Rig(boot_controls=BOOT_CONTROLS)
     rig.tick()
     rig.fc.force_controls(ATTITUDE_ON)
     rig.tick()
@@ -680,12 +699,13 @@ def test_forced_reset_hold_keeps_scripted_controls_and_reboots_at_the_hold_end()
     rig.target.inject(fault(FORCED_RESET, duration_us=3 * TICK))
     rig.target.advance(3 * TICK)
     assert all(t.controls == ATTITUDE_ON for t in rig.ticks[-3:])
-    assert len(rig.fc.calls) == calls_before  # not stepped, no telemetry
+    assert len(rig.fc.calls) == calls_before  # not stepped, so nothing sent
     assert rig.target.receive() == []
     assert rig.fc.reboots == []
-    downlink = rig.tick()
+    downlink = rig.tick(ping(9))
     assert rig.fc.reboots == [5 * TICK]
-    assert len(downlink) == 1 and is_telemetry(downlink[0])
+    assert len(rig.fc.calls) == calls_before + 1  # stepped again after the reboot
+    assert [ack_sequence(frame) for frame in downlink] == [9]
     assert rig.last.next_controls == BOOT_CONTROLS
 
 

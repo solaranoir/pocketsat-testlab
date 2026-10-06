@@ -1,10 +1,13 @@
 """Tests for ``SilTarget`` (#59): wiring, tick order, frame flow, reset, and determinism.
 
-Most tests drive ``SilTarget`` with the real subsystems and a
-:class:`ScriptedFlightComputer` (``_scripted_flight_computer.py``), because the real
-flight computer does not yet send telemetry (#55, #56) and has no command that switches
-the radio directly. The tests that need only BOOT and the controls path use the real
-flight computer; its command handling end to end is ``test_command_dispatch_sil.py``.
+Most wiring tests drive ``SilTarget`` with the real subsystems and a
+:class:`ScriptedFlightComputer` (``_scripted_flight_computer.py``): the real flight
+computer has no command that switches the radio or attitude control directly, and the
+double records every call, so a test can compare what ``SilTarget`` delivered with what
+the flight computer produced. The tests of downlink bytes (determinism, seeds, starting
+states, the one-orbit run), full-duplex traffic, and capacity suppression use the real
+flight computer and its real telemetry (#55); so do those that need only BOOT and the
+controls path. Its command handling end to end is ``test_command_dispatch_sil.py``.
 
 Not here, by design:
 
@@ -21,7 +24,6 @@ Not here, by design:
 import dataclasses
 import itertools
 import time
-from collections.abc import Callable
 
 import pytest
 from _scripted_flight_computer import (
@@ -35,9 +37,24 @@ from _scripted_flight_computer import (
 
 from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.environment import NominalEnvironment
-from pocketsat.flight import FlightComputer, Mode, SpacecraftReadings, controls_for_mode
+from pocketsat.flight import (
+    FlightComputer,
+    FlightComputerConfig,
+    Mode,
+    SpacecraftReadings,
+    controls_for_mode,
+)
+from pocketsat.flight.boot import BootConfig
+from pocketsat.flight.telemetry import TelemetryConfig
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
-from pocketsat.messages import Command, DecodeReason, decode_ack, encode_command
+from pocketsat.messages import (
+    ACK_FRAME_SIZE,
+    TELEMETRY_FRAME_SIZE,
+    Command,
+    DecodeReason,
+    decode_ack,
+    encode_command,
+)
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -111,6 +128,38 @@ def real_target(**kwargs: object) -> tuple[SilTarget, list[SilTick]]:
     ticks: list[SilTick] = []
     target = SilTarget(tick_observer=ticks.append, **kwargs)  # type: ignore[arg-type]
     return target, ticks
+
+
+TELEMETRY_EVERY_TICK = FlightComputerConfig(
+    boot=BootConfig(duration_us=0), telemetry=TelemetryConfig.uniform(TICK)
+)
+"""The real flight computer leaving BOOT in its first step and sending telemetry in
+every tick after it (#55), so every tick has a TELEMETRY frame behind its ACKs."""
+
+
+def telemetry_every_tick_target() -> tuple[SilTarget, list[SilTick]]:
+    """A reset ``SilTarget`` with the real flight computer under
+    :data:`TELEMETRY_EVERY_TICK`, and its tick records."""
+    target, ticks = real_target(
+        flight_computer_factory=lambda: FlightComputer(TELEMETRY_EVERY_TICK)
+    )
+    target.reset(7)
+    return target, ticks
+
+
+def real_ping(sequence: int) -> bytes:
+    """A real PING COMMAND frame (#52)."""
+    return encode_frame(Frame(FrameType.COMMAND, sequence, encode_command(Command.ping())))
+
+
+def frame_types(frames: list[bytes]) -> list[FrameType]:
+    return [decode_frame(frame).frame_type for frame in frames]
+
+
+def ack_sequences(frames: list[bytes]) -> list[int]:
+    """The command sequence each real ACK frame among ``frames`` answers."""
+    decoded = [decode_frame(frame) for frame in frames]
+    return [decode_ack(f.payload).sequence for f in decoded if f.frame_type is FrameType.ACK]
 
 
 # --- Interface, capabilities, construction ---------------------------------------------
@@ -402,14 +451,17 @@ def test_rx_only_receives_and_executes_but_cannot_reply() -> None:
 
 
 def test_full_duplex_commands_received_while_sending() -> None:
-    # ADR-0004 §10: the radio receives and transmits in the same tick.
-    rig = Rig(telemetry=True)
+    # ADR-0004 §10: the radio receives and transmits in the same tick. The real flight
+    # computer answers each PING and sends its telemetry behind the ACK (#55).
+    target, ticks = telemetry_every_tick_target()
     for sequence in range(1, 6):
-        downlink = rig.tick(ping(sequence))
-        assert rig.fc.calls[-1].uplink_frames == (ping(sequence),)
-        assert [ack_sequence(f) for f in downlink[:1]] == [sequence]
-        assert is_telemetry(downlink[-1])
-        comms = rig.last.state.get("comms", CommsSnapshot).truth
+        target.send(real_ping(sequence))
+        target.advance(TICK)
+        downlink = target.receive()
+        assert ticks[-1].delivered_uplink == (real_ping(sequence),)
+        assert frame_types(downlink) == [FrameType.ACK, FrameType.TELEMETRY]
+        assert ack_sequences(downlink) == [sequence]
+        comms = ticks[-1].state.get("comms", CommsSnapshot).truth
         assert comms.receiver_on and comms.transmitter_on
 
 
@@ -471,14 +523,20 @@ def test_traffic_record_values_per_tick() -> None:
 
 
 def test_suppressed_count_is_passed_on_when_capacity_runs_out() -> None:
-    # 120 bytes of capacity (#44) hold ten 12-byte ACKs. With twelve commands, two ACKs
-    # and the 36-byte telemetry frame do not fit and are suppressed.
-    rig = Rig(telemetry=True)
-    downlink = rig.tick(*(ping(n) for n in range(1, 13)))
-    assert [ack_sequence(f) for f in downlink] == list(range(1, 11))
-    assert sum(len(f) for f in downlink) == NOMINAL_CONFIG.comms.transmit_capacity_bytes
-    assert rig.last.traffic.outbound_suppressed_count == 3
-    assert rig.last.traffic.sent_bytes == sum(len(f) for f in downlink)
+    # 120 bytes of capacity (#44) hold eight 14-byte ACKs (#51) with 8 bytes left. With
+    # twelve commands, four ACKs and the 36-byte telemetry frame (#55) do not fit and
+    # are suppressed by the real flight computer; SilTarget passes the count on.
+    capacity = NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    assert (capacity // ACK_FRAME_SIZE, TELEMETRY_FRAME_SIZE) == (8, 36)
+    target, ticks = telemetry_every_tick_target()
+    for n in range(1, 13):
+        target.send(real_ping(n))
+    target.advance(TICK)
+    downlink = target.receive()
+    assert ack_sequences(downlink) == list(range(1, 9))
+    assert frame_types(downlink) == [FrameType.ACK] * 8  # no room left for telemetry
+    assert ticks[-1].traffic.outbound_suppressed_count == 5
+    assert ticks[-1].traffic.sent_bytes == sum(len(f) for f in downlink) == 8 * ACK_FRAME_SIZE
 
 
 def test_lost_count_is_in_the_handover_record() -> None:
@@ -545,11 +603,6 @@ def _run(target: SilTarget, seed: int, ticks: int) -> tuple[list[bytes], list[Si
     return downlink, records
 
 
-def _scripted_target(**kwargs: object) -> SilTarget:
-    factory: Callable[[], FlightComputer] = lambda: ScriptedFlightComputer(telemetry=True)  # noqa: E731
-    return SilTarget(flight_computer_factory=factory, **kwargs)  # type: ignore[arg-type]
-
-
 def test_reset_rebuilds_the_flight_computer_and_subsystems() -> None:
     rig = Rig()
     first = rig.fc
@@ -571,20 +624,22 @@ def test_reset_discards_queued_uplink_and_undrained_downlink() -> None:
 
 
 def test_same_seed_gives_identical_downlink_bytes() -> None:
-    first, _ = _run(_scripted_target(), seed=11, ticks=600)
-    second, _ = _run(_scripted_target(), seed=11, ticks=600)
-    assert len(first) > 600  # telemetry every tick, plus ACKs
+    # The real flight computer: ACK/NACK frames and its real telemetry (#55), which
+    # carries the seeded sensor noise.
+    first, _ = _run(SilTarget(), seed=11, ticks=600)
+    second, _ = _run(SilTarget(), seed=11, ticks=600)
+    assert frame_types(first).count(FrameType.TELEMETRY) >= 55  # 1 Hz after the boot
     assert first == second
 
 
 def test_different_seed_gives_different_downlink_bytes() -> None:
-    first, _ = _run(_scripted_target(), seed=11, ticks=100)
-    second, _ = _run(_scripted_target(), seed=12, ticks=100)
+    first, _ = _run(SilTarget(), seed=11, ticks=100)
+    second, _ = _run(SilTarget(), seed=12, ticks=100)
     assert first != second
 
 
 def test_reset_after_running_reproduces_the_first_run_exactly() -> None:
-    target = _scripted_target()
+    target = SilTarget()
     downlink_a, ticks_a = _run(target, seed=5, ticks=400)
     _run(target, seed=99, ticks=123)  # something else in between
     downlink_b, ticks_b = _run(target, seed=5, ticks=400)
@@ -594,8 +649,8 @@ def test_reset_after_running_reproduces_the_first_run_exactly() -> None:
 
 def test_different_starting_states_diverge_and_reset_restores_each() -> None:
     low = SpacecraftInitialState(power=PowerInitial(soc=0.4))
-    target_default = _scripted_target()
-    target_low = _scripted_target(initial=low)
+    target_default = SilTarget()
+    target_low = SilTarget(initial=low)
     assert target_low.initial is low
 
     _, default_ticks = _run(target_default, seed=5, ticks=20)
@@ -617,7 +672,8 @@ def test_real_flight_computer_runs_and_is_reproducible() -> None:
     assert downlink_a == downlink_b
     # The real flight computer answers each command (#51): the scripted PING opcode is
     # the real PING (ACK); the scripted attitude opcode is an unknown command (NACK).
-    answers = [decode_ack(decode_frame(frame).payload) for frame in downlink_a]
+    frames = [decode_frame(frame) for frame in downlink_a]
+    answers = [decode_ack(f.payload) for f in frames if f.frame_type is FrameType.ACK]
     assert [(a.command_id, a.reason) for a in answers] == [
         (0x01, None),
         (0x20, DecodeReason.UNKNOWN_COMMAND),
@@ -636,11 +692,11 @@ RUN_TICKS = ORBIT_TICKS + 600  # one orbit, ending in eclipse, then a minute of 
 
 @pytest.mark.slow
 def test_one_orbit_is_deterministic_and_eclipse_reaches_the_subsystems() -> None:
-    target = _scripted_target()
+    target = SilTarget()
     started = time.perf_counter()
     downlink_a, ticks_a = _run(target, seed=42, ticks=RUN_TICKS)
     per_tick_us = (time.perf_counter() - started) / RUN_TICKS * 1e6
-    print(f"\nSilTarget, scripted flight computer with telemetry: {per_tick_us:.1f} us/tick")
+    print(f"\nSilTarget, real flight computer with telemetry: {per_tick_us:.1f} us/tick")
 
     generation = [t.state.get("power", PowerSnapshot).truth.generation_w for t in ticks_a]
     sunlit = [t.environment.sunlit for t in ticks_a]

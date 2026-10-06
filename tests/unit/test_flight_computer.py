@@ -438,7 +438,13 @@ def test_flight_computer_is_not_in_step_order() -> None:
 
 
 @pytest.mark.parametrize(
-    "first", ["pocketsat.messages", "pocketsat.flight", "pocketsat.flight.computer"]
+    "first",
+    [
+        "pocketsat.messages",
+        "pocketsat.flight",
+        "pocketsat.flight.computer",
+        "pocketsat.flight.telemetry",
+    ],
 )
 def test_imports_have_no_cycle_whichever_module_comes_first(first: str) -> None:
     # pocketsat.messages imports Mode from pocketsat.flight.modes; see pocketsat.flight.

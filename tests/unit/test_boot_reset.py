@@ -1,7 +1,8 @@
 """Tests for the BOOT sequence, the RESET reboot, and the uptime counter (#49).
 
-The flight computer is fed readings from fake snapshots. Commands (#51) don't exist
-yet, so :class:`CommandStub` stands in for the dispatcher: it raises scripted mode
+The flight computer is fed readings from fake snapshots. :class:`CommandStub` stands in
+for the command dispatcher (#51), so each test raises exactly the events it needs: it
+raises scripted mode
 events in the execute-commands phase and queues a marker frame for each RESET, as #51
 queues the RESET's ACK there.
 """
@@ -16,6 +17,7 @@ import pytest
 from pocketsat.flight import (
     EventKind,
     FlightComputer,
+    FlightComputerConfig,
     Mode,
     ModeEvent,
     ModeState,
@@ -40,6 +42,7 @@ from pocketsat.flight.safety import (
     active_flags,
     consistency_failures,
 )
+from pocketsat.frame import FrameType, decode_frame
 from pocketsat.messages import (
     UINT16_MAX,
     UINT32_MAX,
@@ -168,9 +171,9 @@ def test_boot_config_rejects_bad_durations(bad: Any, error: type[Exception]) -> 
         BootConfig(duration_us=bad)
 
 
-def test_flight_computer_rejects_a_bad_boot_config() -> None:
+def test_flight_computer_config_rejects_a_bad_boot_config() -> None:
     with pytest.raises(TypeError, match="BootConfig"):
-        FlightComputer(boot=5_000_000)  # type: ignore[arg-type]
+        FlightComputerConfig(boot=5_000_000)  # type: ignore[arg-type]
 
 
 def test_boot_complete_once_the_uptime_reaches_the_duration() -> None:
@@ -228,7 +231,9 @@ def test_boot_complete_is_raised_exactly_once() -> None:
 def test_boot_duration_is_configurable_and_rounds_up_to_whole_ticks(
     duration_us: int, boot_ticks: int
 ) -> None:
-    driver = Driver(CommandStub(boot=BootConfig(duration_us=duration_us)))
+    driver = Driver(
+        CommandStub(config=FlightComputerConfig(boot=BootConfig(duration_us=duration_us)))
+    )
     driver.step(ticks=boot_ticks + 2)
     assert driver.modes == [Mode.BOOT] * (boot_ticks - 1) + [Mode.NOMINAL] * 3
     # BOOT's controls apply to tick 0 even when the boot completes in its step.
@@ -236,7 +241,7 @@ def test_boot_duration_is_configurable_and_rounds_up_to_whole_ticks(
 
 
 def test_boot_counts_uptime_from_power_on_at_any_time() -> None:
-    fc = CommandStub(boot=BootConfig(duration_us=3 * TICK_US))
+    fc = CommandStub(config=FlightComputerConfig(boot=BootConfig(duration_us=3 * TICK_US)))
     fc.reset(now_us=10 * TICK_US)
     fc.step((), NOMINAL_READINGS, 12 * TICK_US)
     assert mode_of(fc) is Mode.BOOT
@@ -255,10 +260,18 @@ def test_boot_controls_are_held_throughout_boot() -> None:
         assert controls.radio == controls_for_mode(Mode.NOMINAL).radio  # RX_TX
 
 
-def test_no_frames_are_sent_by_the_boot_sequence() -> None:
+def test_boot_sends_nothing_but_the_boot_complete_beacon() -> None:
+    # No telemetry in BOOT (#55); the first frame is the beacon, sent in the step that
+    # completes the boot, showing NOMINAL. The next is one NOMINAL period later.
     driver = Driver(CommandStub())
     driver.step(ticks=BOOT_TICKS + 5)
-    assert all(frames == () for frames in driver.frames)
+    assert all(frames == () for frames in driver.frames[: BOOT_TICKS - 1])
+    [beacon] = driver.frames[BOOT_TICKS - 1]
+    frame = decode_frame(beacon)
+    assert frame.frame_type is FrameType.TELEMETRY and frame.sequence == 0
+    telemetry = decode_telemetry(frame.payload)
+    assert (telemetry.mode, telemetry.uptime_ms, telemetry.boot_count) == (Mode.NOMINAL, 5000, 0)
+    assert all(frames == () for frames in driver.frames[BOOT_TICKS:])
 
 
 # --- RESET from every mode ------------------------------------------------------------------
@@ -395,7 +408,7 @@ def test_safe_during_boot_after_a_reset() -> None:
 
 
 def test_safe_and_boot_complete_in_the_same_tick_gives_safe() -> None:
-    fc = CommandStub(boot=BootConfig(duration_us=N * TICK_US))
+    fc = CommandStub(config=FlightComputerConfig(boot=BootConfig(duration_us=N * TICK_US)))
     driver = Driver(fc)
     driver.step(CRITICAL_READINGS, ticks=N)
     tick = fc.ticks[-1]
@@ -478,7 +491,7 @@ def test_uptime_ms_is_exposed_for_telemetry() -> None:
 
 
 def test_uptime_ms_wraps_on_the_wire_after_49_7_days() -> None:
-    fc = FlightComputer(boot=BootConfig(duration_us=0))
+    fc = FlightComputer(FlightComputerConfig(boot=BootConfig(duration_us=0)))
     wrap_us = (UINT32_MAX + 1) * US_PER_MS  # 2**32 ms, about 49.7 days
     fc.step((), NOMINAL_READINGS, wrap_us - US_PER_MS)
     assert telemetry_of(fc) == (UINT32_MAX, 0)

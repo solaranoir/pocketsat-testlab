@@ -249,18 +249,20 @@ Every multi-orbit test runs the model at the 100 ms tick (55,200 ticks per 92-mi
 | One subsystem's `step()` plus `snapshot()`, per tick, against the shared fakes | about **15 µs on CI** | guidance only: printed (marked "over guidance" if above), never a failure |
 | Each CI test job (lint, the fast suite, each slow shard), per operating system | at most **5 minutes** | job times are recorded in the PR that changes them; the slow jobs print their 10 slowest tests (`--durations=10`) |
 
-**The benchmark.** Each figure is the median of 5 runs, each a fresh `reset(seed)` followed by a fixed number of timed ticks. The full-stack loop is the orchestrator's: sample `NominalEnvironment`, `apply_environment`, `advance` one tick, drain `receive()`. It runs twice: with the real flight computer in SCIENCE (answering a PING every 10 s; this is the budgeted figure), and with the test-only scripted flight computer encoding a telemetry frame every tick, the most telemetry #55 can ask for. Each subsystem is timed alone in SCIENCE controls, with the four default fakes (#76) on its board and environment states spread over a whole orbit. The benchmark is part of the fast suite (about 1 s). Wall-clock timing is allowed there: the determinism guard covers only simulation code in `src/pocketsat`.
+**The benchmark.** Each figure is the median of 5 runs, each a fresh `reset(seed)` followed by a fixed number of timed ticks. The full-stack loop is the orchestrator's: sample `NominalEnvironment`, `apply_environment`, `advance` one tick, drain `receive()`. It runs twice, both with the real flight computer in SCIENCE answering a PING every 10 s: at the default telemetry cadence (#55: one frame a second in SCIENCE; this is the budgeted figure), and with telemetry every tick (`TelemetryConfig.uniform(tick)`), the most the scheduler can be configured for. Until #55 the second run used a test-only scripted flight computer. Each subsystem is timed alone in SCIENCE controls, with the four default fakes (#76) on its board and environment states spread over a whole orbit. The benchmark is part of the fast suite (about 1 s). Wall-clock timing is allowed there: the determinism guard covers only simulation code in `src/pocketsat`.
 
-**Measured (2026-10-05)**, µs per tick:
+**Measured (2026-10-05; the #55 rows 2026-10-06)**, µs per tick:
 
 | | Apple Silicon laptop | CI ubuntu-latest | CI macos-latest |
 |---|---|---|---|
-| Full stack, real flight computer | 57 | 61, 61 | 46, 26 |
-| Full stack, telemetry frame every tick (table CRC) | 66 | 71, 71 | 70, 30 |
-| Full stack, telemetry frame every tick (old bit-by-bit CRC) | 97 | — | — |
+| Full stack, real flight computer, before #55 (no telemetry) | 57 | 61, 61 | 46, 26 |
+| Full stack, scripted double, telemetry frame every tick (table CRC) | 66 | 71, 71 | 70, 30 |
+| Full stack, scripted double, telemetry frame every tick (old bit-by-bit CRC) | 97 | — | — |
+| Full stack, real flight computer, default telemetry cadence (#55, 2026-10-06) | 61 | 33 | 72 |
+| Full stack, real flight computer, telemetry every tick (#55, 2026-10-06) | 81 | 46 | 76 |
 | power / thermal / attitude / payload / comms | 9.0 / 7.3 / 9.2 / 9.6 / 0.3 | 7.0 / 5.8 / 7.4 / 8.2 / 0.2 | 8.5 / 6.6 / 7.4 / 10.7 / 0.2 |
 
-CI figures are from two runs of the same commit; macOS runners varied by almost a factor of two between runs. GitHub's Linux runners measured about as fast as the laptop for this single-threaded code, not the 1.5 to 2.5 times slower first assumed, so the 100 µs budget has about 40% headroom with the real flight computer and about 30% with telemetry every tick.
+CI figures are from two runs of the same commit; macOS runners varied by almost a factor of two between runs. GitHub's Linux runners measured about as fast as the laptop for this single-threaded code, not the 1.5 to 2.5 times slower first assumed, so the 100 µs budget has about 40% headroom with the real flight computer and about 30% with telemetry every tick. #55's figures are from one CI run; on the same laptop run, the default cadence costs about 4 µs per tick over no telemetry (57 → 61) and telemetry every tick about 24 µs (one frame encoded, framed, and drained per tick); that CI run's ubuntu runner was unusually fast.
 
 **Frame CRC.** The bit-by-bit CRC-16/CCITT-FALSE cost about 12 µs per telemetry frame, which took the telemetry-every-tick stack to about 97 µs. `pocketsat.frame` now uses a 256-entry lookup table (one lookup per byte, integer-only, so portable under ADR-0006), about six times faster, with byte-identical output: the shared vectors pass unchanged, and a unit test compares it with the bitwise reference and with `binascii.crc_hqx(data, 0xFFFF)` over several hundred inputs.
 
