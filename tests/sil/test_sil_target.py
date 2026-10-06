@@ -11,9 +11,9 @@ Not here, by design:
 - Target faults are tested in ``test_sil_faults.py`` (#60). The fault half of the
   ADR-0004 §2 timeline ("a fault injected before tick N acts in tick N") is here, next
   to the command half.
-- The ``TestTarget`` contract suite and the 10,000-tick determinism test are #61. Since
-  #51 a PING frame gets an ACK from the real flight computer, the stimulus the contract
-  suite needs.
+- The ``TestTarget`` contract suite runs against ``SilTarget`` with the real flight
+  computer (``tests/contract``, #61); the 10,000-tick determinism test and the seed and
+  mid-run reset guards are in ``test_sil_determinism.py`` (#61).
 - ``RadioTraffic`` in the controls and comms' counters are #98; here the per-tick
   values are checked in ``SilTick.traffic`` and ``SilTarget.handover_traffic``.
 """
