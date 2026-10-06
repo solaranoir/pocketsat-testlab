@@ -238,3 +238,32 @@ payload = FakeSubsystem("payload", idle, script={10: replace_truth(idle, power_w
 ```
 
 The fakes use no randomness or wall-clock time, and the determinism guard scans them with the rest of `pocketsat`.
+
+## Performance budget (#78)
+
+Every multi-orbit test runs the model at the 100 ms tick (55,200 ticks per 92-minute orbit), so simulation speed is budgeted. The budgets are revisable by a PR that states and justifies the change with new measurements.
+
+| Budget | Value | How it is checked |
+|---|---|---|
+| Full stack: five real subsystems, the flight computer, and `SilTarget`, per tick | at most **100 µs on CI Linux** (about 5.5 s per orbit, leaving headroom under #63's 10 s) | `tests/sil/test_performance_budget.py` prints µs per tick on every run; **in CI only** (`CI=true`) it **fails above twice the budget** (200 µs), so it catches real slowdowns without failing on a noisy shared runner. Locally it only prints: one run on a developer machine at load average ~15 measured 392 µs, against 57 to 62 µs unloaded |
+| One subsystem's `step()` plus `snapshot()`, per tick, against the shared fakes | about **15 µs on CI** | guidance only: printed (marked "over guidance" if above), never a failure |
+| Each CI test job (lint, the fast suite, each slow shard), per operating system | at most **5 minutes** | job times are recorded in the PR that changes them; the slow jobs print their 10 slowest tests (`--durations=10`) |
+
+**The benchmark.** Each figure is the median of 5 runs, each a fresh `reset(seed)` followed by a fixed number of timed ticks. The full-stack loop is the orchestrator's: sample `NominalEnvironment`, `apply_environment`, `advance` one tick, drain `receive()`. It runs twice: with the real flight computer in SCIENCE (answering a PING every 10 s; this is the budgeted figure), and with the test-only scripted flight computer encoding a telemetry frame every tick, the most telemetry #55 can ask for. Each subsystem is timed alone in SCIENCE controls, with the four default fakes (#76) on its board and environment states spread over a whole orbit. The benchmark is part of the fast suite (about 1 s). Wall-clock timing is allowed there: the determinism guard covers only simulation code in `src/pocketsat`.
+
+**Measured (2026-10-05)**, µs per tick:
+
+| | Apple Silicon laptop | CI ubuntu-latest | CI macos-latest |
+|---|---|---|---|
+| Full stack, real flight computer | 57 | 61, 61 | 46, 26 |
+| Full stack, telemetry frame every tick (table CRC) | 66 | 71, 71 | 70, 30 |
+| Full stack, telemetry frame every tick (old bit-by-bit CRC) | 97 | — | — |
+| power / thermal / attitude / payload / comms | 9.0 / 7.3 / 9.2 / 9.6 / 0.3 | 7.0 / 5.8 / 7.4 / 8.2 / 0.2 | 8.5 / 6.6 / 7.4 / 10.7 / 0.2 |
+
+CI figures are from two runs of the same commit; macOS runners varied by almost a factor of two between runs. GitHub's Linux runners measured about as fast as the laptop for this single-threaded code, not the 1.5 to 2.5 times slower first assumed, so the 100 µs budget has about 40% headroom with the real flight computer and about 30% with telemetry every tick.
+
+**Frame CRC.** The bit-by-bit CRC-16/CCITT-FALSE cost about 12 µs per telemetry frame, which took the telemetry-every-tick stack to about 97 µs. `pocketsat.frame` now uses a 256-entry lookup table (one lookup per byte, integer-only, so portable under ADR-0006), about six times faster, with byte-identical output: the shared vectors pass unchanged, and a unit test compares it with the bitwise reference and with `binascii.crc_hqx(data, 0xFFFF)` over several hundred inputs.
+
+**Remaining hot spots** (cProfile of the real-flight-computer stack, share of a tick): the subsystems' `step()` about 58%, of which `portable_normal` noise is about 17% of the whole tick (7 draws of 12 uniforms each); the flight computer's step about 23%, mostly the safety rules; rebuilding mirrored snapshots (`_values` via `dataclasses.fields`) about 8%. With telemetry every tick, `encode_telemetry` is about 20% of the tick and the CRC under 3%. None needs work while the stack is inside its budget.
+
+**CI suite time.** The fast suite takes about 13 s on each OS. The slow suite (`pytest -m slow`) took 178 s on ubuntu and 166 s on macOS in a single job on `main` before #78 (jobs 3m13s and 3m02s), close to the 5-minute budget with #55, #56, #63 and #64 still to add. It now runs as two shards per OS in parallel jobs: shard 1 is the files in `SLOW_SHARD_1_FILES` in `.github/workflows/ci.yml` (the three-stack and multi-orbit SIL stories), shard 2 is every other slow test, so a new slow test always runs. In the final CI run the shards took 99 and 68 s of pytest on ubuntu and 104 and 74 s on macOS (jobs 1m21s to 2m03s); runner speed varied by about 30% between runs. If a shard approaches 4 minutes, move whole files into `SLOW_SHARD_1_FILES` to rebalance, or add a shard; never coarsen the tick or skip a test on PRs.

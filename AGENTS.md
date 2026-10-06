@@ -70,7 +70,9 @@ Before opening a PR, run:
 uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest
 ```
 
-Multi-orbit story and integration tests are marked `@pytest.mark.slow` and skipped by a plain `pytest` run. If your change touches simulation behavior, also run `uv run pytest -m slow`; CI runs them on every PR in a separate job. Mark any test that takes more than about a second `slow`.
+Multi-orbit story and integration tests are marked `@pytest.mark.slow` and skipped by a plain `pytest` run. If your change touches simulation behavior, also run `uv run pytest -m slow`; CI runs them on every PR in separate jobs that run in parallel with the fast suite and block merging, split into two shards per OS (`SLOW_SHARD_1_FILES` in `.github/workflows/ci.yml`; every slow test not listed there runs in shard 2). Mark any test that takes more than about a second `slow`.
+
+Performance budgets (#78, details in `docs/spacecraft.md`, "Performance budget"): the full SIL stack costs at most 100 µs per tick on CI Linux, and each CI test job (the fast suite, and each slow shard) takes at most 5 minutes per operating system. `tests/sil/test_performance_budget.py` (fast suite) prints µs per tick on every run as `[perf #78]` lines. It fails above twice the budget (200 µs) **only in CI**, when the `CI` environment variable is `true` (GitHub Actions sets it); locally it only prints, because a busy developer machine can measure several times slower. It prints which mode it ran in, and asserts that the gate is active whenever `GITHUB_ACTIONS` is `true`. Run `CI=true uv run pytest tests/sil/test_performance_budget.py` to apply the CI gate locally. If a PR adds multi-orbit tests, record their runtime in the PR; if a slow shard approaches 4 minutes, move whole files into `SLOW_SHARD_1_FILES` to rebalance (or add a shard) rather than coarsening the tick or skipping tests.
 
 ## Workflow
 
