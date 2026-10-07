@@ -1,11 +1,14 @@
 """A scripted flight computer for testing ``SilTarget``'s wiring (#59).
 
-The real :class:`~pocketsat.flight.FlightComputer` answers commands (#51) but does not
-yet emit telemetry (#55, #56), and no real command switches the radio or attitude
-control directly. To test the frame flow, the tick timing, and the radio rules now,
-these tests give ``SilTarget`` this subclass through its ``flight_computer_factory``
-seam. The real flight computer's commands through ``SilTarget`` are tested in
-``test_command_dispatch_sil.py``.
+The real :class:`~pocketsat.flight.FlightComputer` answers commands (#51) and sends
+telemetry at its per-mode cadence (#55), but no real command switches the radio or
+attitude control directly, and its controls can't be forced from a test. To test the
+frame flow, the tick timing, and the radio rules, these tests give ``SilTarget`` this
+subclass through its ``flight_computer_factory`` seam; it also records every call, so a
+test can compare what ``SilTarget`` delivered with what the flight computer produced.
+Tests of downlink bytes, telemetry, and capacity suppression use the real flight
+computer (``test_sil_target.py``, ``test_sil_faults.py``, ``test_sil_determinism.py``);
+its commands through ``SilTarget`` are tested in ``test_command_dispatch_sil.py``.
 
 It is deliberately small and is **not** a model of the real flight software:
 
@@ -15,9 +18,10 @@ It is deliberately small and is **not** a model of the real flight software:
   (an ACK frame whose payload is the command's sequence number), and the radio and
   attitude commands change the controls it produces at step f, so they act in the
   next tick like any command (ADR-0004 §2).
-- If ``telemetry`` is set, it emits a real TELEMETRY frame (#54 encoder) every tick
-  after the ACKs, built from the readings it was given, so the downlink bytes carry the
-  seeded sensor noise.
+- If ``telemetry`` is set, it emits a TELEMETRY frame (#54 encoder) every tick after
+  the ACKs, built from the readings it was given: a second frame type in every tick for
+  the wiring tests. It is not the real scheduler (#55), which follows a per-mode
+  cadence and numbers its frames.
 - It follows ADR-0004 §10's outbound rule: frames go out in priority order (ACK, then
   telemetry) while they fit ``transmit_capacity_bytes``; the rest are dropped and
   counted in ``outbound_suppressed_count``.

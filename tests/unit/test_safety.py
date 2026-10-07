@@ -24,6 +24,7 @@ import pytest
 from pocketsat.flight import (
     EventKind,
     FlightComputer,
+    FlightComputerConfig,
     Mode,
     ModeEvent,
     Outcome,
@@ -436,7 +437,7 @@ class ScriptedComputer(FlightComputer):
     ) -> None:
         self.script = dict(script or {})
         self.ticks: list[TickContext] = []
-        super().__init__(safety=safety)
+        super().__init__(FlightComputerConfig(safety=safety))
 
     def _execute_commands(self, tick: TickContext) -> None:
         tick.mode_events.extend(self.script.get(len(self.ticks), ()))
@@ -490,9 +491,9 @@ def driver_in(mode: Mode, safety: SafetyConfig = DEFAULT_SAFETY_CONFIG) -> Drive
     return driver
 
 
-def test_flight_computer_rejects_a_bad_safety_config() -> None:
+def test_flight_computer_config_rejects_a_bad_safety_config() -> None:
     with pytest.raises(TypeError, match="SafetyConfig"):
-        FlightComputer(safety=10)  # type: ignore[arg-type]
+        FlightComputerConfig(safety=10)  # type: ignore[arg-type]
 
 
 def test_nominal_readings_raise_nothing() -> None:

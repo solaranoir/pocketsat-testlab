@@ -1,12 +1,14 @@
-"""Flight computer: modes, and later command handling and telemetry (epic #45).
+"""Flight computer: modes, command handling, and telemetry (epic #45).
 
 The flight computer is part of the SIL spacecraft model but outside ``STEP_ORDER``: it
 runs after every subsystem each tick and produces the controls for the next one
 (ADR-0004 §2). :class:`FlightComputer` (#101) is the component, with the single
-``step()`` entry point; :mod:`pocketsat.flight.modes` (#47) is its mode state machine,
-:mod:`pocketsat.flight.safety` (#48) its automatic safe-mode and fault entry rules, and
-:mod:`pocketsat.flight.boot` (#49) its boot settings and uptime counter (import those
-two from their modules).
+``step()`` entry point, configured by one :class:`FlightComputerConfig`;
+:mod:`pocketsat.flight.modes` (#47) is its mode state machine,
+:mod:`pocketsat.flight.safety` (#48) its automatic safe-mode and fault entry rules,
+:mod:`pocketsat.flight.boot` (#49) its boot settings and uptime counter, and
+:mod:`pocketsat.flight.telemetry` (#55) its telemetry cadence and schedule (import those
+three from their modules).
 
 Import order: :mod:`pocketsat.messages` imports :class:`Mode` from
 :mod:`pocketsat.flight.modes`, which imports only :mod:`pocketsat.spacecraft.controls`,
@@ -19,8 +21,10 @@ the module, ``from pocketsat import messages``, and reads its names at call time
 """
 
 from pocketsat.flight.computer import (
+    DEFAULT_FLIGHT_COMPUTER_CONFIG,
     PHASE_ORDER,
     FlightComputer,
+    FlightComputerConfig,
     FlightComputerOutput,
     SpacecraftReadings,
 )
@@ -43,11 +47,13 @@ from pocketsat.flight.modes import (
 __all__ = [
     "ALL_EVENTS",
     "COMMANDABLE_TARGETS",
+    "DEFAULT_FLIGHT_COMPUTER_CONFIG",
     "INITIAL_STATE",
     "PHASE_ORDER",
     "RETURN_MODES",
     "EventKind",
     "FlightComputer",
+    "FlightComputerConfig",
     "FlightComputerOutput",
     "Mode",
     "ModeEvent",

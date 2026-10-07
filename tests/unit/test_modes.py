@@ -423,6 +423,9 @@ def test_public_exports() -> None:
             "FlightComputer",
             "FlightComputerOutput",
             "SpacecraftReadings",
+            # Its settings record (#55).
+            "DEFAULT_FLIGHT_COMPUTER_CONFIG",
+            "FlightComputerConfig",
             "Mode",
             "ModeEvent",
             "ModeState",

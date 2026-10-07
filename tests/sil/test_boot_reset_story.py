@@ -2,8 +2,9 @@
 
 The real subsystems and the real :class:`FlightComputer`, with #51's dispatcher, run
 behind ``SilTarget``. RESET and SET_MODE go in as COMMAND frames with ``send()`` and
-their ACKs come back from ``receive()``. :class:`Recorder` only notes the flight
-computer's mode after each step.
+their ACKs come back from ``receive()``, alongside the real telemetry (#55): nothing in
+BOOT, then the boot-complete beacon. :class:`Recorder` only notes the flight computer's
+mode after each step.
 """
 
 import dataclasses
@@ -13,7 +14,15 @@ from pocketsat.flight import FlightComputer, Mode, RejectReason, controls_for_mo
 from pocketsat.flight.boot import DEFAULT_BOOT_CONFIG
 from pocketsat.flight.safety import DEFAULT_SAFETY_CONFIG
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
-from pocketsat.messages import Command, CommandAck, CommandId, decode_ack, encode_command
+from pocketsat.messages import (
+    Command,
+    CommandAck,
+    CommandId,
+    Telemetry,
+    decode_ack,
+    decode_telemetry,
+    encode_command,
+)
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     AttitudeSnapshot,
@@ -71,7 +80,14 @@ class Rig:
             self.downlink.append(self.target.receive())
 
     def acks(self, tick: int) -> list[CommandAck]:
-        return [decode_ack(decode_frame(frame).payload) for frame in self.downlink[tick]]
+        """The ACK frames sent in ``tick``, decoded."""
+        frames = [decode_frame(frame) for frame in self.downlink[tick]]
+        return [decode_ack(f.payload) for f in frames if f.frame_type is FrameType.ACK]
+
+    def telemetry(self, tick: int) -> list[Telemetry]:
+        """The TELEMETRY frames sent in ``tick``, decoded."""
+        frames = [decode_frame(frame) for frame in self.downlink[tick]]
+        return [decode_telemetry(f.payload) for f in frames if f.frame_type is FrameType.TELEMETRY]
 
 
 def attitude_control_w(record: SilTick) -> float:
@@ -105,6 +121,12 @@ def test_commands_are_nacked_during_boot_and_accepted_after_it() -> None:
     rig.run(1, send=Command.set_mode(Mode.SCIENCE), sequence=2)
     assert rig.acks(-1) == [CommandAck(2, CommandId.SET_MODE)]
     assert rig.fc.modes[-3:] == [Mode.BOOT, Mode.NOMINAL, Mode.SCIENCE]
+    # Telemetry: silent in BOOT, the boot-complete beacon (NOMINAL), and in the ACK
+    # tick a frame showing the new mode, after the ACK (#55).
+    assert all(rig.telemetry(tick) == [] for tick in range(BOOT_TICKS - 1))
+    assert [t.mode for t in rig.telemetry(BOOT_TICKS - 1)] == [Mode.NOMINAL]
+    assert [t.mode for t in rig.telemetry(-1)] == [Mode.SCIENCE]
+    assert decode_frame(rig.downlink[-1][0]).frame_type is FrameType.ACK
 
 
 def test_reset_command_is_acked_in_its_tick_then_boot_then_nominal() -> None:
@@ -119,7 +141,14 @@ def test_reset_command_is_acked_in_its_tick_then_boot_then_nominal() -> None:
     # The ACK goes out in the RESET tick, and the flight computer is in BOOT after it.
     assert rig.acks(reset_tick) == [CommandAck(77, CommandId.RESET)]
     assert rig.fc.modes[reset_tick] is Mode.BOOT
-    assert all(frames == [] for frames in rig.downlink[reset_tick + 1 :])
+    assert rig.telemetry(reset_tick) == []  # in BOOT after step d: no telemetry
+    # Silent through the new boot, then the boot-complete beacon with boot count 1 and
+    # uptime counted from the RESET.
+    beacon_tick = reset_tick + BOOT_TICKS
+    assert all(frames == [] for frames in rig.downlink[reset_tick + 1 : beacon_tick])
+    [beacon] = rig.telemetry(beacon_tick)
+    assert (beacon.mode, beacon.boot_count, beacon.uptime_ms) == (Mode.NOMINAL, 1, 5000)
+    assert decode_frame(rig.downlink[beacon_tick][0]).sequence == 0  # restarted by RESET
 
     # Up to and including the RESET tick, the physics doesn't differ: RESET doesn't
     # touch the spacecraft. Only the next tick's controls do: BOOT's, from step f.
@@ -152,5 +181,10 @@ def test_critical_battery_at_power_on_goes_from_boot_straight_to_safe() -> None:
         controls_for_mode(Mode.SAFE)
     ]
     assert attitude_control_w(rig.records[N]) > 0.0
+    # No boot-complete beacon: the first frame is SAFE's, sent in the SAFE entry tick,
+    # then one every SAFE period (0.5 s, 5 ticks), all showing SAFE (#55).
+    sent = [tick for tick in range(len(rig.downlink)) if rig.telemetry(tick)]
+    assert sent == list(range(N - 1, 3 * BOOT_TICKS, 5))
+    assert {t.mode for tick in sent for t in rig.telemetry(tick)} == {Mode.SAFE}
     assert rig.fc.boot_count == 0
     assert rig.fc.uptime_us == 3 * BOOT_TICKS * TICK_US

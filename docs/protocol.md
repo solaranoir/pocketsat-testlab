@@ -79,7 +79,7 @@ use typed, immutable messages (`pocketsat.messages`, `pocketsat.targets.base`).
 | `ParsedCommand`, `MalformedCommand` | `pocketsat.messages` | Result of `decode_command` on the spacecraft: a valid command (`command_id`, SET_MODE `target`), or the received ID and a `DecodeReason` for the NACK (#52). |
 | `CommandAck` | `pocketsat.messages` | An ACK frame payload: the answered command's `sequence` and `command_id`, and the NACK `reason` (`None` for an ACK) (`encode_ack`, `decode_ack`). |
 | `Telemetry` | `pocketsat.messages` | Decoded TELEMETRY payload: reported values at wire resolution (`decode_telemetry`). |
-| `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47, via #55). |
+| `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47), assembled by the telemetry scheduler (#55). |
 | `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. |
 | `EnvironmentState` | `pocketsat.targets.base` | Per-tick environment inputs; delivered by `apply_environment()`. |
 | `TargetFault` | `pocketsat.targets.base` | Fault type, parameters, duration; delivered by `inject()`. |
@@ -435,7 +435,8 @@ Every frame the spacecraft sends goes through one outbound queue in the flight c
   for that tick (wire bytes: header, payload, and CRC), read from comms' readings. A
   capacity of 0 sends nothing.
 - **Priority.** Frames are offered in priority order: ACK/NACK (step c), then telemetry
-  (#55), then DATA (#56) (step e). Each is sent if it fits what is left; one that does
+  (#55, at its per-mode cadence, `docs/spacecraft-modes.md`, "Telemetry cadence"), then
+  DATA (#56) (step e). Each is sent if it fits what is left; one that does
   not is dropped, not queued for a later tick. A frame that does not fit does not block
   a later, smaller one.
 - **Suppression.** ACK/NACK and telemetry frames that do not fit are counted in the

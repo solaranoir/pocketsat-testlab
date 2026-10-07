@@ -13,8 +13,7 @@ are ADR-0004 §2 steps c to f:
    Filled by #48 and #49.
 4. ``update_mode`` (step d): apply the mode events with #47's ``transition()``; an
    applied RESET reboots (#49).
-5. ``emit_telemetry`` (step e): telemetry when due, then DATA in DOWNLINK. Filled by
-   #55 and #56.
+5. ``emit_telemetry`` (step e): telemetry when due (#55), then DATA in DOWNLINK (#56).
 6. ``produce_controls`` (step f): the next tick's controls from #47's
    ``controls_for_mode()``, the single controls function (ADR-0004 §14). #56 adds the
    chunk release.
@@ -24,8 +23,14 @@ are ADR-0004 §2 steps c to f:
 (:mod:`pocketsat.flight.safety`) and #49's boot timing (:mod:`pocketsat.flight.boot`);
 ``update_mode`` and ``produce_controls`` call #47's
 :func:`~pocketsat.flight.modes.transition` and
-:func:`~pocketsat.flight.modes.controls_for_mode`. ``emit_telemetry`` is a documented
-no-op until #55 and #56.
+:func:`~pocketsat.flight.modes.controls_for_mode`; ``emit_telemetry`` follows #55's
+per-mode cadence (:mod:`pocketsat.flight.telemetry`) and encodes frames with #54's
+codec. DATA is #56.
+
+**Settings.** One :class:`FlightComputerConfig` holds every setting: #48's
+:class:`~pocketsat.flight.safety.SafetyConfig`, #49's
+:class:`~pocketsat.flight.boot.BootConfig`, and #55's
+:class:`~pocketsat.flight.telemetry.TelemetryConfig`.
 
 **Outbound frames (ADR-0004 §10, ADR-0007 §4).** Every downlink frame goes through
 :meth:`FlightComputer._queue_outbound`, which gives it the next downlink sequence number
@@ -35,8 +40,8 @@ in :class:`OutboundClass` order, ACK/NACK (step c), then telemetry and DATA (ste
 the order of the phases is the priority order; offering a higher class after a lower one
 is a programming error and raises. A frame that does not fit is not queued; ACK/NACK
 and telemetry that don't fit are counted in ``outbound_suppressed_count``, DATA is not
-(it stays in the payload buffer, ADR-0007 §3). #55 and #56 add their frames through the
-same method, with no change to this rule.
+(it stays in the payload buffer, ADR-0007 §3). Telemetry (#55) and DATA (#56) go through
+the same method, with no change to this rule.
 
 The flight computer is **not** part of ``STEP_ORDER``: it always runs after all
 subsystems, and the controls it produces in tick N apply in tick N+1 (ADR-0004 §2). It
@@ -71,6 +76,13 @@ from pocketsat.flight.safety import (
     SafetyVerdict,
     active_flags,
     evaluate,
+)
+from pocketsat.flight.telemetry import (
+    DEFAULT_TELEMETRY_CONFIG,
+    INITIAL_TELEMETRY_SCHEDULE,
+    TelemetryConfig,
+    TelemetrySchedule,
+    telemetry_due,
 )
 from pocketsat.frame import (
     MAX_SEQUENCE,
@@ -174,6 +186,41 @@ class SpacecraftReadings:
 
 
 @dataclass(frozen=True)
+class FlightComputerConfig:
+    """Every setting of the flight computer, in one record passed to
+    :class:`FlightComputer` (#55).
+
+    Attributes:
+        safety: The safe-mode rules (#48), such as how many ticks a flag must be
+            sustained.
+        boot: The boot sequence (#49): how long BOOT lasts.
+        telemetry: The telemetry cadence per mode (#55).
+
+    Raises:
+        TypeError: A field is not its settings record.
+    """
+
+    safety: SafetyConfig = DEFAULT_SAFETY_CONFIG
+    boot: BootConfig = DEFAULT_BOOT_CONFIG
+    telemetry: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG
+
+    def __post_init__(self) -> None:
+        for name, kind in (
+            ("safety", SafetyConfig),
+            ("boot", BootConfig),
+            ("telemetry", TelemetryConfig),
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, kind):
+                raise TypeError(f"{name} must be a {kind.__name__}, got {type(value).__name__}")
+
+
+DEFAULT_FLIGHT_COMPUTER_CONFIG: Final = FlightComputerConfig()
+"""The default settings: 10-tick flag persistence, a 5 s boot, and the default telemetry
+cadence (``docs/spacecraft-modes.md``, "Telemetry cadence")."""
+
+
+@dataclass(frozen=True)
 class FlightComputerOutput:
     """What one :meth:`FlightComputer.step` hands back to ``SilTarget`` (#59).
 
@@ -181,8 +228,8 @@ class FlightComputerOutput:
         downlink_frames: Encoded frames to transmit this tick, in transmit order
             (ACK/NACK, then telemetry, then DATA; ADR-0004 §10), together no longer
             than comms' ``transmit_capacity_bytes`` for the tick. ``SilTarget`` returns
-            them from ``receive()``. ACK/NACK frames come from #51; telemetry (#55) and
-            DATA (#56) are added later.
+            them from ``receive()``. ACK/NACK frames come from #51 and TELEMETRY
+            frames from #55; DATA (#56) is added later.
         controls: The :class:`SpacecraftControls` for the next tick (ADR-0004 §2 step
             f), from the single controls function. ``SilTarget`` merges fault overrides
             and the radio traffic into them at step a of the next tick (#59, #98).
@@ -190,7 +237,7 @@ class FlightComputerOutput:
             because they did not fit comms' transmit capacity (ADR-0004 §10,
             ADR-0007 §3). Per tick, not a running total; ``SilTarget`` passes it on in
             ``RadioTraffic.outbound_suppressed_count`` (#98). Counted for ACK/NACK
-            (#51) and, later, telemetry (#55).
+            (#51) and telemetry (#55).
 
     Raises:
         TypeError: A field has the wrong type.
@@ -368,35 +415,28 @@ class FlightComputer:
       ``forced_reset`` fault (#60, ADR-0004 §9).
     - BOOT lasts :attr:`BootConfig.duration_us` of uptime, then ``BOOT_COMPLETE``
       moves it to NOMINAL (#49); a safe condition or fault in BOOT leaves it earlier.
+    - Telemetry follows :class:`TelemetryConfig`'s per-mode cadence (#55): none in BOOT
+      but the boot-complete beacon, a frame at every mode change, then one per period.
 
     Deterministic: the same calls with the same arguments always give the same outputs.
     No randomness, no wall-clock time; simulated time comes from the caller.
     """
 
-    def __init__(
-        self,
-        *,
-        safety: SafetyConfig = DEFAULT_SAFETY_CONFIG,
-        boot: BootConfig = DEFAULT_BOOT_CONFIG,
-    ) -> None:
+    def __init__(self, config: FlightComputerConfig = DEFAULT_FLIGHT_COMPUTER_CONFIG) -> None:
         """Create a flight computer in its power-on state at time 0 (see :meth:`reset`).
 
         Args:
-            safety: Settings of the safe-mode rules (#48), such as how many ticks a
-                flag must be sustained.
-            boot: Settings of the boot sequence (#49): how long BOOT lasts.
+            config: Every setting: the safe-mode rules (#48), the boot sequence (#49),
+                and the telemetry cadence (#55).
 
         Raises:
-            TypeError: ``safety`` is not a :class:`SafetyConfig` or ``boot`` is not a
-                :class:`BootConfig`.
+            TypeError: ``config`` is not a :class:`FlightComputerConfig`.
         """
-        if not isinstance(safety, SafetyConfig):
-            raise TypeError(f"safety must be a SafetyConfig, got {type(safety).__name__}")
-        if not isinstance(boot, BootConfig):
-            raise TypeError(f"boot must be a BootConfig, got {type(boot).__name__}")
-        self._safety_config = safety
-        self._boot_config = boot
+        if not isinstance(config, FlightComputerConfig):
+            raise TypeError(f"config must be a FlightComputerConfig, got {type(config).__name__}")
+        self._config = config
         self._safety_state: SafetyState = INITIAL_SAFETY_STATE
+        self._telemetry_schedule: TelemetrySchedule = INITIAL_TELEMETRY_SCHEDULE
         self._mode_state: ModeState = INITIAL_STATE
         self._boot_count = 0
         self._boot_time_us = 0
@@ -405,6 +445,11 @@ class FlightComputer:
         self.reset()
 
     # --- State ------------------------------------------------------------------------
+
+    @property
+    def config(self) -> FlightComputerConfig:
+        """The settings this flight computer was built with."""
+        return self._config
 
     @property
     def mode(self) -> Mode:
@@ -501,13 +546,15 @@ class FlightComputer:
 
         Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`), the
         safe-mode persistence counters (#48), so a flag still set after a reboot must
-        be sustained again from BOOT, and the downlink sequence counter (#51), so the
-        first frame after a reboot has sequence 0. Later tickets add their own
-        transient state here (for example the telemetry schedule, #55, and the
-        downlink session, #56). The boot counter is not transient.
+        be sustained again from BOOT, the downlink sequence counter (#51), so the
+        first frame after a reboot has sequence 0, and the telemetry schedule (#55), so
+        the next frame is the boot-complete beacon. Later tickets add their own
+        transient state here (for example the downlink session, #56). The boot counter
+        is not transient.
         """
         self._mode_state = INITIAL_STATE
         self._safety_state = INITIAL_SAFETY_STATE
+        self._telemetry_schedule = INITIAL_TELEMETRY_SCHEDULE
         self._boot_time_us = self._now_us
         self._downlink_sequence = 0
 
@@ -669,12 +716,12 @@ class FlightComputer:
         FAULT has left BOOT, BOOT_COMPLETE is never raised: every boot step but the wait
         already ran at the reboot (``docs/spacecraft-modes.md``, "Boot sequence").
         """
-        verdict = evaluate(self._safety_state, tick.readings, self._safety_config)
+        verdict = evaluate(self._safety_state, tick.readings, self._config.safety)
         self._safety_state = verdict.state
         tick.safety = verdict
         tick.safe_exit_allowed = verdict.safe_exit_allowed
         tick.mode_events.extend(verdict.events)
-        if self._mode_state.mode is Mode.BOOT and boot_complete(self.uptime_us, self._boot_config):
+        if self._mode_state.mode is Mode.BOOT and boot_complete(self.uptime_us, self._config.boot):
             tick.mode_events.append(ModeEvent(EventKind.BOOT_COMPLETE))
 
     def _update_mode(self, tick: TickContext) -> None:
@@ -707,13 +754,47 @@ class FlightComputer:
     def _emit_telemetry(self, tick: TickContext) -> None:
         """Phase 5 (ADR-0004 step e): emit telemetry if due, and DATA in DOWNLINK.
 
-        No-op for now. #55 adds the per-mode cadence and sends TELEMETRY frames with
-        ``self._queue_outbound(tick, FrameType.TELEMETRY, payload,
-        OutboundClass.TELEMETRY)``, which puts them after any ACK/NACK, within the
-        remaining transmit capacity, and counts suppressed ones. #56 then fills what
-        capacity is left with DATA frames the same way (``OutboundClass.DATA``, not
-        counted when they don't fit).
+        **Telemetry (#55).** :func:`~pocketsat.flight.telemetry.telemetry_due` decides
+        from the mode after step d and this tick's simulated time: nothing in BOOT; a
+        frame in the step the mode changes (the boot-complete beacon is the first frame
+        after BOOT); otherwise one per period of the mode (:class:`TelemetryConfig`).
+        A due frame is encoded with #54's ``encode_telemetry`` from this tick's
+        readings (reported values only, ADR-0004 §7) and the flight computer's own
+        state (the mode after step d, ``uptime_ms``, ``boot_count``), and queued with
+        ``OutboundClass.TELEMETRY`` through :meth:`_queue_outbound`: after any
+        ACK/NACK, within the remaining transmit capacity, with the next downlink
+        sequence number. One that does not fit is suppressed and counted, not retried;
+        its slot is used, so the next frame is due one period later.
+
+        A NaN reading has no telemetry encoding (``docs/protocol.md``). The
+        evaluate-flags phase has already raised FAULT_DETECTED for it in this tick
+        (``NON_FINITE_READING``, #48), so the due frame is dropped, uncounted, rather
+        than raising out of :meth:`step`.
+
+        **DATA (#56)** will then fill what capacity is left the same way
+        (``OutboundClass.DATA``, not counted when it doesn't fit).
         """
+        due, self._telemetry_schedule = telemetry_due(
+            self._telemetry_schedule, self._mode_state.mode, tick.now_us, self._config.telemetry
+        )
+        if not due:
+            return
+        state = messages.FlightComputerTelemetryState(
+            uptime_ms=self.uptime_ms, mode=self._mode_state.mode, boot_count=self._boot_count
+        )
+        readings = tick.readings
+        try:
+            payload = messages.encode_telemetry(
+                state,
+                power=readings.power,
+                thermal=readings.thermal,
+                attitude=readings.attitude,
+                payload=readings.payload,
+                comms=readings.comms,
+            )
+        except ValueError:
+            return
+        self._queue_outbound(tick, FrameType.TELEMETRY, payload, OutboundClass.TELEMETRY)
 
     def _produce_controls(self) -> SpacecraftControls:
         """Phase 6 (ADR-0004 step f): the controls for the next tick.
