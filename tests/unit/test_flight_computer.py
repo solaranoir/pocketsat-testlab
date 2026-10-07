@@ -200,18 +200,19 @@ def test_controls_come_only_from_produce_controls(monkeypatch: pytest.MonkeyPatc
 
 
 def test_produce_controls_uses_controls_for_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    modes: list[Mode] = []
+    calls: list[tuple[Mode, int | None]] = []
 
-    def spy(mode: Mode) -> SpacecraftControls:
-        modes.append(mode)
+    def spy(mode: Mode, *, release_through_chunk_id: int | None = None) -> SpacecraftControls:
+        calls.append((mode, release_through_chunk_id))
         return MARKED
 
     monkeypatch.setattr(computer, "controls_for_mode", spy)
     fc = FlightComputer()
-    modes.clear()
+    calls.clear()
     assert fc.reset() is MARKED
     assert fc.step((), READINGS, 0).controls is MARKED
-    assert modes == [Mode.BOOT, Mode.BOOT]
+    # No downlink session in BOOT, so no release (#56).
+    assert calls == [(Mode.BOOT, None), (Mode.BOOT, None)]
 
 
 @pytest.mark.parametrize("mode", list(Mode), ids=lambda m: m.name)

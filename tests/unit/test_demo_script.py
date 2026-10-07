@@ -33,7 +33,7 @@ def run(demo: ModuleType, *argv: str) -> str:
 @pytest.mark.parametrize(
     ("scenario", "expected"),
     [
-        ("nominal", ["1. NOMINAL ORBIT", "energy:", "(scripted stand-in)", "comms: rx_tx"]),
+        ("nominal", ["1. NOMINAL ORBIT", "energy:", "released 0 B once sent", "comms: rx_tx"]),
         ("detumble", ["2. DETUMBLE", "tumbling", "stabilized", "payload first ACQUIRING"]),
         ("faults", ["3a. FAULT: battery_drain", "critical_battery set at", "3b.", "3c."]),
         ("determinism", ["4. DETERMINISM", "identical truth and readings in every case: True"]),
@@ -46,6 +46,19 @@ def test_each_scenario_runs(demo: ModuleType, scenario: str, expected: list[str]
     for snippet in expected:
         assert snippet in text, snippet
     assert "Done: 1 scenario(s)" in text
+
+
+def test_nominal_orbit_downlinks_through_the_flight_computer(demo: ModuleType) -> None:
+    # #56: the nominal orbit's chunks are released by the real flight computer once sent
+    # as DATA frames, not by a scripted stand-in. A whole orbit at 10 s ticks has one
+    # 10-minute pass: 60 ticks, one 64-byte chunk in each but the first (which carries
+    # the ACK and the mode-change telemetry frame).
+    out = io.StringIO()
+    assert demo.main(["--tick-ms", "10000", "--orbits", "1", "--scenario", "nominal"], out=out) == 0
+    text = out.getvalue()
+    assert "downlink: passes from min 82.0; 59 DATA frames, 3776 B of chunks sent" in text
+    assert "released 3776 B once sent" in text
+    assert "stand-in" not in text
 
 
 def test_sensor_freeze_holds_readings(demo: ModuleType) -> None:

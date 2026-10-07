@@ -53,8 +53,19 @@ from pocketsat.spacecraft.fakes import fake_stack
 
 TICK_US = 100_000
 
-READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
-"""Nominal readings: no flags, radio RX_TX, 120 bytes of transmit capacity."""
+_FAKE_READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
+READINGS = dataclasses.replace(
+    _FAKE_READINGS,
+    payload=dataclasses.replace(
+        _FAKE_READINGS.payload,
+        buffered_bytes=64_000,
+        next_chunk_id=1_000,
+        total_produced_bytes=64_000,
+    ),
+)
+"""Nominal readings: no flags, radio RX_TX, 120 bytes of transmit capacity, and a payload
+backlog of 1000 chunks, so a DOWNLINK session (#56) has data to send and DOWNLINK
+lasts."""
 
 CAPACITY = READINGS.comms.transmit_capacity_bytes
 
@@ -511,16 +522,21 @@ def test_capacity_returning_lets_acks_out_again() -> None:
     assert answers(out.downlink_frames) == [CommandAck(2, CommandId.PING)]
 
 
-# --- Priority: ACK/NACK before telemetry and DATA (the seam for #55 and #56) -------------------
+# --- Priority: ACK/NACK before telemetry and DATA (the outbound seam) -----------------------
+#
+# These pin the seam itself (#51) with frames of chosen sizes, including a DATA frame
+# smaller than a telemetry frame, which no real chunk size here produces. The real
+# telemetry scheduler and downlink session through the same seam are tested in
+# test_telemetry_scheduler.py (#55) and test_downlink.py (#56).
 
 TELEMETRY_PAYLOAD = bytes(messages.TELEMETRY_PAYLOAD_SIZE)
-DATA_PAYLOAD = bytes(20)
-"""Stand-ins for #55's telemetry and #56's DATA frames (DATA has no frame type yet)."""
+DATA_PAYLOAD = messages.encode_data(messages.DataChunk(0, bytes(16)))
+"""A 36-byte telemetry frame and a 30-byte DATA frame (a 16-byte chunk)."""
 
 
 def emit_after_acks(fc: FlightComputer, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
-    """Stand in for #55 and #56: queue one telemetry frame and one DATA frame in the
-    emit-telemetry phase, through the outbound seam. Returns whether each was queued."""
+    """Queue one telemetry frame and one DATA frame in the emit-telemetry phase,
+    through the outbound seam. Returns whether each was queued."""
     queued: list[bool] = []
 
     def emit_telemetry(tick: TickContext) -> None:
@@ -529,9 +545,7 @@ def emit_after_acks(fc: FlightComputer, monkeypatch: pytest.MonkeyPatch) -> list
                 tick, FrameType.TELEMETRY, TELEMETRY_PAYLOAD, OutboundClass.TELEMETRY
             )
         )
-        queued.append(
-            fc._queue_outbound(tick, FrameType.TELEMETRY, DATA_PAYLOAD, OutboundClass.DATA)
-        )
+        queued.append(fc._queue_outbound(tick, FrameType.DATA, DATA_PAYLOAD, OutboundClass.DATA))
 
     monkeypatch.setattr(fc, "_emit_telemetry", emit_telemetry)
     return queued
@@ -569,6 +583,7 @@ def test_acks_go_ahead_of_telemetry_and_data_when_capacity_is_tight(
     )
     assert [len(frame) for frame in out.downlink_frames] == expected_sizes
     assert all(k.frame_type is FrameType.ACK for k in kinds[:acks])
+    assert [k.frame_type for k in kinds].count(FrameType.DATA) == data
     assert out.outbound_suppressed_count == suppressed
     assert out.sent_bytes == sum(expected_sizes) <= capacity
     assert [k.sequence for k in kinds] == list(range(len(kinds)))

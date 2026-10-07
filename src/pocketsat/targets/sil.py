@@ -427,11 +427,21 @@ class SilTarget:
 
         Raises:
             TypeError: ``seed`` is not an int.
+            ValueError: The flight computer's chunk size
+                (``FlightComputerConfig.downlink``) is not the payload's (#56).
         """
         rng = RngFactory(seed)  # validates the seed
         stack = _build_stack(self._config, self._initial)
         stack.reset(rng)
         flight_computer = self._flight_computer_factory()
+        chunk_size = flight_computer.config.downlink.chunk_size_bytes
+        if chunk_size != self._config.payload.chunk_size_bytes:
+            raise ValueError(
+                f"the flight computer's DownlinkConfig.chunk_size_bytes ({chunk_size}) must "
+                f"equal the payload's PayloadConfig.chunk_size_bytes "
+                f"({self._config.payload.chunk_size_bytes}): its DATA frames carry the "
+                "payload's chunks (#56)"
+            )
         self._clock = SimClock(self._clock.tick_us)
         self._next_controls = flight_computer.reset(now_us=self._clock.now_us)
         self._stack = stack

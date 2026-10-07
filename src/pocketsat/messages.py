@@ -27,6 +27,12 @@ a :class:`DecodeReason` (0x01-0x0F) or the mode state machine's
 :class:`~pocketsat.flight.RejectReason` (0x10-0x1F), reused rather than redefined. The
 layouts and every code are in ``docs/protocol.md`` ("Commands"); the vectors are
 ``tests/vectors/commands.json``. The command dispatcher that uses them is #51.
+
+DATA (#56): :func:`encode_data` packs one payload chunk (:class:`DataChunk`: its ID and
+its content, ``pocketsat.spacecraft.payload.chunk_content``) into a DATA frame payload,
+and :func:`decode_data` unpacks it on the ground. The layout is in ``docs/protocol.md``
+("DATA payload"); the vectors are ``tests/vectors/data.json``. The flight computer's
+downlink session (:mod:`pocketsat.flight.downlink`) sends them.
 """
 
 import math
@@ -39,7 +45,9 @@ from typing import Final, Self
 
 from pocketsat.flight.modes import Mode, RejectReason
 from pocketsat.frame import MAX_SEQUENCE, MIN_FRAME_SIZE
+from pocketsat.spacecraft.config import MAX_CHUNK_SIZE_BYTES
 from pocketsat.spacecraft.controls import RadioMode
+from pocketsat.spacecraft.payload import MAX_CHUNK_ID
 from pocketsat.spacecraft.snapshots import (
     AttitudeReadings,
     AttitudeState,
@@ -828,3 +836,104 @@ def decode_telemetry(payload: bytes) -> Telemetry:
         buffered_bytes=buffered_bytes,
         pointing_error_deg=pointing_error_centi_deg / POINTING_SCALE,
     )
+
+
+# --- DATA (#56) ------------------------------------------------------------------------
+
+
+DATA_CHUNK_ID_FORMAT: Final = ">I"
+"""``struct`` format of the chunk ID at the start of a DATA payload: uint32,
+big-endian."""
+
+DATA_CHUNK_ID_SIZE: Final = struct.calcsize(DATA_CHUNK_ID_FORMAT)
+"""Size of the chunk ID in a DATA payload, bytes (4). Equal to
+``pocketsat.spacecraft.config.CHUNK_ID_SIZE_BYTES``, which sizes the largest chunk."""
+
+MIN_DATA_PAYLOAD_SIZE: Final = DATA_CHUNK_ID_SIZE + 1
+"""Smallest DATA payload, bytes (5): the chunk ID and at least one content byte
+(``PayloadConfig.chunk_size_bytes`` is at least 1)."""
+
+
+def data_frame_size(chunk_size_bytes: int) -> int:
+    """Size on the wire of the DATA frame that carries a chunk of ``chunk_size_bytes``.
+
+    The 10-byte frame overhead, the 4-byte chunk ID, and the content: 78 bytes for the
+    default 64-byte chunk (``docs/protocol.md``, "DATA payload").
+    """
+    return MIN_FRAME_SIZE + DATA_CHUNK_ID_SIZE + chunk_size_bytes
+
+
+class DataDecodeError(ValueError):
+    """A DATA payload is too short to carry a chunk ID and content."""
+
+
+@dataclass(frozen=True)
+class DataChunk:
+    """One payload data chunk as carried in a DATA frame (#56).
+
+    Built by the flight computer's downlink session from the payload's chunk store
+    (#43), decoded by the ground station. A receiver regenerates the expected content
+    from the ID with ``pocketsat.spacecraft.payload.chunk_content`` and the chunk size,
+    so it can detect corruption, loss, or duplication.
+
+    Attributes:
+        chunk_id: The chunk's ID, ``0..MAX_CHUNK_ID`` (uint32).
+        content: The chunk's bytes, 1..``MAX_CHUNK_SIZE_BYTES`` long, so the whole
+            payload fits a frame.
+
+    Raises:
+        TypeError: A field has the wrong type.
+        ValueError: ``chunk_id`` is out of range, or ``content`` is empty or too long.
+    """
+
+    chunk_id: int
+    content: bytes
+
+    def __post_init__(self) -> None:
+        chunk_id = self.chunk_id
+        if isinstance(chunk_id, bool) or not isinstance(chunk_id, int):
+            raise TypeError(f"chunk_id must be an int, got {chunk_id!r}")
+        if not 0 <= chunk_id <= MAX_CHUNK_ID:
+            raise ValueError(f"chunk_id out of range 0..{MAX_CHUNK_ID}: {chunk_id}")
+        if not isinstance(self.content, bytes):
+            raise TypeError(f"content must be bytes, got {type(self.content).__name__}")
+        if not 1 <= len(self.content) <= MAX_CHUNK_SIZE_BYTES:
+            raise ValueError(
+                f"content must be 1..{MAX_CHUNK_SIZE_BYTES} bytes, got {len(self.content)}"
+            )
+
+
+def encode_data(chunk: DataChunk) -> bytes:
+    """Encode a DATA frame payload: the chunk ID (uint32, big-endian), then the content.
+
+    Args:
+        chunk: The chunk to send.
+
+    Returns:
+        ``DATA_CHUNK_ID_SIZE + len(chunk.content)`` bytes.
+    """
+    return struct.pack(DATA_CHUNK_ID_FORMAT, chunk.chunk_id) + chunk.content
+
+
+def decode_data(payload: bytes) -> DataChunk:
+    """Decode a DATA frame payload (the frame's payload, not the whole frame).
+
+    The content is returned as received; checking it against the expected
+    ``chunk_content`` is the receiver's job, because only it knows the chunk size.
+
+    Args:
+        payload: At least :data:`MIN_DATA_PAYLOAD_SIZE` bytes.
+
+    Returns:
+        The chunk ID and content.
+
+    Raises:
+        DataDecodeError: The payload is shorter than :data:`MIN_DATA_PAYLOAD_SIZE` (no
+            room for a chunk ID and at least one content byte).
+    """
+    if len(payload) < MIN_DATA_PAYLOAD_SIZE:
+        raise DataDecodeError(
+            f"DATA payload must be at least {MIN_DATA_PAYLOAD_SIZE} bytes, got {len(payload)}"
+        )
+    (chunk_id,) = struct.unpack_from(DATA_CHUNK_ID_FORMAT, payload)
+    return DataChunk(chunk_id, bytes(payload[DATA_CHUNK_ID_SIZE:]))

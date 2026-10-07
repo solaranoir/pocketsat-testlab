@@ -77,13 +77,16 @@ uv run python scripts/demo_spacecraft.py --orbits 3 --seed 7    # longer nominal
 ```
 
 The real power, thermal, attitude, payload, and comms subsystems share a
-`SnapshotBoard`, driven by `NominalEnvironment` and a `SimClock`. There is no flight
-computer yet, so the demo scripts the controls. The scenarios are:
+`SnapshotBoard`, driven by `NominalEnvironment` and a `SimClock`. The nominal orbit
+takes its controls from the real flight computer; the other scenarios script them. The
+scenarios are:
 
 - `nominal`: an orbit's timeline (sunlight and eclipse, true and estimated SOC, bus
   voltage, temperatures, survival heater, attitude, payload buffer, radio mode and
-  transmit draw) and an energy, heater, payload, comms, and flag summary. A scripted
-  chunk release every 5 minutes stands in for the flight computer's downlink (#56).
+  transmit draw) and an energy, heater, payload, downlink, comms, and flag summary.
+  The flight computer runs SCIENCE, then a DOWNLINK pass 10 minutes before the end of
+  each orbit, sending the stored chunks as DATA frames and releasing them once sent
+  (#56).
 - `detumble`: a high starting rate with attitude control off, then on. Generation
   drops while tumbling, and the payload waits for `STABILIZED`.
 - `faults`: `battery_drain` (`extra_load_w`) sets `low_battery` and

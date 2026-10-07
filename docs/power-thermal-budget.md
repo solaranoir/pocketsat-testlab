@@ -39,6 +39,8 @@ Beacon and pass energy are reported separately below. **Follow-up:** once #56 an
 
 In each pass tick the test releases (`release_through_chunk_id`) as many of the oldest chunks as whole DATA frames fit in the capacity left after telemetry and ACK/NACK, in the ADR-0004 §10 priority order, as #56 will. Frames that don't fit are not queued. Nothing is released outside the pass.
 
+#56 now does this in the flight computer ([spacecraft-modes.md](spacecraft-modes.md#downlink-session)): one 78-byte DATA frame per 120-byte tick, telemetry beside it once a second, release once sent, and the payload off during the pass. These budget tests still drive the subsystems without a flight computer, so they keep both stand-ins until #98 runs the reference profile through `SilTarget` with real traffic and re-checks this budget. The three-orbit downlink story test (`tests/sil/test_downlink_story.py`) already runs the profile with the real flight computer: every pass completes in under 10 minutes and leaves only the partial chunk in the buffer.
+
 ## Results
 
 Reference profile, three orbits; the other profiles one orbit (or until `low_battery`). Margin is (generation - consumption) / consumption over the orbit. Temperatures are true values; limits are the under- and over-temperature set thresholds (battery -5 / 45 °C, electronics -25 / 60 °C).

@@ -18,14 +18,18 @@ Each measurement is the median of :data:`REPEATS` runs, each a fresh ``reset(see
 followed by a fixed number of timed ticks. Wall-clock timing is allowed here: the
 determinism guard covers only simulation code in ``src/pocketsat`` (ADR-0003).
 
-Two full-stack runs are reported, both with the real flight computer in SCIENCE,
-answering a PING every 10 s:
+Three full-stack runs are reported, all with the real flight computer answering a PING
+every 10 s:
 
-- at the **default telemetry cadence** (#55: one frame per second in SCIENCE). This is
+- in SCIENCE at the **default telemetry cadence** (#55: one frame per second). This is
   the budgeted figure.
-- with **telemetry every tick** (``TelemetryConfig.uniform(tick)``), the most telemetry
-  the scheduler can be configured for. Each frame is encoded with the frame CRC, so
-  this run guards the lookup-table CRC (#78) and the telemetry encoder.
+- in SCIENCE with **telemetry every tick** (``TelemetryConfig.uniform(tick)``), the most
+  telemetry the scheduler can be configured for. Each frame is encoded with the frame
+  CRC, so this run guards the lookup-table CRC (#78) and the telemetry encoder.
+- in a **DOWNLINK pass at full capacity** (#56): a payload buffer large enough that the
+  session sends a 78-byte DATA frame in every timed tick but the few that also carry an
+  ACK and a telemetry frame (chunk content generated,
+  encoded, framed, and drained), with telemetry once a second.
 """
 
 import os
@@ -41,7 +45,7 @@ from pocketsat.core.rng import RngFactory
 from pocketsat.environment import NominalEnvironment
 from pocketsat.flight import FlightComputer, FlightComputerConfig, Mode, controls_for_mode
 from pocketsat.flight.telemetry import TelemetryConfig
-from pocketsat.frame import Frame, FrameType, encode_frame
+from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
 from pocketsat.messages import Command, encode_command
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
@@ -50,8 +54,10 @@ from pocketsat.spacecraft import (
     Attitude,
     Comms,
     Payload,
+    PayloadInitial,
     Power,
     SnapshotBoard,
+    SpacecraftInitialState,
     Subsystem,
     SubsystemStack,
     Thermal,
@@ -100,30 +106,49 @@ def _command(command: Command, sequence: int) -> bytes:
     return encode_frame(Frame(FrameType.COMMAND, sequence, encode_command(command)))
 
 
-def _time_full_stack(factory: Callable[[], FlightComputer]) -> float:
-    """One run: reset, boot into SCIENCE (untimed), then time ``FULL_STACK_TICKS`` ticks
-    of the orchestrator's loop (sample the environment, apply it, advance one tick,
-    drain the downlink). Returns microseconds per tick."""
-    target = SilTarget(flight_computer_factory=factory)
+DOWNLINK_BUFFER: Final = SpacecraftInitialState(payload=PayloadInitial(buffer_fill=0.25))
+"""A starting buffer of 2048 default chunks, more than the timed ticks can send."""
+
+
+TO_SCIENCE: Final = Command.set_mode(Mode.SCIENCE)
+
+
+def _time_full_stack(
+    factory: Callable[[], FlightComputer],
+    mode_command: Command = TO_SCIENCE,
+    initial: SpacecraftInitialState = DEFAULT_INITIAL_STATE,
+) -> float:
+    """One run: reset, boot, then ``mode_command`` (untimed), then time
+    ``FULL_STACK_TICKS`` ticks of the orchestrator's loop (sample the environment, apply
+    it, advance one tick, drain the downlink). Returns microseconds per tick."""
+    target = SilTarget(initial=initial, flight_computer_factory=factory)
     env = NominalEnvironment()
     target.connect()
     target.reset(SEED)
     for n in range(BOOT_TICKS):
         if n == BOOT_TICKS - 1:
-            target.send(_command(Command.set_mode(Mode.SCIENCE), sequence=1))
+            target.send(_command(mode_command, sequence=1))
         target.apply_environment(env.state_at(target.now_us))
         target.advance(target.tick_us)
         target.receive()
 
     tick_us = target.tick_us
+    received = 0
     started = time.perf_counter()
     for n in range(FULL_STACK_TICKS):
         if n % 100 == 50:
             target.send(_command(Command.ping(), sequence=n))
         target.apply_environment(env.state_at(target.now_us))
         target.advance(tick_us)
-        target.receive()
-    return (time.perf_counter() - started) / FULL_STACK_TICKS * 1e6
+        received += len(target.receive())
+    elapsed = time.perf_counter() - started
+    assert received > 0
+    return elapsed / FULL_STACK_TICKS * 1e6
+
+
+def _time_downlink_pass() -> float:
+    """One run of :func:`_time_full_stack` in a DOWNLINK pass at full capacity (#56)."""
+    return _time_full_stack(FlightComputer, Command.begin_downlink(), DOWNLINK_BUFFER)
 
 
 def _median_us[*A](run: Callable[[*A], float], *args: *A) -> float:
@@ -148,6 +173,31 @@ def test_full_stack_us_per_tick_is_within_twice_the_budget(
     label: str, factory: Callable[[], FlightComputer], capsys: pytest.CaptureFixture[str]
 ) -> None:
     us_per_tick = _median_us(_time_full_stack, factory)
+    _check_full_stack(label, us_per_tick, capsys)
+
+
+def test_downlink_pass_us_per_tick_is_within_twice_the_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    us_per_tick = _median_us(_time_downlink_pass)
+    _check_full_stack("real flight computer, DOWNLINK pass at full capacity", us_per_tick, capsys)
+
+
+def test_the_downlink_benchmark_sends_data_in_every_timed_tick() -> None:
+    # Guards the benchmark itself: the timed ticks are a pass at full capacity.
+    target = SilTarget(initial=DOWNLINK_BUFFER)
+    target.reset(SEED)
+    for n in range(BOOT_TICKS):
+        if n == BOOT_TICKS - 1:
+            target.send(_command(Command.begin_downlink(), sequence=1))
+        target.advance(target.tick_us)
+    for _ in range(FULL_STACK_TICKS):
+        target.advance(target.tick_us)
+        frames = [decode_frame(f) for f in target.receive()]
+        assert [f.frame_type for f in frames].count(FrameType.DATA) == 1
+
+
+def _check_full_stack(label: str, us_per_tick: float, capsys: pytest.CaptureFixture[str]) -> None:
     orbit_s = us_per_tick * ORBIT_TICKS / 1e6
     _report(
         [

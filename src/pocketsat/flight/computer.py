@@ -9,14 +9,14 @@ are ADR-0004 §2 steps c to f:
 1. ``decode_uplink`` (step c): decode COMMAND frames with #52's codec (#51).
 2. ``execute_commands`` (step c): dispatch commands and queue ACK/NACK (#51). RESET
    only raises its event here; the reboot happens in ``update_mode`` (#49).
-3. ``evaluate_flags`` (step d): raise SAFE_CONDITION, FAULT_DETECTED, and BOOT_COMPLETE.
-   Filled by #48 and #49.
+3. ``evaluate_flags`` (step d): raise SAFE_CONDITION, FAULT_DETECTED, BOOT_COMPLETE, and
+   DOWNLINK_COMPLETE. Filled by #48, #49, and #56.
 4. ``update_mode`` (step d): apply the mode events with #47's ``transition()``; an
-   applied RESET reboots (#49).
+   applied RESET reboots (#49). Starts and ends the downlink session (#56).
 5. ``emit_telemetry`` (step e): telemetry when due (#55), then DATA in DOWNLINK (#56).
 6. ``produce_controls`` (step f): the next tick's controls from #47's
-   ``controls_for_mode()``, the single controls function (ADR-0004 §14). #56 adds the
-   chunk release.
+   ``controls_for_mode()``, the single controls function (ADR-0004 §14), with the
+   downlink session's chunk release (#56).
 
 ``decode_uplink`` and ``execute_commands`` are #51's command dispatcher;
 ``evaluate_flags`` applies #48's safe-mode and fault rules
@@ -25,12 +25,13 @@ are ADR-0004 §2 steps c to f:
 :func:`~pocketsat.flight.modes.transition` and
 :func:`~pocketsat.flight.modes.controls_for_mode`; ``emit_telemetry`` follows #55's
 per-mode cadence (:mod:`pocketsat.flight.telemetry`) and encodes frames with #54's
-codec. DATA is #56.
+codec. DATA and the downlink session are #56 (:mod:`pocketsat.flight.downlink`).
 
 **Settings.** One :class:`FlightComputerConfig` holds every setting: #48's
 :class:`~pocketsat.flight.safety.SafetyConfig`, #49's
-:class:`~pocketsat.flight.boot.BootConfig`, and #55's
-:class:`~pocketsat.flight.telemetry.TelemetryConfig`.
+:class:`~pocketsat.flight.boot.BootConfig`, #55's
+:class:`~pocketsat.flight.telemetry.TelemetryConfig`, and #56's
+:class:`~pocketsat.flight.downlink.DownlinkConfig`.
 
 **Outbound frames (ADR-0004 §10, ADR-0007 §4).** Every downlink frame goes through
 :meth:`FlightComputer._queue_outbound`, which gives it the next downlink sequence number
@@ -41,7 +42,8 @@ the order of the phases is the priority order; offering a higher class after a l
 is a programming error and raises. A frame that does not fit is not queued; ACK/NACK
 and telemetry that don't fit are counted in ``outbound_suppressed_count``, DATA is not
 (it stays in the payload buffer, ADR-0007 §3). Telemetry (#55) and DATA (#56) go through
-the same method, with no change to this rule.
+the same method, with no change to this rule; the downlink session stops at the first
+DATA frame that does not fit, so chunks never go out of order.
 
 The flight computer is **not** part of ``STEP_ORDER``: it always runs after all
 subsystems, and the controls it produces in tick N apply in tick N+1 (ADR-0004 §2). It
@@ -57,6 +59,14 @@ from typing import Final, Self
 from pocketsat import messages
 from pocketsat.core.clock import check_us
 from pocketsat.flight.boot import DEFAULT_BOOT_CONFIG, BootConfig, boot_complete, uptime_ms
+from pocketsat.flight.downlink import (
+    DEFAULT_DOWNLINK_CONFIG,
+    DownlinkConfig,
+    DownlinkSession,
+    release_through_chunk_id,
+    transmit_inhibited,
+    unsent_chunk_ids,
+)
 from pocketsat.flight.modes import (
     INITIAL_STATE,
     EventKind,
@@ -95,6 +105,7 @@ from pocketsat.frame import (
 )
 from pocketsat.spacecraft.base import SpacecraftState
 from pocketsat.spacecraft.controls import SpacecraftControls
+from pocketsat.spacecraft.payload import chunk_content
 from pocketsat.spacecraft.snapshots import (
     AttitudeReadings,
     AttitudeSnapshot,
@@ -195,6 +206,7 @@ class FlightComputerConfig:
             sustained.
         boot: The boot sequence (#49): how long BOOT lasts.
         telemetry: The telemetry cadence per mode (#55).
+        downlink: The downlink session's settings (#56): the payload chunk size.
 
     Raises:
         TypeError: A field is not its settings record.
@@ -203,12 +215,14 @@ class FlightComputerConfig:
     safety: SafetyConfig = DEFAULT_SAFETY_CONFIG
     boot: BootConfig = DEFAULT_BOOT_CONFIG
     telemetry: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG
+    downlink: DownlinkConfig = DEFAULT_DOWNLINK_CONFIG
 
     def __post_init__(self) -> None:
         for name, kind in (
             ("safety", SafetyConfig),
             ("boot", BootConfig),
             ("telemetry", TelemetryConfig),
+            ("downlink", DownlinkConfig),
         ):
             value = getattr(self, name)
             if not isinstance(value, kind):
@@ -216,8 +230,8 @@ class FlightComputerConfig:
 
 
 DEFAULT_FLIGHT_COMPUTER_CONFIG: Final = FlightComputerConfig()
-"""The default settings: 10-tick flag persistence, a 5 s boot, and the default telemetry
-cadence (``docs/spacecraft-modes.md``, "Telemetry cadence")."""
+"""The default settings: 10-tick flag persistence, a 5 s boot, the default telemetry
+cadence (``docs/spacecraft-modes.md``, "Telemetry cadence"), and 64-byte chunks."""
 
 
 @dataclass(frozen=True)
@@ -228,10 +242,11 @@ class FlightComputerOutput:
         downlink_frames: Encoded frames to transmit this tick, in transmit order
             (ACK/NACK, then telemetry, then DATA; ADR-0004 §10), together no longer
             than comms' ``transmit_capacity_bytes`` for the tick. ``SilTarget`` returns
-            them from ``receive()``. ACK/NACK frames come from #51 and TELEMETRY
-            frames from #55; DATA (#56) is added later.
+            them from ``receive()``. ACK/NACK frames come from #51, TELEMETRY
+            frames from #55, and DATA frames from the downlink session (#56).
         controls: The :class:`SpacecraftControls` for the next tick (ADR-0004 §2 step
-            f), from the single controls function. ``SilTarget`` merges fault overrides
+            f), from the single controls function, with the downlink session's chunk
+            release (#56). ``SilTarget`` merges fault overrides
             and the radio traffic into them at step a of the next tick (#59, #98).
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick
             because they did not fit comms' transmit capacity (ADR-0004 §10,
@@ -417,6 +432,10 @@ class FlightComputer:
       moves it to NOMINAL (#49); a safe condition or fault in BOOT leaves it earlier.
     - Telemetry follows :class:`TelemetryConfig`'s per-mode cadence (#55): none in BOOT
       but the boot-complete beacon, a frame at every mode change, then one per period.
+    - In DOWNLINK a downlink session (#56, :mod:`pocketsat.flight.downlink`) sends the
+      payload's chunks as DATA frames, releases them once sent, and raises
+      ``DOWNLINK_COMPLETE`` when none is left; leaving DOWNLINK any other way aborts it,
+      and the next session resumes from the oldest unreleased chunk.
 
     Deterministic: the same calls with the same arguments always give the same outputs.
     No randomness, no wall-clock time; simulated time comes from the caller.
@@ -427,7 +446,7 @@ class FlightComputer:
 
         Args:
             config: Every setting: the safe-mode rules (#48), the boot sequence (#49),
-                and the telemetry cadence (#55).
+                the telemetry cadence (#55), and the downlink chunk size (#56).
 
         Raises:
             TypeError: ``config`` is not a :class:`FlightComputerConfig`.
@@ -442,6 +461,7 @@ class FlightComputer:
         self._boot_time_us = 0
         self._now_us = 0
         self._downlink_sequence = 0
+        self._downlink_session: DownlinkSession | None = None
         self.reset()
 
     # --- State ------------------------------------------------------------------------
@@ -460,6 +480,12 @@ class FlightComputer:
     def mode_state(self) -> ModeState:
         """The mode state machine's whole state (mode and DOWNLINK return mode)."""
         return self._mode_state
+
+    @property
+    def downlink_session(self) -> DownlinkSession | None:
+        """The current downlink session (#56): what it has sent so far. ``None``
+        outside DOWNLINK."""
+        return self._downlink_session
 
     @property
     def boot_count(self) -> int:
@@ -547,16 +573,18 @@ class FlightComputer:
         Today that is the mode state (back to BOOT, :data:`INITIAL_STATE`), the
         safe-mode persistence counters (#48), so a flag still set after a reboot must
         be sustained again from BOOT, the downlink sequence counter (#51), so the
-        first frame after a reboot has sequence 0, and the telemetry schedule (#55), so
-        the next frame is the boot-complete beacon. Later tickets add their own
-        transient state here (for example the downlink session, #56). The boot counter
-        is not transient.
+        first frame after a reboot has sequence 0, the telemetry schedule (#55), so
+        the next frame is the boot-complete beacon, and the downlink session (#56), so
+        a reboot during a pass aborts it and the next pass resumes from the payload's
+        oldest unreleased chunk. Later tickets add their own transient state here. The
+        boot counter is not transient.
         """
         self._mode_state = INITIAL_STATE
         self._safety_state = INITIAL_SAFETY_STATE
         self._telemetry_schedule = INITIAL_TELEMETRY_SCHEDULE
         self._boot_time_us = self._now_us
         self._downlink_sequence = 0
+        self._downlink_session = None
 
     def _advance_time(self, now_us: int) -> None:
         check_us("now_us", now_us)
@@ -715,14 +743,27 @@ class FlightComputer:
         FAULT_DETECTED in the same tick wins and BOOT_COMPLETE is ignored. Once SAFE or
         FAULT has left BOOT, BOOT_COMPLETE is never raised: every boot step but the wait
         already ran at the reboot (``docs/spacecraft-modes.md``, "Boot sequence").
+
+        In a step that starts in DOWNLINK, appends DOWNLINK_COMPLETE when the downlink
+        session has no unsent chunk left in this tick's payload readings (#56). By then
+        the payload has released every chunk sent in the previous tick (the release
+        applies in step b), so the session is done. It comes after the command and
+        safety events, so a command or SAFE/FAULT entry in the same tick has already
+        left DOWNLINK and it is ignored. A session entered in this step runs at least
+        one step e before it can complete, so the ground sees DOWNLINK in telemetry.
         """
         verdict = evaluate(self._safety_state, tick.readings, self._config.safety)
         self._safety_state = verdict.state
         tick.safety = verdict
         tick.safe_exit_allowed = verdict.safe_exit_allowed
         tick.mode_events.extend(verdict.events)
-        if self._mode_state.mode is Mode.BOOT and boot_complete(self.uptime_us, self._config.boot):
+        mode = self._mode_state.mode
+        if mode is Mode.BOOT and boot_complete(self.uptime_us, self._config.boot):
             tick.mode_events.append(ModeEvent(EventKind.BOOT_COMPLETE))
+        elif mode is Mode.DOWNLINK:
+            session = self._downlink_session or DownlinkSession.start(tick.readings.payload)
+            if not unsent_chunk_ids(session, tick.readings.payload):
+                tick.mode_events.append(ModeEvent(EventKind.DOWNLINK_COMPLETE))
 
     def _update_mode(self, tick: TickContext) -> None:
         """Phase 4 (ADR-0004 step d): apply this tick's mode events, in order.
@@ -738,6 +779,12 @@ class FlightComputer:
         state the reboot discarded, so they are recorded as IGNORED and not applied;
         later command events still go through the table (in BOOT: a NACK, or another
         RESET).
+
+        Then the downlink session follows the mode after all the events (#56): a session
+        starts at the payload's oldest unreleased chunk when the mode is DOWNLINK and
+        none is running, and ends when the mode is anything else (DOWNLINK_COMPLETE, or
+        an abort: SET_MODE, ENTER_SAFE_MODE, SAFE_CONDITION, FAULT_DETECTED, RESET). A
+        session that leaves and re-enters DOWNLINK within one step keeps running.
         """
         rebooted = False
         for event in tick.mode_events:
@@ -750,6 +797,10 @@ class FlightComputer:
             if event.kind is EventKind.RESET:
                 self.reboot(now_us=tick.now_us)
                 rebooted = True
+        if self._mode_state.mode is not Mode.DOWNLINK:
+            self._downlink_session = None
+        elif self._downlink_session is None:
+            self._downlink_session = DownlinkSession.start(tick.readings.payload)
 
     def _emit_telemetry(self, tick: TickContext) -> None:
         """Phase 5 (ADR-0004 step e): emit telemetry if due, and DATA in DOWNLINK.
@@ -771,9 +822,13 @@ class FlightComputer:
         (``NON_FINITE_READING``, #48), so the due frame is dropped, uncounted, rather
         than raising out of :meth:`step`.
 
-        **DATA (#56)** will then fill what capacity is left the same way
-        (``OutboundClass.DATA``, not counted when it doesn't fit).
+        **DATA (#56)** then fills what capacity is left (:meth:`_emit_data`).
         """
+        self._emit_telemetry_frame(tick)
+        self._emit_data(tick)
+
+    def _emit_telemetry_frame(self, tick: TickContext) -> None:
+        """Telemetry for :meth:`_emit_telemetry` (#55): one frame if due."""
         due, self._telemetry_schedule = telemetry_due(
             self._telemetry_schedule, self._mode_state.mode, tick.now_us, self._config.telemetry
         )
@@ -796,15 +851,54 @@ class FlightComputer:
             return
         self._queue_outbound(tick, FrameType.TELEMETRY, payload, OutboundClass.TELEMETRY)
 
+    def _emit_data(self, tick: TickContext) -> None:
+        """DATA for :meth:`_emit_telemetry` (#56): the downlink session's frames.
+
+        Only while a session runs (the mode after step d is DOWNLINK), and only while no
+        radio-transmit inhibit holds in this tick's readings
+        (:func:`~pocketsat.flight.downlink.transmit_inhibited`: a power or thermal
+        flag). Then, oldest first, each unsent whole chunk
+        (:func:`~pocketsat.flight.downlink.unsent_chunk_ids`) becomes one DATA frame,
+        its ID and its content (``chunk_content``, the payload's deterministic content
+        function, #43), queued with ``OutboundClass.DATA`` through
+        :meth:`_queue_outbound`, after any ACK/NACK and telemetry. It stops at the first
+        chunk whose frame does not fit what is left of the capacity, so chunks are
+        never sent out of order; that chunk is not counted as suppressed and is sent in
+        a later tick. The session records the chunks sent, and step f releases them.
+        """
+        session = self._downlink_session
+        if session is None or transmit_inhibited(tick.readings):
+            return
+        chunk_ids = unsent_chunk_ids(session, tick.readings.payload)
+        chunk_size = self._config.downlink.chunk_size_bytes
+        frame_size = MIN_FRAME_SIZE + messages.DATA_CHUNK_ID_SIZE + chunk_size
+        last: int | None = None
+        for chunk_id in chunk_ids:
+            if frame_size > tick.outbound_remaining_bytes:
+                break  # don't build a frame that can't go; the next one couldn't either
+            chunk = messages.DataChunk(chunk_id, chunk_content(chunk_id, chunk_size))
+            if not self._queue_outbound(
+                tick, FrameType.DATA, messages.encode_data(chunk), OutboundClass.DATA
+            ):
+                break
+            last = chunk_id
+        if last is not None:
+            self._downlink_session = session.after_sending(chunk_ids.start, last)
+
     def _produce_controls(self) -> SpacecraftControls:
         """Phase 6 (ADR-0004 step f): the controls for the next tick.
 
         The single controls function of ADR-0004 §14: every ``SpacecraftControls`` the
         flight computer produces comes from here, both from :meth:`step` and from
         :meth:`reset`. It returns #47's ``controls_for_mode()`` for the mode after
-        step d. #56 adds ``release_through_chunk_id`` here.
+        step d, with the downlink session's chunk release (#56,
+        :func:`~pocketsat.flight.downlink.release_through_chunk_id`): in Phase 1 the
+        last chunk sent, so the payload releases every sent chunk in the next tick.
         """
-        return controls_for_mode(self._mode_state.mode)
+        return controls_for_mode(
+            self._mode_state.mode,
+            release_through_chunk_id=release_through_chunk_id(self._downlink_session),
+        )
 
     # --- Outbound -----------------------------------------------------------------------
 

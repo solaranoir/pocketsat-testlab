@@ -61,8 +61,18 @@ TICK_US = 100_000
 
 N = DEFAULT_SAFETY_CONFIG.sustain_tick_count
 
-NOMINAL_READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
-"""Consistent readings with every flag clear (the fakes' defaults)."""
+_FAKE_READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
+NOMINAL_READINGS = dataclasses.replace(
+    _FAKE_READINGS,
+    payload=dataclasses.replace(
+        _FAKE_READINGS.payload,
+        buffered_bytes=64_000,
+        next_chunk_id=1_000,
+        total_produced_bytes=64_000,
+    ),
+)
+"""Consistent readings with every flag clear (the fakes' defaults), and a payload backlog
+of 1000 chunks, so a DOWNLINK session (#56) has data to send and DOWNLINK lasts."""
 
 ALL_FLAG_SETS: list[frozenset[SafeFlag]] = [
     frozenset(flag for i, flag in enumerate(SAFE_FLAGS) if bits >> i & 1)
@@ -339,7 +349,7 @@ FAILURE_CASES: list[tuple[str, SpacecraftReadings, tuple[ConsistencyCheck, ...]]
         with_payload(buffered_bytes=-64, total_released_bytes=64),
         (PAYLOAD,),
     ),
-    ("oldest chunk past next", with_payload(oldest_unreleased_chunk_id=3), (PAYLOAD,)),
+    ("oldest chunk past next", with_payload(oldest_unreleased_chunk_id=1_001), (PAYLOAD,)),
     ("sent over capacity", with_comms(sent_bytes=121), (COMMS,)),
     ("sent negative", with_comms(sent_bytes=-1), (COMMS,)),
     ("capacity with transmitter off", with_comms(transmitter_on=False), (COMMS,)),

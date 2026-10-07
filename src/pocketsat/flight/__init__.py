@@ -6,9 +6,10 @@ runs after every subsystem each tick and produces the controls for the next one
 ``step()`` entry point, configured by one :class:`FlightComputerConfig`;
 :mod:`pocketsat.flight.modes` (#47) is its mode state machine,
 :mod:`pocketsat.flight.safety` (#48) its automatic safe-mode and fault entry rules,
-:mod:`pocketsat.flight.boot` (#49) its boot settings and uptime counter, and
-:mod:`pocketsat.flight.telemetry` (#55) its telemetry cadence and schedule (import those
-three from their modules).
+:mod:`pocketsat.flight.boot` (#49) its boot settings and uptime counter,
+:mod:`pocketsat.flight.telemetry` (#55) its telemetry cadence and schedule, and
+:mod:`pocketsat.flight.downlink` (#56) its DOWNLINK session (import those four from
+their modules).
 
 Import order: :mod:`pocketsat.messages` imports :class:`Mode` from
 :mod:`pocketsat.flight.modes`, which imports only :mod:`pocketsat.spacecraft.controls`,

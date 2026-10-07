@@ -54,8 +54,19 @@ from pocketsat.spacecraft.fakes import fake_stack
 TICK_US = 100_000
 DOC = Path(__file__).resolve().parents[2] / "docs" / "spacecraft-modes.md"
 
-READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
-"""Nominal readings: no flags, radio RX_TX, 120 bytes of transmit capacity."""
+_FAKE_READINGS = SpacecraftReadings.from_state(fake_stack().snapshot())
+READINGS = dataclasses.replace(
+    _FAKE_READINGS,
+    payload=dataclasses.replace(
+        _FAKE_READINGS.payload,
+        buffered_bytes=64_000,
+        next_chunk_id=1_000,
+        total_produced_bytes=64_000,
+    ),
+)
+"""Nominal readings: no flags, radio RX_TX, 120 bytes of transmit capacity, and a payload
+backlog of 1000 chunks, so a DOWNLINK session (#56) always has data to send and
+DOWNLINK lasts."""
 
 CAPACITY = READINGS.comms.transmit_capacity_bytes
 
@@ -263,7 +274,12 @@ def test_each_mode_sends_at_its_cadence(mode: Mode) -> None:
     assert driver.telemetry_ticks() == list(range(0, 100, CADENCE_TICKS[mode]))
     frames = [t for out in driver.outputs for t in telemetry_frames(out.downlink_frames)]
     assert {t.mode for t in frames} == {mode}
-    assert all(len(out.downlink_frames) <= 1 for out in driver.outputs)  # one per slot
+    # One telemetry frame per slot, and nothing else but DOWNLINK's DATA (#56).
+    allowed = {FrameType.TELEMETRY} | ({FrameType.DATA} if mode is Mode.DOWNLINK else set())
+    for out in driver.outputs:
+        kinds = [decode_frame(frame).frame_type for frame in out.downlink_frames]
+        assert kinds.count(FrameType.TELEMETRY) <= 1
+        assert set(kinds) <= allowed
 
 
 def test_the_cadence_is_configurable_per_mode() -> None:
