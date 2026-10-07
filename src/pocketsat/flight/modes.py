@@ -386,7 +386,9 @@ _MODE_CONTROLS: Final[Mapping[Mode, SpacecraftControls]] = MappingProxyType(
 )
 
 
-def controls_for_mode(mode: Mode) -> SpacecraftControls:
+def controls_for_mode(
+    mode: Mode, *, release_through_chunk_id: int | None = None
+) -> SpacecraftControls:
     """Return the controls the flight computer produces for the next tick in ``mode``.
 
     This is the single controls function of ADR-0004 §14: every mode's entry action is
@@ -400,14 +402,34 @@ def controls_for_mode(mode: Mode) -> SpacecraftControls:
     - Attitude control on in every mode except BOOT, so SAFE and FAULT hold sun-safe
       pointing and keep generating power.
     - Payload enabled only in SCIENCE; off in DOWNLINK (see docs/spacecraft-modes.md).
-    - No fault overrides (``SilTarget`` merges those, #59) and no chunk release:
-      ``release_through_chunk_id`` is always ``None`` here; the downlink session (#56)
-      adds it by extending this function.
+    - No fault overrides (``SilTarget`` merges those, #59).
+    - The chunk release (#56): ``release_through_chunk_id`` as given, ``None`` (release
+      nothing) by default. The flight computer passes the downlink session's release
+      rule (:func:`pocketsat.flight.downlink.release_through_chunk_id`), so the release
+      comes from this function like every other control.
 
     Args:
         mode: The mode after this tick's update (step d of ADR-0004 §2).
+        release_through_chunk_id: Release every stored chunk up to and including this
+            ID in the next tick, or ``None``.
 
     Returns:
-        The controls for the next tick.
+        The controls for the next tick. Without a release, the same object for every
+        call in ``mode``.
+
+    Raises:
+        TypeError: ``release_through_chunk_id`` is not an int or ``None``.
+        ValueError: ``release_through_chunk_id`` is negative.
     """
-    return _MODE_CONTROLS[mode]
+    controls = _MODE_CONTROLS[mode]
+    if release_through_chunk_id is None:
+        return controls
+    # Built field by field rather than with dataclasses.replace: this runs in every tick
+    # of a DOWNLINK pass (#78's budget). The mode records carry no fault overrides.
+    return SpacecraftControls(
+        payload=PayloadControls(
+            enabled=controls.payload.enabled, release_through_chunk_id=release_through_chunk_id
+        ),
+        radio=controls.radio,
+        attitude=controls.attitude,
+    )

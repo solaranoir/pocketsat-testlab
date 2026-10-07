@@ -1,0 +1,131 @@
+{
+  "description": "PocketSat DATA payload test vectors (#56). Shared by Python and firmware tests. See README.md in this directory and docs/protocol.md.",
+  "frame_type": 4,
+  "chunk_id_size": 4,
+  "min_payload_size": 5,
+  "default_chunk_size": 64,
+  "default_frame_size": 78,
+  "valid_data": [
+    {
+      "name": "chunk_0_size_8",
+      "note": "Chunk 0, 8 bytes: the example in chunk_content's docstring.",
+      "chunk_id": 0,
+      "chunk_size": 8,
+      "content_hex": "29d04a5133d5399c",
+      "payload_hex": "0000000029d04a5133d5399c",
+      "sequence": 0,
+      "crc": 3314,
+      "frame_hex": "a55a01040000000c0000000029d04a5133d5399c0cf2"
+    },
+    {
+      "name": "chunk_0_default_size",
+      "note": "Chunk 0 at the default 64-byte chunk: a 78-byte frame.",
+      "chunk_id": 0,
+      "chunk_size": 64,
+      "content_hex": "29d04a5133d5399c08388e0f26d53c93a9a49a3066b26f614095030efe62ddf41e5dec5ad9094b91ff19662ca84d7782d11baf5c3affd9a4f8ac11612a818801",
+      "payload_hex": "0000000029d04a5133d5399c08388e0f26d53c93a9a49a3066b26f614095030efe62ddf41e5dec5ad9094b91ff19662ca84d7782d11baf5c3affd9a4f8ac11612a818801",
+      "sequence": 1,
+      "crc": 29871,
+      "frame_hex": "a55a0104000100440000000029d04a5133d5399c08388e0f26d53c93a9a49a3066b26f614095030efe62ddf41e5dec5ad9094b91ff19662ca84d7782d11baf5c3affd9a4f8ac11612a81880174af"
+    },
+    {
+      "name": "chunk_1_default_size",
+      "note": "Chunk 1 at the default chunk size.",
+      "chunk_id": 1,
+      "chunk_size": 64,
+      "content_hex": "441daf1ace2c6b452bd9b607be3249eb16e51fec160069607ea0fa365d2752655a1e93d084fe2ba270c32787924a7e5e6dbbc35eafd13f768fc8d649353625e9",
+      "payload_hex": "00000001441daf1ace2c6b452bd9b607be3249eb16e51fec160069607ea0fa365d2752655a1e93d084fe2ba270c32787924a7e5e6dbbc35eafd13f768fc8d649353625e9",
+      "sequence": 2,
+      "crc": 15679,
+      "frame_hex": "a55a01040002004400000001441daf1ace2c6b452bd9b607be3249eb16e51fec160069607ea0fa365d2752655a1e93d084fe2ba270c32787924a7e5e6dbbc35eafd13f768fc8d649353625e93d3f"
+    },
+    {
+      "name": "chunk_id_byte_order",
+      "note": "Chunk ID 0x12345678: the ID is big-endian.",
+      "chunk_id": 305419896,
+      "chunk_size": 16,
+      "content_hex": "59ac506da792ae1db87f919503ef82d3",
+      "payload_hex": "1234567859ac506da792ae1db87f919503ef82d3",
+      "sequence": 3,
+      "crc": 20349,
+      "frame_hex": "a55a0104000300141234567859ac506da792ae1db87f919503ef82d34f7d"
+    },
+    {
+      "name": "size_not_a_multiple_of_4",
+      "note": "5-byte chunk: the last xorshift word is truncated.",
+      "chunk_id": 42,
+      "chunk_size": 5,
+      "content_hex": "bafa2d9c16",
+      "payload_hex": "0000002abafa2d9c16",
+      "sequence": 4,
+      "crc": 62170,
+      "frame_hex": "a55a0104000400090000002abafa2d9c16f2da"
+    },
+    {
+      "name": "size_1",
+      "note": "The smallest chunk: one content byte.",
+      "chunk_id": 7,
+      "chunk_size": 1,
+      "content_hex": "6d",
+      "payload_hex": "000000076d",
+      "sequence": 5,
+      "crc": 36432,
+      "frame_hex": "a55a010400050005000000076d8e50"
+    },
+    {
+      "name": "max_chunk_id",
+      "note": "The largest chunk ID, 0xFFFFFFFF.",
+      "chunk_id": 4294967295,
+      "chunk_size": 64,
+      "content_hex": "aaa79bab63883f02e961ebf657f77ed9bdac5b2feffda92b01c46ca706499b6f91a85e5dd615deecd4c56908456eeaba9f05326610743682422387d069ea493c",
+      "payload_hex": "ffffffffaaa79bab63883f02e961ebf657f77ed9bdac5b2feffda92b01c46ca706499b6f91a85e5dd615deecd4c56908456eeaba9f05326610743682422387d069ea493c",
+      "sequence": 6,
+      "crc": 31596,
+      "frame_hex": "a55a010400060044ffffffffaaa79bab63883f02e961ebf657f77ed9bdac5b2feffda92b01c46ca706499b6f91a85e5dd615deecd4c56908456eeaba9f05326610743682422387d069ea493c7b6c"
+    },
+    {
+      "name": "zero_seed",
+      "note": "The chunk ID whose seed (id * 0x9E3779B1 + 0x7F4A7C15 mod 2**32) is 0, so the generator starts from 1.",
+      "chunk_id": 2269110875,
+      "chunk_size": 8,
+      "content_hex": "0004202104080601",
+      "payload_hex": "873fe25b0004202104080601",
+      "sequence": 7,
+      "crc": 40997,
+      "frame_hex": "a55a01040007000c873fe25b0004202104080601a025"
+    },
+    {
+      "name": "max_sequence",
+      "note": "A DATA frame at downlink sequence 0xFFFF.",
+      "chunk_id": 1000,
+      "chunk_size": 64,
+      "content_hex": "9f5f5774c38c582c59b6716864fc6e05ceabe9fbc10ed611625385174cdce18fcd4056d934f9b794436de4b1008cd2ccc076eb66be5e988bc4b60bacbdb2a0ed",
+      "payload_hex": "000003e89f5f5774c38c582c59b6716864fc6e05ceabe9fbc10ed611625385174cdce18fcd4056d934f9b794436de4b1008cd2ccc076eb66be5e988bc4b60bacbdb2a0ed",
+      "sequence": 65535,
+      "crc": 3541,
+      "frame_hex": "a55a0104ffff0044000003e89f5f5774c38c582c59b6716864fc6e05ceabe9fbc10ed611625385174cdce18fcd4056d934f9b794436de4b1008cd2ccc076eb66be5e988bc4b60bacbdb2a0ed0dd5"
+    }
+  ],
+  "invalid_data": [
+    {
+      "name": "empty",
+      "payload_hex": "",
+      "error": "size"
+    },
+    {
+      "name": "one_byte",
+      "payload_hex": "00",
+      "error": "size"
+    },
+    {
+      "name": "three_bytes",
+      "payload_hex": "000000",
+      "error": "size"
+    },
+    {
+      "name": "chunk_id_only",
+      "payload_hex": "00000001",
+      "error": "size"
+    }
+  ]
+}

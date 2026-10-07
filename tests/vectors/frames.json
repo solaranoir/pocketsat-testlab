@@ -62,6 +62,15 @@
       "payload_hex": "a55a00ff",
       "crc": 9425,
       "frame_hex": "a55a010100070004a55a00ff24d1"
+    },
+    {
+      "name": "data_chunk_0",
+      "version": 1,
+      "type": "DATA",
+      "sequence": 3,
+      "payload_hex": "0000000029d04a5133d5399c",
+      "crc": 61399,
+      "frame_hex": "a55a01040003000c0000000029d04a5133d5399cefd7"
     }
   ],
   "invalid_frames": [

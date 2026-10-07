@@ -157,7 +157,8 @@ Each mode's entry action is one `SpacecraftControls` record, returned by `contro
 - **Attitude control on in every mode except BOOT** (BOOT's controls are #49's: payload off, `RX_TX` so the boot-complete beacon can go out, attitude control off, for the 5 s boot; see [Boot sequence and RESET](#boot-sequence-and-reset)). SAFE keeps it on so the arrays stay sun-pointed and the spacecraft recovers rather than tumbles; a tumbling orbit generates about a third of the power (#72's tumbling case).
 - **Payload enabled only in SCIENCE.** In DOWNLINK it is off (see below).
 - **FAULT uses SAFE's controls.** FAULT means the flight software has found itself inconsistent, so it falls back to the survival configuration: payload off, attitude control on (sun-safe pointing keeps the battery charging while the ground diagnoses), radio `RX_TX` so the ground sees FAULT in telemetry, gets NACKs that say `FAULT_REQUIRES_RESET`, and can send RESET. FAULT differs from SAFE only in how it is left.
-- **No fault overrides and no chunk release.** `frozen_sensors` is empty and `extra_load_w` is 0; `SilTarget` merges fault overrides (#59). `release_through_chunk_id` is always `None` here; the downlink session (#56) adds it by extending this function, so controls still come from one function.
+- **No fault overrides.** `frozen_sensors` is empty and `extra_load_w` is 0; `SilTarget` merges fault overrides (#59).
+- **The chunk release comes from the same function.** `controls_for_mode(mode, release_through_chunk_id=...)` adds the downlink session's release (#56) to the mode's controls; the flight computer's produce-controls phase passes it, so every control still comes from one function (ADR-0004 §14). Without a session the release is `None`, and the table above is the whole of the controls. See [Downlink session](#downlink-session).
 
 ### Payload during DOWNLINK: off
 
@@ -221,7 +222,7 @@ In general the mode is SAFE `sustain_tick_count - 1` ticks after the flag first 
 - **No persistence.** A contradiction is not noise, so the first tick that fails raises `FAULT_DETECTED`.
 - **FAULT outranks SAFE.** In a tick with both, `FAULT_DETECTED` is raised first and `SAFE_CONDITION` is then ignored in FAULT.
 - **Only RESET leaves FAULT** (#47). Consistent readings, cleared flags, and every other command leave it in FAULT; RESET (or `forced_reset`) reboots to BOOT. If the inconsistency persists after the reboot, the next tick enters FAULT again.
-- **Checks today:** non-finite reported values (a NaN would also silently clear a flag, since every comparison with it is false), `critical_battery` without `low_battery`, payload bookkeeping, and comms capacity (the table above). Further checks are added to `ConsistencyCheck` as later tickets give the flight computer state of its own to check (for example the downlink session against the payload's chunk IDs, #56).
+- **Checks today:** non-finite reported values (a NaN would also silently clear a flag, since every comparison with it is false), `critical_battery` without `low_battery`, payload bookkeeping, and comms capacity (the table above). Further checks are added to `ConsistencyCheck` as later tickets give the flight computer state of its own to check. The downlink session (#56) is such state, but it adds no check yet: a payload that released chunks the session never sent is skipped over, not treated as a fault (see [Downlink session](#downlink-session)).
 
 ## Boot sequence and RESET
 
@@ -249,7 +250,7 @@ The boot counter persists across RESET and `forced_reset` and is cleared only by
 `reboot(*, now_us)` is the one RESET path (ADR-0004 §9). It takes effect immediately and:
 
 1. increments the boot counter;
-2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; and the telemetry schedule (#55), so the next frame is the boot-complete beacon; later tickets add theirs (downlink session #56);
+2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; the telemetry schedule (#55), so the next frame is the boot-complete beacon; and the downlink session (#56), so a reboot aborts a pass and the next one resumes from the oldest unreleased chunk;
 3. restarts uptime, and with it the boot duration.
 
 Subsystem physical state (battery charge, temperatures, attitude, the payload buffer) is never touched: it isn't the flight computer's. Active target faults also survive (#60).
@@ -306,6 +307,75 @@ The telemetry scheduler (#55): the flight computer's emit-telemetry phase (ADR-0
 - **Transient.** The schedule is cleared by power-on and every reboot (RESET, `forced_reset`), with the mode; the next frame is the beacon.
 - **A NaN reading** has no telemetry encoding (`docs/protocol.md`). The same tick raises `FAULT_DETECTED` (`NON_FINITE_READING`, #48), and the due frame is dropped, uncounted, rather than stopping the flight computer; FAULT's cadence carries on from that slot.
 
+## Downlink session
+
+DOWNLINK moves the payload's stored data to the ground (#56). The payload owns the data,
+the flight computer moves it, and comms only provides transmit capacity (ADR-0004 §13).
+The session's state and rules are in `pocketsat.flight.downlink`; the flight computer
+runs them from its phases. The DATA frame layout is in
+[docs/protocol.md](protocol.md#data-payload). Tests: `tests/unit/test_downlink.py`
+(the flight computer and the real payload), `tests/sil/test_downlink_sil.py` (through
+`SilTarget`), `tests/sil/test_downlink_story.py` (three orbits of the reference profile,
+slow), and the `transmitter_off` case in `tests/sil/test_sil_faults.py`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Sending: mode becomes DOWNLINK (step d)<br/>start at oldest unreleased chunk
+    Sending --> Sending: step e: send oldest unsent chunks that fit<br/>step f: release through last sent
+    Sending --> Paused: power or thermal flag in the readings
+    Paused --> Sending: flags clear
+    Sending --> [*]: step d: no unsent chunk left<br/>DOWNLINK_COMPLETE, back to the entry mode
+    Sending --> [*]: any other exit from DOWNLINK<br/>(abort: nothing lost)
+    Paused --> [*]: any other exit from DOWNLINK
+```
+
+| Step | What happens | Phase (ADR-0004 §2) |
+|---|---|---|
+| **Start** | When the mode becomes DOWNLINK (BEGIN_DOWNLINK from NOMINAL or SCIENCE), a session starts at the payload's oldest unreleased chunk (`PayloadReadings.oldest_unreleased_chunk_id`). BEGIN_DOWNLINK during a session is ACKed and changes nothing | update mode (d) |
+| **Send** | Each step in DOWNLINK, after ACK/NACK and telemetry, the oldest unsent whole chunks go out as DATA frames, one chunk each, in ID order, while their frames fit what is left of comms' `transmit_capacity_bytes`. The session stops at the first chunk that does not fit, so chunks are never sent out of order; that chunk is not counted as suppressed and is sent in a later tick. The partial chunk still accumulating is never sent | emit telemetry (e) |
+| **Release** | The controls for the next tick carry `release_through_chunk_id` = the last chunk sent (Phase 1: release once sent), so the payload deletes every sent chunk in the next tick. The value repeats while nothing new is sent, which the payload ignores | produce controls (f) |
+| **Complete** | In a step that starts in DOWNLINK, when no unsent whole chunk is left, `DOWNLINK_COMPLETE` is raised (after the command and safety events) and the mode returns to the one DOWNLINK was entered from. A session therefore runs at least one step, even with an empty buffer, so the ground sees DOWNLINK in telemetry | evaluate flags (d) |
+| **Abort** | Any other exit from DOWNLINK (SET_MODE, ENTER_SAFE_MODE, `SAFE_CONDITION`, `FAULT_DETECTED`, RESET, `forced_reset`) ends the session at once, and no DATA goes out in that step. Chunks already sent were released in the step after they were sent; every other chunk stays in the payload buffer | update mode (d), or the reboot |
+| **Resume** | The next session starts at the oldest unreleased chunk, which is the first chunk not sent: nothing is skipped or sent twice | update mode (d) |
+
+**Radio-transmit inhibits** (carried over from story #42). DATA is sent only while no
+power or thermal flag is set in this tick's **readings** (ADR-0004 §6): `low_battery`,
+`critical_battery`, `over_temp`, or `under_temp`, the same power and thermal flags that
+stop payload acquisition (#43). Comms reads nothing, so the check is the flight
+computer's. A flag stops DATA in the tick it appears in the readings; ACK/NACK and
+telemetry still go out, so the ground sees why. `low_battery` is not a safe-mode flag,
+so the pass pauses in DOWNLINK and resumes when it clears; the others take the
+spacecraft to SAFE once sustained (#48), which aborts the session.
+
+**Rate.** The transfer rate is limited by comms' capacity, which is 0 while the radio is
+`RX_ONLY` or `OFF` or the `transmitter_off` fault holds (the session then stalls, and
+with it the release; the data stays in the buffer), and by the inhibits. At the defaults
+a 78-byte DATA frame fits each 120-byte tick, with the 36-byte telemetry frame once a
+second beside it: one 64-byte chunk per tick, 640 B/s. The entry step carries the
+BEGIN_DOWNLINK ACK and the mode-change telemetry frame (50 bytes), so its first DATA
+frame goes out in the next step. A DOWNLINK session never times out (#47): without
+capacity it stays in DOWNLINK until the ground or a safety rule ends it.
+
+**Accounting.** At every tick the payload keeps produced = buffered + released (#43), and
+because the release reaches the payload one tick after the send, the bytes sent minus
+the bytes released are exactly the chunks sent in that tick, never more than one tick's
+worth (story #42).
+
+**Session state and the acknowledgement hook.** `FlightComputer.downlink_session`
+(`DownlinkSession`) records where the session started, the next chunk to send, how many
+chunks it sent, and the last one, separately from what the payload has released. A
+session sends from its own next chunk (or the payload's oldest unreleased chunk, if
+that is later), so a release rule that waits does not cause a resend. Phase 1 releases
+once sent; releasing only once the ground acknowledges, and retransmitting what it does
+not, is a later phase that changes only the release rule
+(`pocketsat.flight.downlink.release_through_chunk_id`) and the session's next-chunk
+rule. The session is transient state: power-on and every reboot clear it.
+
+**Settings.** `FlightComputerConfig.downlink` (`DownlinkConfig`) holds the chunk size,
+default 64 bytes. It must equal the payload's `PayloadConfig.chunk_size_bytes`, as the
+flight software is built for its payload; `SilTarget.reset` raises `ValueError` if they
+differ.
+
 ## What other tickets add
 
 | Ticket | Adds |
@@ -315,5 +385,5 @@ The telemetry scheduler (#55): the flight computer's emit-telemetry phase (ADR-0
 | #49 | `BOOT_COMPLETE` after the boot duration, the reboot behind RESET and `forced_reset` (uptime, boot counter, transient state), and BOOT's controls applying from tick 0: done, see [Boot sequence and RESET](#boot-sequence-and-reset). The held-in-reset period belongs to `SilTarget`'s `forced_reset` (#60); a RESET command has no hold |
 | #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F: done, see [docs/protocol.md](protocol.md#dispatch-and-ack-timing) |
 | #55 | Telemetry cadence per mode, the boot-complete beacon, and one `FlightComputerConfig(safety, boot, telemetry)`: done, see [Telemetry cadence](#telemetry-cadence) |
-| #56 | The downlink session: raising `DOWNLINK_COMPLETE`, setting `release_through_chunk_id`, and resuming after an early exit |
+| #56 | The downlink session: raising `DOWNLINK_COMPLETE`, setting `release_through_chunk_id`, and resuming after an early exit: done, see [Downlink session](#downlink-session) |
 | #59 | Merging fault overrides into these controls and applying BOOT's controls at `reset(seed)` |

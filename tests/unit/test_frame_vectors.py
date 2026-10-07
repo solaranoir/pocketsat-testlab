@@ -15,6 +15,7 @@ from pocketsat.frame import (
     FrameType,
     FrameTypeError,
     crc16_ccitt_false,
+    crc16_ccitt_false_table,
     decode_frame,
     encode_frame,
 )
@@ -37,7 +38,9 @@ def _ids(key: str) -> list[str]:
 
 @pytest.mark.parametrize("vector", VECTORS["crc16_ccitt_false"], ids=_ids("crc16_ccitt_false"))
 def test_crc(vector: dict[str, Any]) -> None:
-    assert crc16_ccitt_false(bytes.fromhex(vector["input_hex"])) == vector["crc"]
+    data = bytes.fromhex(vector["input_hex"])
+    assert crc16_ccitt_false(data) == vector["crc"]
+    assert crc16_ccitt_false_table(data) == vector["crc"]  # the firmware's algorithm
 
 
 @pytest.mark.parametrize("vector", VECTORS["valid_frames"], ids=_ids("valid_frames"))

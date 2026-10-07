@@ -12,7 +12,7 @@ Byte strings are lowercase hex with no separators. Numbers are JSON integers
 - `crc16_ccitt_false[]`: `input_hex` and the expected `crc` (CRC-16/CCITT-FALSE:
   poly `0x1021`, init `0xFFFF`, no reflection, no final XOR).
 - `valid_frames[]`: `frame_hex` must decode to `version`, `type` (`COMMAND`,
-  `TELEMETRY`, `ACK`), `sequence`, and `payload_hex`, with trailing CRC `crc`.
+  `TELEMETRY`, `ACK`, `DATA`), `sequence`, and `payload_hex`, with trailing CRC `crc`.
   Encoding those fields must produce exactly `frame_hex`.
 - `invalid_frames[]`: `frame_hex` must be rejected with the error kind in `error`:
   - `sync`: missing or wrong sync marker
@@ -92,3 +92,27 @@ The layouts, the validation order, and the reason codes are in `docs/protocol.md
 These vectors were generated independently of `pocketsat.messages`: hand-packed with
 `struct` and checksummed with `binascii.crc_hqx`, from code tables written out by hand.
 As for the other files, don't regenerate them from the implementation under test.
+
+## `data.json`
+
+DATA payload vectors (#56), checked by `tests/unit/test_data_vectors.py`. The layout is in
+`docs/protocol.md` ("DATA payload"); the chunk content function is
+`pocketsat.spacecraft.payload.chunk_content` (#43, `docs/spacecraft.md`).
+
+- `frame_type` (4), `chunk_id_size` (4), `min_payload_size` (5: an ID and at least one
+  content byte), and the default chunk and DATA frame sizes (64 and 78).
+- `valid_data[]`: `chunk_id` and `chunk_size`. `content_hex` is the chunk's content
+  (`chunk_content(chunk_id, chunk_size)`); `payload_hex` is the DATA payload, the
+  big-endian uint32 chunk ID followed by the content. Encoding them must produce exactly
+  `payload_hex`, and decoding must give them back. `sequence`, `crc`, and `frame_hex` are
+  the whole DATA frame (version 1, type `0x04`). The set covers the default chunk size,
+  the byte order of the ID, a size that is not a multiple of 4 (the last generator word
+  truncated), a 1-byte chunk, the largest chunk ID, the ID whose generator seed is 0
+  (so it starts from 1), and the largest sequence number.
+- `invalid_data[]`: payloads the decoder must reject, with the reason in `error`: `size`
+  (shorter than `min_payload_size`).
+
+These vectors were generated independently of `pocketsat`: hand-packed with `struct`,
+checksummed with `binascii.crc_hqx`, and the content computed by a separately written
+xorshift32 using modular arithmetic rather than bit masks. As for the other files, don't
+regenerate them from the implementation under test.

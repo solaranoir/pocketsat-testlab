@@ -8,9 +8,10 @@ prints a text report for a few short scenarios::
     uv run python scripts/demo_spacecraft.py --scenario faults   # just one
     uv run python scripts/demo_spacecraft.py --orbits 3 --seed 7
 
-There is no flight computer yet (#47, #56), so the demo scripts the controls each
-tick, including, in the nominal orbit, a labelled stand-in for the downlink's chunk
-releases.
+The nominal orbit runs the real flight computer (#56) for its controls: SCIENCE, then a
+DOWNLINK pass 10 minutes before the end of each orbit, in which the flight computer
+sends the payload's chunks as DATA frames and releases them once sent. The other
+scenarios script the controls each tick.
 
 Only public APIs are used. Simulated time is integer microseconds; the wall clock is
 read only to print how long the demo took.
@@ -28,6 +29,9 @@ from typing import Any, TextIO
 
 from pocketsat.core import RngFactory, SimClock
 from pocketsat.environment import EnvironmentModel, NominalEnvironment
+from pocketsat.flight import FlightComputer, Mode, SpacecraftReadings
+from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
+from pocketsat.messages import Command, decode_data, encode_command
 from pocketsat.spacecraft import (
     NOMINAL_CONFIG,
     Attitude,
@@ -279,41 +283,73 @@ def raised_flags(samples: Sequence[Sample]) -> list[str]:
     return list(seen) or ["none"]
 
 
-RELEASE_EVERY_US = 5 * US_PER_MIN
-"""Period of the scripted chunk release in the nominal orbit."""
+PASS_US = 10 * US_PER_MIN
+"""The DOWNLINK pass in the nominal orbit: 10 minutes before the end of each orbit (#72)."""
 
 
-def downlink_stand_in(now_us: int, state: SpacecraftState) -> SpacecraftControls:
-    """Payload on, and every :data:`RELEASE_EVERY_US` release every whole chunk stored.
+@dataclass
+class FlightComputerDriver:
+    """The real flight computer producing the nominal orbit's controls (#56).
 
-    STAND-IN for the flight computer's downlink (#56), which will release chunks only
-    after sending them as DATA frames. Nothing is actually sent here (comms'
-    ``sent_bytes`` stays 0); the release only keeps the payload buffer from filling.
+    Called at the start of each tick with the state at the end of the previous one, it
+    steps the flight computer for that tick (as ``SilTarget`` does after the subsystem
+    step) and returns the controls it produced. Its commands are scripted: SET_MODE
+    SCIENCE once the boot is over, and BEGIN_DOWNLINK at the start of each pass. The
+    flight computer sends the payload's chunks as DATA frames and releases them once
+    sent; the DATA frames it hands back are counted here, as the ground would.
     """
-    release = None
-    if now_us and now_us % RELEASE_EVERY_US == 0:
-        payload = state.get("payload", PayloadSnapshot).truth
-        if payload.next_chunk_id > payload.oldest_unreleased_chunk_id:
-            release = payload.next_chunk_id - 1
-    return SpacecraftControls(
-        payload=PayloadControls(enabled=True, release_through_chunk_id=release)
-    )
+
+    orbit_us: int
+    controls: SpacecraftControls = field(init=False)
+    fc: FlightComputer = field(default_factory=FlightComputer)
+    sequence: int = 0
+    data_frames: int = 0
+    data_chunk_bytes: int = 0
+    passes: list[float] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.controls = self.fc.reset()
+
+    def _command(self, command: Command) -> bytes:
+        self.sequence += 1
+        return encode_frame(Frame(FrameType.COMMAND, self.sequence, encode_command(command)))
+
+    def __call__(self, now_us: int, state: SpacecraftState) -> SpacecraftControls:
+        if now_us == 0:
+            return self.controls
+        uplink = []
+        if self.fc.mode is Mode.NOMINAL:
+            uplink.append(self._command(Command.set_mode(Mode.SCIENCE)))
+        if self.fc.mode is Mode.SCIENCE and now_us % self.orbit_us >= self.orbit_us - PASS_US:
+            uplink.append(self._command(Command.begin_downlink()))
+            self.passes.append(now_us / US_PER_MIN)
+        output = self.fc.step(uplink, SpacecraftReadings.from_state(state), now_us)
+        for raw in output.downlink_frames:
+            frame = decode_frame(raw)
+            if frame.frame_type is FrameType.DATA:
+                self.data_frames += 1
+                self.data_chunk_bytes += len(decode_data(frame.payload).content)
+        self.controls = output.controls
+        return self.controls
 
 
 def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> None:
-    heading(out, f"1. NOMINAL ORBIT  ({float(orbits):g} orbit(s), payload enabled, seed {seed})")
+    heading(out, f"1. NOMINAL ORBIT  ({float(orbits):g} orbit(s), SCIENCE + DOWNLINK, seed {seed})")
     env = NominalEnvironment()
     run = new_run(seed, tick_us, env_model=env)
-    samples = run.advance(ticks_for(orbits * env.orbit_period_us, tick_us), downlink_stand_in)
+    driver = FlightComputerDriver(orbit_us=env.orbit_period_us)
+    samples = run.advance(ticks_for(orbits * env.orbit_period_us, tick_us), driver)
     out.write(
         f"Orbit {env.orbit_period_us // US_PER_MIN} min:"
         f" sunlit {env.sunlit_us / US_PER_MIN:.1f} min,"
         f" eclipse {env.eclipse_us / US_PER_MIN:.1f} min (ambient +20 C sunlit, -20 C eclipse).\n"
         "Starts DETUMBLING at 45 deg / 1.0 dps (default AttitudeInitial). Truth values,"
         " except 'est' (SOC estimate from the noisy voltage) and bus V (reported).\n"
-        f"Radio commanded RX_TX. Every {RELEASE_EVERY_US // US_PER_MIN} min a scripted release"
-        " frees every stored chunk: a STAND-IN for the flight\n"
-        "computer's downlink (#56); no bytes are actually sent yet.\n\n"
+        "The real flight computer commands the subsystems: SCIENCE (payload on) after the"
+        f" boot, then a DOWNLINK pass {PASS_US // US_PER_MIN} min\n"
+        "before the end of each orbit, sending the stored chunks as DATA frames and releasing"
+        " them once sent (#56). The\n"
+        "capacity is per tick (120 B), so a longer tick downlinks less per second.\n\n"
     )
     write_timeline(out, every(samples, 5 * US_PER_MIN))
 
@@ -349,8 +385,14 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
     last = samples[-1].payload.truth
     out.write(
         f"  payload: produced {last.total_produced_bytes} B,"
-        f" released {last.total_released_bytes} B (scripted stand-in),"
+        f" released {last.total_released_bytes} B once sent,"
         f" buffer fill {last.buffer_fill:.1%}\n"
+    )
+    passes = ", ".join(f"{m:.1f}" for m in driver.passes)
+    out.write(
+        f"  downlink: {f'passes from min {passes}' if passes else 'no pass in this run'};"
+        f" {driver.data_frames} DATA frames, {driver.data_chunk_bytes} B of chunks sent;"
+        f" flight computer ends in {driver.fc.mode.name}\n"
     )
     radio = samples[-1].comms.truth
     out.write(
@@ -359,7 +401,7 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
         f" capacity {radio.transmit_capacity_bytes} B per tick"
         f" ({radio.transmit_capacity_bytes * US_PER_S // tick_us} B/s at this tick),"
         f" draw {radio.transmit_power_w:.2f} W, sent {radio.sent_bytes} B"
-        " (counters wait for #56/#59)\n"
+        " (comms' traffic counters wait for #98)\n"
     )
     out.write(f"  flags raised: {', '.join(raised_flags(samples))}\n")
 

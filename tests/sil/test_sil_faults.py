@@ -9,13 +9,12 @@ Flight computers used here:
 
 - The real :class:`~pocketsat.flight.FlightComputer` (``RealRig``) for the physics,
   the RESET path (boot counter, uptime, BOOT and the boot duration, #49), every ACK
-  (#51), and telemetry (#55): the ``transmitter_off`` command and telemetry tests and
-  the ``forced_reset`` pulse and hold tests. Where a test needs to leave BOOT quickly
-  it builds the flight computer with a short boot (``SHORT_BOOT``).
+  (#51), telemetry (#55), and DATA (#56): the ``transmitter_off`` command, telemetry,
+  and DATA tests and the ``forced_reset`` pulse and hold tests. Where a test needs to
+  leave BOOT quickly it builds the flight computer with a short boot (``SHORT_BOOT``).
 - :class:`ScriptedFlightComputer` (``Rig``) only where the real one lacks the
   behaviour: a command that switches the radio or attitude control directly, and
-  controls forced from the test (to check which controls are held). DATA under
-  ``transmitter_off`` waits for #56: no DATA frame exists to suppress yet.
+  controls forced from the test (to check which controls are held).
 
 The same-tick half of the ADR-0004 §2 timeline is in ``test_sil_target.py``, next to
 the command half.
@@ -48,20 +47,28 @@ from pocketsat.messages import (
     CommandId,
     Telemetry,
     decode_ack,
+    decode_data,
     decode_telemetry,
     encode_command,
 )
 from pocketsat.spacecraft import (
+    DEFAULT_INITIAL_STATE,
+    NOMINAL_CONFIG,
     SENSOR_SUBSYSTEMS,
     AttitudeControls,
     AttitudeSnapshot,
     CommsSnapshot,
+    PayloadInitial,
+    PayloadSnapshot,
+    PayloadTruth,
     PowerSnapshot,
     RadioControls,
     RadioMode,
     SpacecraftControls,
+    SpacecraftInitialState,
     SpacecraftState,
     ThermalSnapshot,
+    chunk_content,
 )
 from pocketsat.targets.base import (
     EnvironmentState,
@@ -134,7 +141,11 @@ class RealRig:
     """A ``SilTarget`` with the real flight computer and a record of every tick."""
 
     def __init__(
-        self, *, config: FlightComputerConfig = DEFAULT_FLIGHT_COMPUTER_CONFIG, seed: int = 7
+        self,
+        *,
+        config: FlightComputerConfig = DEFAULT_FLIGHT_COMPUTER_CONFIG,
+        initial: SpacecraftInitialState = DEFAULT_INITIAL_STATE,
+        seed: int = 7,
     ) -> None:
         self.computers: list[FlightComputer] = []
         self.ticks: list[SilTick] = []
@@ -144,7 +155,9 @@ class RealRig:
             self.computers.append(computer)
             return computer
 
-        self.target = SilTarget(flight_computer_factory=factory, tick_observer=self.ticks.append)
+        self.target = SilTarget(
+            initial=initial, flight_computer_factory=factory, tick_observer=self.ticks.append
+        )
         self.target.reset(seed)
 
     @property
@@ -422,7 +435,7 @@ def test_under_transmitter_off_telemetry_is_suppressed_and_counted_then_resumes(
     # due in a tick with no capacity is suppressed and counted (with the ACK), never
     # sent later, and the cadence resumes when capacity returns: the next frame is one
     # period after the suppressed one, with no burst of missed frames. DATA under
-    # transmitter_off waits for #56.
+    # transmitter_off is the next test.
     rig = RealRig(config=SHORT_BOOT)
     rig.target.advance(10 * TICK)  # ticks 0-9: the boot-complete beacon in tick 9 (1.0 s)
     assert [t.mode for t in telemetry(rig.target.receive())] == [Mode.NOMINAL]
@@ -447,6 +460,68 @@ def test_under_transmitter_off_telemetry_is_suppressed_and_counted_then_resumes(
     # Suppressed frames used no sequence number: the beacon was 0, this is 1.
     assert decode_frame(after[4][0]).sequence == 1
     assert rig.last.traffic.outbound_suppressed_count == 0
+
+
+def test_under_transmitter_off_data_stalls_and_the_chunks_stay_buffered() -> None:
+    # #56's tightened criterion and the #60 gap from PR #114, with the real flight
+    # computer: disabling the transmitter mid-pass stops DATA (capacity 0) and so stalls
+    # the release; the data stays in the payload buffer, DATA is not counted as
+    # suppressed (only ACK/NACK and telemetry are, ADR-0007 §3), and the pass resumes
+    # from the next chunk once the fault is released.
+    chunks = 40
+    fill = (chunks * 64 + 32) / NOMINAL_CONFIG.payload.buffer_capacity_bytes
+    initial = dataclasses.replace(DEFAULT_INITIAL_STATE, payload=PayloadInitial(buffer_fill=fill))
+    rig = RealRig(config=SHORT_BOOT, initial=initial)
+    rig.target.advance(10 * TICK)
+    assert mode_of(rig) is Mode.NOMINAL
+    rig.tick(command_frame(Command.begin_downlink(), sequence=1))
+    sent = [data_ids(rig.tick()) for _ in range(5)]
+    assert sent == [[0], [1], [2], [3], [4]]
+
+    rig.target.inject(fault(TRANSMITTER_OFF, duration_us=20 * TICK))
+    stalled = [rig.tick() for _ in range(20)]
+    assert stalled == [[]] * 20
+    faulted = rig.ticks[-20:]
+    assert all(t.traffic.sent_bytes == 0 for t in faulted)
+    assert all(t.controls.radio.mode is RadioMode.RX_ONLY for t in faulted)
+    # Chunk 4, sent just before the fault, is released in its first tick; nothing after.
+    released = [payload_of(t).oldest_unreleased_chunk_id for t in faulted]
+    assert released == [5] * 20
+    assert all(
+        payload_of(t).buffered_bytes == payload_of(faulted[0]).buffered_bytes for t in faulted
+    )
+    assert all(
+        payload_of(t).total_produced_bytes
+        == payload_of(t).buffered_bytes + payload_of(t).total_released_bytes
+        for t in faulted
+    )
+    # Only the telemetry frames due during the fault are counted, never DATA.
+    assert sum(t.traffic.outbound_suppressed_count for t in faulted) == 2
+    assert mode_of(rig) is Mode.DOWNLINK
+
+    # Released: the pass resumes at chunk 5 and completes.
+    resumed: list[int] = []
+    for _ in range(100):
+        resumed += data_ids(rig.tick())
+        if mode_of(rig) is Mode.NOMINAL:
+            break
+    assert resumed == list(range(5, chunks))
+    assert payload_of(rig.last).oldest_unreleased_chunk_id == chunks
+
+
+def data_ids(frames: list[bytes]) -> list[int]:
+    """The chunk IDs of the DATA frames among ``frames``, checked against their content."""
+    ids: list[int] = []
+    for frame in map(decode_frame, frames):
+        if frame.frame_type is FrameType.DATA:
+            chunk = decode_data(frame.payload)
+            assert chunk.content == chunk_content(chunk.chunk_id, 64)
+            ids.append(chunk.chunk_id)
+    return ids
+
+
+def payload_of(tick: SilTick) -> PayloadTruth:
+    return tick.state.get("payload", PayloadSnapshot).truth
 
 
 def test_transmitter_off_with_a_radio_command_still_executes_it() -> None:

@@ -18,6 +18,7 @@ from pocketsat.frame import (
     FrameType,
     FrameTypeError,
     crc16_ccitt_false,
+    crc16_ccitt_false_table,
     decode_frame,
     encode_frame,
 )
@@ -72,7 +73,7 @@ def test_frame_rejects_out_of_range_fields(kwargs: dict[str, object]) -> None:
         Frame(frame_type=FrameType.ACK, **kwargs)  # type: ignore[arg-type]
 
 
-# --- Table-driven CRC (#78) -----------------------------------------------------------
+# --- CRC: the codec's (binascii, #56) and the table-driven reference (#78) ----------------
 
 
 def _bitwise_crc16_ccitt_false(data: bytes) -> int:
@@ -98,17 +99,19 @@ def _crc_inputs() -> list[bytes]:
 
 def test_crc_parameters_are_ccitt_false() -> None:
     assert (CRC16_POLY, CRC16_INIT) == (0x1021, 0xFFFF)
-    assert crc16_ccitt_false(b"123456789") == 0x29B1
-    assert crc16_ccitt_false(b"") == 0xFFFF
+    for crc in (crc16_ccitt_false, crc16_ccitt_false_table):
+        assert crc(b"123456789") == 0x29B1
+        assert crc(b"") == 0xFFFF
 
 
 def test_table_crc_matches_the_bitwise_reference() -> None:
     for data in _crc_inputs():
-        assert crc16_ccitt_false(data) == _bitwise_crc16_ccitt_false(data), data.hex()
+        assert crc16_ccitt_false_table(data) == _bitwise_crc16_ccitt_false(data), data.hex()
 
 
-def test_table_crc_matches_binascii_crc_hqx_from_init_0xffff() -> None:
+def test_codec_crc_matches_the_table_and_binascii_crc_hqx_from_init_0xffff() -> None:
     # binascii.crc_hqx is the same polynomial (0x1021, unreflected, no final XOR) with
     # the initial value as its second argument, so from 0xFFFF it is CCITT-FALSE.
     for data in _crc_inputs():
-        assert crc16_ccitt_false(data) == binascii.crc_hqx(data, 0xFFFF), data.hex()
+        expected = crc16_ccitt_false_table(data)
+        assert crc16_ccitt_false(data) == expected == binascii.crc_hqx(data, 0xFFFF), data.hex()

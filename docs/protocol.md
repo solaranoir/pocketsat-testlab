@@ -1,12 +1,13 @@
 # PocketSat Wire Protocol
 
-Status: Phase 1. Implements ADR-0002. The [telemetry payload](#telemetry-payload) (#54)
-and the [command and ACK payloads](#commands) with their NACK reason codes (#52) are
-defined; the maximum payload size is **TBD**.
+Status: Phase 1. Implements ADR-0002. The [telemetry payload](#telemetry-payload) (#54),
+the [command and ACK payloads](#commands) with their NACK reason codes (#52), and the
+[DATA payload](#data-payload) (#56) are defined; the maximum payload size is **TBD**.
 
 Python implementation: `pocketsat.frame` (frames) and `pocketsat.messages` (telemetry,
-command, and ACK payloads). Shared test vectors: `tests/vectors/frames.json`,
-`tests/vectors/telemetry.json`, and `tests/vectors/commands.json`.
+command, ACK, and DATA payloads). Shared test vectors: `tests/vectors/frames.json`,
+`tests/vectors/telemetry.json`, `tests/vectors/commands.json`, and
+`tests/vectors/data.json`.
 
 ## Frame layout
 
@@ -37,13 +38,15 @@ sync    ver  type  seq    len     payload  crc
 CRC-16/CCITT-FALSE: width 16, poly `0x1021`, init `0xFFFF`, no input or output
 reflection, no final XOR. Check value: CRC of ASCII `"123456789"` is `0x29B1`.
 
-`pocketsat.frame` computes it with a 256-entry lookup table, one table lookup per byte
-(#78); entry `n` is the register after shifting byte `n` through it bit by bit from zero.
-The output is identical to the bit-by-bit definition, which the unit tests keep as a
-reference. The table mirrors what the Phase 7 MCU firmware will do. Python's
-`binascii.crc_hqx(data, 0xFFFF)` computes the same CRC in C, about 20 times faster than
-the table; it is an equivalent drop-in if CRC cost ever matters again (the unit tests
-already check the equivalence).
+The reference algorithm is a 256-entry lookup table, one table lookup per byte
+(`pocketsat.frame.crc16_ccitt_false_table`, #78); entry `n` is the register after
+shifting byte `n` through it bit by bit from zero. It is what the Phase 7 MCU firmware
+will do, and its output is identical to the bit-by-bit definition, which the unit tests
+keep as a reference. The frame codec itself (`crc16_ccitt_false`) computes the same CRC
+with Python's `binascii.crc_hqx(data, 0xFFFF)`, in C: a DOWNLINK pass frames a 78-byte
+DATA frame every tick, where the table loop cost about 10 µs of the 100 µs per-tick
+budget (#56). The unit tests check the codec's CRC, the table, and the bitwise
+reference against each other and against the shared vectors.
 
 ## Decoding and errors
 
@@ -67,6 +70,7 @@ HIL bridge.
 | `0x01` | COMMAND | ground → spacecraft | Command ID and arguments, see [COMMAND payload](#command-payload) |
 | `0x02` | TELEMETRY | spacecraft → ground | Fixed 26-byte [telemetry payload](#telemetry-payload) |
 | `0x03` | ACK | spacecraft → ground | Fixed 4-byte [ACK payload](#ack-payload), for both ACK and NACK |
+| `0x04` | DATA | spacecraft → ground | One payload data chunk: its ID and content, see [DATA payload](#data-payload) |
 
 ## Message types
 
@@ -79,6 +83,7 @@ use typed, immutable messages (`pocketsat.messages`, `pocketsat.targets.base`).
 | `ParsedCommand`, `MalformedCommand` | `pocketsat.messages` | Result of `decode_command` on the spacecraft: a valid command (`command_id`, SET_MODE `target`), or the received ID and a `DecodeReason` for the NACK (#52). |
 | `CommandAck` | `pocketsat.messages` | An ACK frame payload: the answered command's `sequence` and `command_id`, and the NACK `reason` (`None` for an ACK) (`encode_ack`, `decode_ack`). |
 | `Telemetry` | `pocketsat.messages` | Decoded TELEMETRY payload: reported values at wire resolution (`decode_telemetry`). |
+| `DataChunk` | `pocketsat.messages` | A DATA frame payload: one payload chunk's `chunk_id` and `content` (`encode_data`, `decode_data`, #56). |
 | `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47), assembled by the telemetry scheduler (#55). |
 | `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. |
 | `EnvironmentState` | `pocketsat.targets.base` | Per-tick environment inputs; delivered by `apply_environment()`. |
@@ -426,6 +431,88 @@ execute-commands phases (`pocketsat.flight.computer`, ADR-0004 §2 step c).
 - Changing an existing layout, or reusing a code, requires a protocol version change
   (the frame Version byte) and an ADR.
 
+## DATA payload
+
+Defined in #56. Python: `encode_data` and `decode_data` (`DataChunk`) in
+`pocketsat.messages`. Shared vectors: `tests/vectors/data.json`. This section and those
+vectors are the contract the Phase 7 firmware must match.
+
+A DATA frame carries one payload data chunk (#43): its ID and its content. Only the
+spacecraft sends DATA, only in DOWNLINK, through the flight computer's downlink session
+([docs/spacecraft-modes.md](spacecraft-modes.md#downlink-session)). The payload owns the
+data, the flight computer moves it, and comms only provides the capacity (ADR-0004 §13).
+
+### DATA layout
+
+All multi-byte fields are big-endian.
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| 0 | `chunk_id` | uint32 | The chunk's ID: sequential from 0 in the order the payload stored the chunks (`PayloadReadings.oldest_unreleased_chunk_id` .. `next_chunk_id` − 1) |
+| 4 | `content` | chunk size | The chunk's bytes, [`chunk_content(chunk_id, chunk_size)`](#chunk-content) |
+
+The chunk size is not on the wire: every chunk has the payload's configured size
+(`PayloadConfig.chunk_size_bytes`, default **64**), which the flight software is built
+with (`FlightComputerConfig.downlink`) and the ground knows, and the content is simply
+the rest of the payload. So a DATA payload is 4 + the chunk size, and a DATA frame is 14
++ the chunk size: **78 bytes** for the default chunk, which fits the default 120-byte
+transmit capacity of one tick with room for an ACK or a telemetry frame, not both.
+
+Example, the `chunk_0_size_8` vector (DATA, sequence 0, chunk 0 of an 8-byte chunk size):
+
+```
+a5 5a 01 04 00 00 00 0c | 00 00 00 00 | 29 d0 4a 51 33 d5 39 9c | 0c f2
+frame header (len 12)     chunk_id      content                   crc
+```
+
+### Chunk content
+
+Chunk content is a pure function of the chunk ID (#43,
+`pocketsat.spacecraft.payload.chunk_content`), so the payload stores no bytes and the
+ground regenerates every chunk to check it. It uses 32-bit integer operations only, so C
+firmware reproduces it bit for bit:
+
+1. `x = (chunk_id × 0x9E3779B1 + 0x7F4A7C15) mod 2³²`; if `x` is 0, use 1.
+2. Repeat: advance `x` with xorshift32 (`x ^= x << 13`, `x ^= x >> 17`, `x ^= x << 5`,
+   each mod 2³²) and append `x` as 4 big-endian bytes.
+3. Truncate to the chunk size.
+
+A receiver that compares each DATA frame's content with `chunk_content(chunk_id, size)`
+detects corruption; comparing the IDs with the last one received detects loss and
+duplication.
+
+### DATA decoding
+
+`decode_data` raises `DataDecodeError` for a payload shorter than 5 bytes (a chunk ID
+and at least one content byte; the chunk size is at least 1). It returns the content as
+received: checking it against the expected content is the receiver's job, because only
+the receiver knows the chunk size. `encode_data` accepts chunk IDs 0 .. 0xFFFFFFFF and
+content of 1 .. 65 531 bytes, so the payload fits the frame's length field.
+
+### Order, release, and loss
+
+- **In order, once each.** The downlink session sends the oldest unsent chunks first and
+  stops at the first chunk whose frame does not fit the capacity left after ACK/NACK and
+  telemetry ([below](#downlink-sequence-and-transmit-capacity)), so within a session
+  chunk IDs go up by one from frame to frame, never skip, and never repeat. A session
+  cut short (SAFE, FAULT, RESET, or a command) is resumed by the next one from the oldest
+  chunk the payload still holds, which is the first chunk not sent.
+- **Released once sent (Phase 1).** The flight computer releases a chunk once its frame
+  is sent (`PayloadControls.release_through_chunk_id`, applied by the payload in the next
+  tick, ADR-0004 §13). There is no acknowledgement from the ground: a DATA frame lost on
+  the way down is lost. Releasing only once the ground acknowledges, and retransmitting,
+  is a later phase; it changes the flight computer's release rule only, not this layout.
+- **Not suppressed.** A chunk whose frame does not fit is not counted as suppressed: it
+  stays in the payload buffer and is sent in a later tick (ADR-0007 §3).
+
+### DATA wire-contract rules
+
+- The layout (a uint32 chunk ID, then the content) is fixed. Changing it, or carrying
+  the chunk size on the wire, requires a protocol version change (the frame Version
+  byte) and an ADR.
+- The chunk content function is part of the contract: changing it changes every
+  chunk's bytes, so it needs the same.
+
 ## Downlink sequence and transmit capacity
 
 Every frame the spacecraft sends goes through one outbound queue in the flight computer
@@ -442,6 +529,9 @@ Every frame the spacecraft sends goes through one outbound queue in the flight c
 - **Suppression.** ACK/NACK and telemetry frames that do not fit are counted in the
   tick's `outbound_suppressed_count` (`FlightComputerOutput`, ADR-0007 §3). DATA that does
   not fit is not counted: its chunk stays in the payload buffer for a later tick.
+- **DATA stops at the first frame that does not fit** (#56): the outbound queue would let
+  a later, smaller frame through, but the downlink session offers no chunk after one
+  that did not fit, so chunks are never sent out of order.
 - **Sequence.** The header sequence of every downlink frame, all types, comes from one
   counter (the spacecraft → ground direction) that starts at 0 on power-on and after
   every reboot, goes up by one per frame **sent**, and wraps `0xFFFF` → `0x0000`. A

@@ -6,17 +6,20 @@ defaults: 92-minute orbit, 35% eclipse) and a ``SimClock`` at the default 100 ms
 for three full orbits, with the default settings and starting state, the payload
 commanded on (``controls.payload.enabled``), and the radio ``RX_TX``.
 
-There is no flight computer yet (#47, #56). Two consequences:
+The stack runs without a flight computer, on purpose: the payload is commanded on for
+all three orbits, which no flight computer mode does (DOWNLINK switches it off, #47), so
+this run covers acquisition against its inhibits throughout. Two consequences:
 
 - **Nothing is downlinked.** Comms sends nothing (``sent_bytes == 0`` every tick):
   moving chunks into DATA frames within the transmit capacity is the flight computer's
-  downlink (#56). So is story #42's "bytes sent minus bytes released is never more
-  than one tick's worth", and the radio-transmit inhibits, which the flight computer
-  enforces when it decides what to send; #56 verifies both.
+  downlink (#56). Story #42's "bytes sent minus bytes released is never more than one
+  tick's worth" and the radio-transmit inhibits are verified with the real flight
+  computer in ``test_downlink_story.py`` (three orbits of the reference profile through
+  ``SilTarget``), ``test_downlink_sil.py``, and ``tests/unit/test_downlink.py``.
 - **Releases are scripted.** Every :data:`RELEASE_EVERY_TICKS` ticks the test releases
-  every whole chunk stored, as a stand-in for the flight computer's release rule, so
-  the buffer never fills and acquisition depends only on the inhibits. Released data is
-  not sent anywhere; the release exercises the data accounting.
+  every whole chunk stored, so the buffer never fills and acquisition depends only on
+  the inhibits. Released data is not sent anywhere; the release exercises the data
+  accounting.
 
 Verified here, at every tick:
 

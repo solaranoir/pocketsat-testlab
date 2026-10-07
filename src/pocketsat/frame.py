@@ -18,6 +18,7 @@ The same format is implemented in MCU firmware; both implementations are checked
 against the shared vectors in ``tests/vectors/``.
 """
 
+import binascii
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
@@ -47,6 +48,8 @@ class FrameType(IntEnum):
     COMMAND = 0x01
     TELEMETRY = 0x02
     ACK = 0x03
+    DATA = 0x04
+    """Spacecraft to ground: one payload data chunk, its ID and content (#56)."""
 
 
 class FrameError(ValueError):
@@ -120,17 +123,34 @@ _CRC16_TABLE: Final = _crc16_table()
 def crc16_ccitt_false(data: bytes) -> int:
     """Compute CRC-16/CCITT-FALSE (poly ``0x1021``, init ``0xFFFF``, no reflection, no xorout).
 
-    Table-driven, one lookup per byte (#78): about six times faster than the bit-by-bit
-    loop it replaced, with identical output (checked against a bitwise reference in
-    ``tests/unit/test_frame.py`` and the shared vectors). Integer-only, so portable
-    (ADR-0006); the MCU firmware can use the same table. ``binascii.crc_hqx(data,
-    0xFFFF)`` is an equivalent, faster (C) option if CRC cost ever matters again.
+    The frame codec's CRC. It runs in C, as ``binascii.crc_hqx(data, 0xFFFF)``: the same
+    polynomial, unreflected, no final XOR, with the initial value as its second argument.
+    #56 switched to it from :func:`crc16_ccitt_false_table` (#78) because a DOWNLINK pass
+    frames a 78-byte DATA frame every tick, and the table loop in Python cost about 10 us
+    of the 100 us per-tick budget; the output is identical (checked against the table, a
+    bitwise reference, and the shared vectors in ``tests/unit/test_frame.py``).
 
     Args:
         data: Bytes to checksum.
 
     Returns:
         The 16-bit CRC. The check value for ``b"123456789"`` is ``0x29B1``.
+    """
+    return binascii.crc_hqx(data, CRC16_INIT)
+
+
+def crc16_ccitt_false_table(data: bytes) -> int:
+    """CRC-16/CCITT-FALSE, table-driven: the reference the MCU firmware mirrors (#78).
+
+    One lookup per byte in a 256-entry table, integer-only, so portable (ADR-0006) and
+    the same algorithm the Phase 7 firmware will use. Identical output to
+    :func:`crc16_ccitt_false`, which the frame codec uses because it runs in C.
+
+    Args:
+        data: Bytes to checksum.
+
+    Returns:
+        The 16-bit CRC.
     """
     table = _CRC16_TABLE
     crc = CRC16_INIT
