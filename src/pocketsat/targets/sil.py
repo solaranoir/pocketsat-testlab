@@ -9,8 +9,8 @@ only bytes in and bytes out (ADR-0002).
 
 a. :meth:`SilTarget._merge_controls`: the flight computer's controls from the previous
    tick (BOOT's controls on tick 0), merged with the active fault overrides, with
-   precedence fault > flight computer (#60, see below). #98 adds the radio traffic
-   (ADR-0007) in the same function.
+   precedence fault > flight computer (#60, see below), and the previous tick's radio
+   traffic for comms (ADR-0007, #98, see below).
 b. The subsystems step in ``STEP_ORDER`` with the merged controls, publishing each
    snapshot to the board.
 c. to f. The uplink frames sent since the last tick are delivered to the flight
@@ -76,13 +76,20 @@ tick is a caller error and raises ``ValueError`` instead of being rounded. The f
 computer is called with the time at the **end** of the tick, the instant the readings
 it receives describe.
 
-**Radio traffic and #98 (ADR-0007).** ADR-0007 routes each tick's traffic to comms as
-a ``RadioTraffic`` record in ``SpacecraftControls.radio_traffic``, filled at step a of
-the next tick. That record, the controls field, and comms' use of it are #98's. This
-module computes the three per-tick values and holds them in :class:`TickTraffic` (the
-same fields as ``RadioTraffic``), so #98 only has to merge them into the controls in
-:meth:`SilTarget._merge_controls`. No running totals are kept here: comms will own them
-(ADR-0007 §3).
+**Radio traffic (ADR-0007, #98).** Each tick ``SilTarget`` computes the tick's three
+per-tick traffic values, the wire bytes of the flight computer's downlink frames
+(``FlightComputerOutput.sent_bytes``), the uplink frames lost because the receiver was
+off, and the flight computer's suppressed-frame count, and holds them in
+:class:`TickTraffic` (:attr:`SilTarget.handover_traffic`). At step a of the next tick
+:meth:`SilTarget._merge_controls` puts them into ``SpacecraftControls.radio_traffic``
+as a :class:`~pocketsat.spacecraft.controls.RadioTraffic`, and comms validates them,
+charges the bytes, and keeps the running totals. So comms reports tick N's traffic in
+tick N+1, and power sees its energy in tick N+2. ``SilTarget`` keeps no running totals
+and does not re-arbitrate, trim, or drop outbound frames: the flight computer keeps
+within the capacity, and comms rejects a record that does not (``ValueError`` out of
+:meth:`SilTarget.advance`). The traffic is handed over in every tick, also while a
+``forced_reset`` holds the flight computer (it then sends nothing, but lost uplink is
+still counted).
 
 Deterministic: same configuration, starting state, seed, and inputs give identical
 downlink bytes. No wall-clock time and no global randomness; every random stream
@@ -108,9 +115,11 @@ from pocketsat.spacecraft.config import (
     SpacecraftInitialState,
 )
 from pocketsat.spacecraft.controls import (
+    NO_RADIO_TRAFFIC,
     SENSOR_SUBSYSTEMS,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SpacecraftControls,
 )
 from pocketsat.spacecraft.payload import Payload
@@ -167,9 +176,11 @@ class TickTraffic:
     tick (ADR-0007 §1, §3).
 
     Internal to ``SilTarget``: it never crosses ``TestTarget``. The fields are exactly
-    those of ADR-0007's ``RadioTraffic``, which #98 adds to ``SpacecraftControls``; #98
-    builds that record from this one in :meth:`SilTarget._merge_controls`. All values
-    are per tick, never running totals. Built only by ``SilTarget``, so not validated.
+    those of ADR-0007's :class:`~pocketsat.spacecraft.controls.RadioTraffic`, which
+    :meth:`SilTarget._merge_controls` builds from this record for
+    ``SpacecraftControls.radio_traffic`` in the next tick. All values are per tick,
+    never running totals. Built only by ``SilTarget``, so not validated (the
+    ``RadioTraffic`` built from it is).
 
     Attributes:
         sent_bytes: Wire bytes of every frame the flight computer sent in the tick
@@ -208,7 +219,9 @@ class SilTick:
         undecodable_uplink_count: Frames received while the receiver was on that were
             not valid wire frames (bad sync, length, CRC, or type); dropped and never
             passed on. Not part of ``uplink_lost_count`` (ADR-0007 §3).
-        traffic: The tick's radio traffic, handed to comms in the next tick (#98).
+        traffic: The tick's radio traffic, handed to comms in the next tick as
+            ``controls.radio_traffic`` (ADR-0007). This tick's :attr:`controls` carry
+            the previous tick's.
         downlink_frames: The frames the flight computer sent, in transmit order; the
             same frames :meth:`SilTarget.receive` returns.
         next_controls: The controls the flight computer produced for the next tick
@@ -403,8 +416,8 @@ class SilTarget:
     def handover_traffic(self) -> TickTraffic:
         """The radio traffic of the most recent tick, waiting for step a of the next.
 
-        Zero after ``reset(seed)``, so tick 0 hands over nothing (ADR-0007 §3). #98
-        merges it into ``SpacecraftControls.radio_traffic``.
+        Zero after ``reset(seed)``, so tick 0 hands over nothing (ADR-0007 §3).
+        :meth:`_merge_controls` puts it into ``SpacecraftControls.radio_traffic``.
         """
         return self._handover_traffic
 
@@ -560,10 +573,15 @@ class SilTarget:
           working; ``OFF`` and ``RX_ONLY`` already have the transmitter off).
           ``sensor_freeze`` adds its subsystems to ``frozen_sensors``.
           ``battery_drain`` sets ``extra_load_w`` to the sum of the active drains'
-          ``load_w``, in injection order. With no fault active, the flight
-          computer's controls pass through unchanged (the same object).
-        - **#98 (ADR-0007)** sets ``radio_traffic`` from :attr:`handover_traffic`, the
-          previous tick's :class:`TickTraffic` (zeros on tick 0).
+          ``load_w``, in injection order.
+        - **Radio traffic (ADR-0007, #98).** ``radio_traffic`` is set from
+          :attr:`handover_traffic`, the previous tick's :class:`TickTraffic` (zeros on
+          tick 0), replacing whatever the flight computer's controls carry (its own
+          controls carry :data:`~pocketsat.spacecraft.controls.NO_RADIO_TRAFFIC`). It
+          is independent of the fault overrides: ``transmitter_off`` never touches it.
+
+        With no fault active and no traffic to hand over, the flight computer's
+        controls pass through unchanged (the same object).
 
         ``forced_reset`` is not a control override: it is handled in the tick itself
         (see the module docstring), and the controls it holds are these merged ones.
@@ -576,9 +594,29 @@ class SilTarget:
             The controls every subsystem obeys this tick.
         """
         now_us = self._clock.now_us
+        handover = self._handover_traffic
+        if handover.sent_bytes or handover.uplink_lost_count or handover.outbound_suppressed_count:
+            traffic = RadioTraffic(
+                handover.sent_bytes,
+                handover.uplink_lost_count,
+                handover.outbound_suppressed_count,
+            )
+        else:
+            traffic = NO_RADIO_TRAFFIC
         self._faults = [f for f in self._faults if f.end_us is None or now_us < f.end_us]
         if not self._faults:
-            return flight_controls
+            if flight_controls.radio_traffic is traffic:
+                return flight_controls
+            # Field by field rather than dataclasses.replace: this runs in every tick
+            # that sent a frame (#78's budget).
+            return SpacecraftControls(
+                flight_controls.payload,
+                flight_controls.radio,
+                flight_controls.attitude,
+                flight_controls.frozen_sensors,
+                flight_controls.extra_load_w,
+                traffic,
+            )
 
         transmitter_off = False
         frozen = flight_controls.frozen_sensors
@@ -592,14 +630,24 @@ class SilTarget:
             else:  # BATTERY_DRAIN
                 drain_w = active.extra_load_w if drain_w is None else drain_w + active.extra_load_w
 
-        controls = flight_controls
-        if transmitter_off and controls.radio.mode is RadioMode.RX_TX:
-            controls = replace(controls, radio=RadioControls(mode=RadioMode.RX_ONLY))
-        if frozen != controls.frozen_sensors:
-            controls = replace(controls, frozen_sensors=frozen)
-        if drain_w is not None:
-            controls = replace(controls, extra_load_w=drain_w)
-        return controls
+        radio = flight_controls.radio
+        if transmitter_off and radio.mode is RadioMode.RX_TX:
+            radio = RadioControls(mode=RadioMode.RX_ONLY)
+        extra_load_w = flight_controls.extra_load_w if drain_w is None else drain_w
+        if (
+            radio is flight_controls.radio
+            and frozen == flight_controls.frozen_sensors
+            and extra_load_w == flight_controls.extra_load_w
+            and traffic is flight_controls.radio_traffic
+        ):
+            return flight_controls  # the faults change nothing here (e.g. OFF stays OFF)
+        return replace(
+            flight_controls,
+            radio=radio,
+            frozen_sensors=frozen,
+            extra_load_w=extra_load_w,
+            radio_traffic=traffic,
+        )
 
     def _reset_hold(self) -> tuple[bool, bool]:
         """Whether a ``forced_reset`` holds the flight computer this tick, and whether
@@ -620,7 +668,8 @@ class SilTarget:
 
         start_us = self._clock.now_us
 
-        # a. Merge the previous tick's controls with the fault overrides.
+        # a. Merge the previous tick's controls with the fault overrides and the
+        # previous tick's radio traffic (ADR-0007).
         controls = self._merge_controls(self._next_controls)
         active_faults = tuple(active.fault for active in self._faults)
         held, rebooted = self._reset_hold()

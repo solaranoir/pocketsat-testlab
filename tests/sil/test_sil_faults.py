@@ -42,6 +42,7 @@ from pocketsat.flight import (
 from pocketsat.flight.boot import BootConfig
 from pocketsat.frame import Frame, FrameType, decode_frame, encode_frame
 from pocketsat.messages import (
+    TELEMETRY_FRAME_SIZE,
     Command,
     CommandAck,
     CommandId,
@@ -53,6 +54,7 @@ from pocketsat.messages import (
 )
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
+    NO_RADIO_TRAFFIC,
     NOMINAL_CONFIG,
     SENSOR_SUBSYSTEMS,
     AttitudeControls,
@@ -64,6 +66,7 @@ from pocketsat.spacecraft import (
     PowerSnapshot,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SpacecraftControls,
     SpacecraftInitialState,
     SpacecraftState,
@@ -711,7 +714,10 @@ def test_forced_reset_pulse_reboots_in_the_injection_tick_and_boot_controls_foll
     assert rig.fc.uptime_us == TICK  # rebooted at 1.2 s, stepped at 1.3 s
     assert rig.last.next_controls == BOOT_CONTROLS
     rig.tick()
-    assert rig.last.controls == BOOT_CONTROLS
+    # BOOT's controls, with the PING's ACK from the reboot tick handed to comms.
+    assert rig.last.controls == dataclasses.replace(
+        BOOT_CONTROLS, radio_traffic=RadioTraffic(sent_bytes=len(downlink[0]))
+    )
 
 
 def test_forced_reset_holds_the_flight_computer_for_its_duration() -> None:
@@ -757,7 +763,14 @@ def test_forced_reset_holds_the_flight_computer_for_its_duration() -> None:
     # 2.5 s (uptime 1 s), so BOOT's controls apply for 9 more ticks, then NOMINAL's.
     rig.target.advance(10 * TICK)
     after = rig.ticks[-10:]
-    assert [t.controls for t in after] == [BOOT_CONTROLS] * 9 + [NOMINAL_CONTROLS]
+    # Traffic handed to comms: the PING's ACK from the reboot tick, then nothing until
+    # the boot-complete beacon (TELEMETRY_FRAME_SIZE bytes) of the ninth tick.
+    assert [t.controls.radio_traffic.sent_bytes for t in after] == [len(downlink[0])] + [0] * 8 + [
+        TELEMETRY_FRAME_SIZE
+    ]
+    assert [dataclasses.replace(t.controls, radio_traffic=NO_RADIO_TRAFFIC) for t in after] == [
+        BOOT_CONTROLS
+    ] * 9 + [NOMINAL_CONTROLS]
     assert attitude_power(after[0]) == 0.0
     assert mode_of(rig) is Mode.NOMINAL
     assert rig.fc.boot_count == 1

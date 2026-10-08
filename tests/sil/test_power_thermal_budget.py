@@ -1,24 +1,26 @@
 """Power, thermal, and data budget tests (#72). See ``docs/power-thermal-budget.md``.
 
-The real ``Power``, ``Thermal``, ``Attitude``, ``Payload``, and ``Comms`` run in one
-``SubsystemStack`` sharing a ``SnapshotBoard``, driven by ``NominalEnvironment``
-(92-minute orbit, 35% eclipse, 20 °C sunlit and -20 °C eclipse ambient) and a
-``SimClock`` at the default 100 ms tick, never coarsened: transmit capacity and the
+Every profile runs on ``SilTarget``: the real ``Power``, ``Thermal``, ``Attitude``,
+``Payload``, and ``Comms`` on one ``SnapshotBoard``, and the real flight computer,
+driven through the ``TestTarget`` interface by ``_reference_profile.ProfileGround``
+under ``NominalEnvironment`` (92-minute orbit, 35% eclipse, 20 °C sunlit and -20 °C
+eclipse ambient) at the default 100 ms tick, never coarsened: transmit capacity and the
 per-byte transmit draw are per tick, so the budget only holds at 100 ms.
 
-There is no flight computer yet, so each profile scripts ``SpacecraftControls`` the way
-the flight computer's mode table will (#47), through ``ProfileDriver``. The profiles, the
-driver, and the traffic and release stand-ins (until #56 and #59 send real traffic) live
-in ``_reference_profile.py``, shared with the epic #30 close-out test (#70).
-
-Re-check this budget once #56 and #59 send real traffic.
+**Real traffic (#98).** The flight computer's mode table sets the controls (#47), and
+every transmitted byte is a real frame (telemetry, ACK/NACK, DATA) that ``SilTarget``
+reports to comms (ADR-0007), so comms' ``transmit_power_w`` carries the transmit energy
+and power integrates it two ticks after each frame. #72's stand-ins (an assumed 64-byte
+beacon and a full-capacity pass charged through ``extra_load_w``, and a scripted chunk
+release) are retired; ``extra_load_w`` is used only by the +1 W sensitivity check, as a
+real ``battery_drain`` fault. Each orbit's measured traffic (bytes by frame type, and
+the per-byte transmit energy) is reported with the results.
 
 Every profile runs whole orbits at the default tick. Failure messages name the margin
 that was violated and its actual value. Each profile's results are printed (run with
 ``-s`` to see them).
 """
 
-import itertools
 import math
 import time
 from collections.abc import Callable
@@ -26,18 +28,21 @@ from dataclasses import dataclass, field
 
 import pytest
 from _reference_profile import (
-    BEACON_PERIOD_US,
     PASS_US,
     REFERENCE,
+    TELEMETRY_PERIOD_US,
     US_PER_S,
     Profile,
-    ProfileDriver,
-    data_frames_in_tick,
-    real_stack,
+    ProfileGround,
+    data_frame_bytes,
+    reset_state,
 )
 
-from pocketsat.core.clock import SimClock
+from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.environment import NominalEnvironment
+from pocketsat.flight import Mode
+from pocketsat.frame import FrameType, decode_frame
+from pocketsat.messages import ACK_FRAME_SIZE, TELEMETRY_FRAME_SIZE
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -90,9 +95,9 @@ the survival heater runs less (about 12% of the effect). A sign error or a unit 
 (hours, kilo) is off by a factor of 2 or more."""
 
 DOWNLINK_LOW_BATTERY_ORBITS = 3
-"""Continuous DOWNLINK raises ``low_battery`` within this many orbits from the default
-start (about 1.9 Wh lost per orbit; with seed 1 it sets at the end of the second
-orbit)."""
+"""Continuous full-capacity transmit raises ``low_battery`` within this many orbits from
+the default start (about 1.9 Wh lost per orbit; with seed 1 it sets at the end of the
+second orbit)."""
 
 STRESSED_LOW_BATTERY_ORBITS = 2
 """SCIENCE under :data:`STRESSED_CONFIG` raises ``low_battery`` within this many orbits
@@ -110,9 +115,11 @@ COLD_HEATER_DUTY = 0.95
 """In the cold case the heater is on for at least this fraction of the ticks after it
 first switches on."""
 
-NOMINAL = Profile("NOMINAL", payload=False, downlink="none")
+NOMINAL = Profile("NOMINAL", science=False, downlink="none")
 SCIENCE = Profile("SCIENCE", downlink="none")
-CONTINUOUS_DOWNLINK = Profile("continuous DOWNLINK", downlink="continuous")
+CONTINUOUS_TRANSMIT = Profile(
+    "continuous full-capacity transmit (SCIENCE, transmitter keyed)", downlink="none", keyed=True
+)
 TUMBLING = Profile("tumbling (attitude control off)", attitude=False)
 STRESSED_SCIENCE = Profile("SCIENCE, stressed configuration", downlink="none")
 COLD_SCIENCE = Profile("SCIENCE, -150 °C cold case", downlink="none")
@@ -131,9 +138,16 @@ class OrbitStats:
     battery_change_wh: float = 0.0
     """(SOC at the end - SOC at the start) x battery capacity."""
     heater_wh: float = 0.0
-    beacon_wh: float = 0.0
-    pass_wh: float = 0.0
     transmitter_idle_wh: float = 0.0
+    """The transmitter's idle draw, as power drew it."""
+    telemetry_wh: float = 0.0
+    """Per-byte transmit energy power drew outside the pass window."""
+    pass_wh: float = 0.0
+    """Per-byte transmit energy power drew in the pass window."""
+    sent_bytes: dict[str, int] = field(default_factory=dict)
+    """Wire bytes the flight computer sent in the orbit, by frame type (measured)."""
+    downlink_ticks: int = 0
+    """Ticks the flight computer spent in DOWNLINK."""
     sunlit_ticks: int = 0
     eclipse_ticks: int = 0
     heater_eclipse_ticks: int = 0
@@ -147,6 +161,9 @@ class OrbitStats:
     electronics_c: tuple[float, float] = (math.inf, -math.inf)
     produced_bytes: int = 0
     buffered_end_bytes: int = 0
+    buffered_after_downlink_bytes: int | None = None
+    """The payload buffer in the first tick after the orbit's DOWNLINK session."""
+    modes: set[Mode] = field(default_factory=set)
     flags: dict[str, int] = field(default_factory=dict)
     """Flag name -> simulated time (µs from the start of the run) it first set."""
 
@@ -162,6 +179,11 @@ class OrbitStats:
     def eclipse_heater_duty(self) -> float:
         return self.heater_eclipse_ticks / self.eclipse_ticks if self.eclipse_ticks else 0.0
 
+    @property
+    def per_byte_wh(self) -> float:
+        """All per-byte transmit energy power drew in the orbit."""
+        return self.telemetry_wh + self.pass_wh
+
 
 @dataclass
 class Result:
@@ -172,16 +194,40 @@ class Result:
     flags: dict[str, int]
     heater_after_first_on: tuple[int, int] = (0, 0)
     """(ticks on, ticks) from the heater's first switch-on to the end."""
+    total_sent_bytes: int = 0
+    """Every byte the flight computer sent over the run."""
+    total_per_byte_wh: float = 0.0
+    """Every per-byte transmit energy power drew over the run."""
+    last_two_ticks_bytes: int = 0
+    """Bytes sent in the last two ticks, whose energy power has not drawn yet."""
+
+
+def data_frames_in_tick(config: SpacecraftConfig, telemetry_tick: bool) -> int:
+    """Whole DATA frames that fit in one pass tick after ACK/NACK and telemetry.
+
+    In a telemetry tick the real 36-byte telemetry frame and an ACK/NACK allowance (one
+    per second, pessimistic: a pass has one ACK, BEGIN_DOWNLINK's) come first
+    (ADR-0004 §10).
+    """
+    overhead = TELEMETRY_FRAME_SIZE + ACK_FRAME_SIZE if telemetry_tick else 0
+    return max(0, config.comms.transmit_capacity_bytes - overhead) // data_frame_bytes(config)
 
 
 def pass_capacity_bytes(config: SpacecraftConfig, tick_us: int) -> int:
     """Chunk bytes one DOWNLINK pass can carry, net of ACK/NACK and telemetry."""
-    ticks_per_beacon = BEACON_PERIOD_US // tick_us
-    frames_per_beacon = data_frames_in_tick(config, True) + (
-        ticks_per_beacon - 1
+    ticks_per_period = TELEMETRY_PERIOD_US // tick_us
+    frames_per_period = data_frames_in_tick(config, True) + (
+        ticks_per_period - 1
     ) * data_frames_in_tick(config, False)
-    beacons = PASS_US // BEACON_PERIOD_US
-    return beacons * frames_per_beacon * config.payload.chunk_size_bytes
+    periods = PASS_US // TELEMETRY_PERIOD_US
+    return periods * frames_per_period * config.payload.chunk_size_bytes
+
+
+_FRAME_NAMES = {
+    FrameType.TELEMETRY: "telemetry",
+    FrameType.ACK: "ack",
+    FrameType.DATA: "data",
+}
 
 
 def run_profile(
@@ -194,23 +240,32 @@ def run_profile(
     extra_load_w: float = 0.0,
     stop_on: str | None = None,
 ) -> Result:
-    """Run ``profile`` for ``orbits`` orbits (or until flag ``stop_on`` sets)."""
+    """Run ``profile`` on ``SilTarget`` for ``orbits`` orbits (or until flag ``stop_on``
+    sets)."""
     started = time.perf_counter()
-    env_model = NominalEnvironment() if environment is None else environment
-    stack = real_stack(SEED, config, initial)
-    clock = SimClock()
-    tick_us = clock.tick_us
+    ground = ProfileGround(
+        profile,
+        SEED,
+        config=config,
+        initial=initial,
+        environment=environment,
+        extra_load_w=extra_load_w,
+    )
+    tick_us = ground.tick_us
     dt_h = tick_us / US_PER_S / S_PER_H
-    period_us = env_model.orbit_period_us
-    driver = ProfileDriver(profile, config, period_us, extra_load_w)
     capacity_wh = config.power.battery_capacity_wh
+    idle_on_w = config.comms.transmitter_on_power_w
+    data_frame = data_frame_bytes(config)
 
-    previous = stack.snapshot()
+    previous = reset_state(SEED, config, initial)
     flags: dict[str, int] = {}
     results: list[OrbitStats] = []
     heater_first_on: int | None = None
     heater_on_after = 0
     heater_ticks_after = 0
+    total_sent = 0
+    total_per_byte_wh = 0.0
+    recent_bytes = [0, 0]
     stop = False
     for _ in range(orbits):
         stats = OrbitStats()
@@ -218,22 +273,49 @@ def run_profile(
         produced_start = previous.get("payload", PayloadSnapshot).truth.total_produced_bytes
         in_eclipse = False
         heater_was_on = previous.get("thermal", ThermalSnapshot).truth.heater_on
-        for _ in range(period_us // tick_us):
-            now_us = clock.now_us
-            command = driver.command(now_us, previous)
-            in_pass, traffic_w = command.in_pass, command.traffic_w
-            env = env_model.state_at(now_us)
-            stack.step(tick_us, env, command.controls)
-            clock.advance_one_tick()
-            state = stack.snapshot()
+        for _ in range(ground.ticks_per_orbit):
+            in_pass = ground.in_pass(ground.count)
+            record = ground.tick()
+            # No stand-in: only the sensitivity check's battery_drain adds load.
+            assert record.controls.extra_load_w == extra_load_w
+            state = record.state
+            env = record.environment
+            now_us = record.now_us
             _accumulate(stats, previous, state, env.sunlit, dt_h)
+
+            # Power drew comms' previous-tick draw: idle, plus the per-byte draw of the
+            # bytes sent the tick before that (ADR-0007).
+            drawn = previous.get("comms", CommsSnapshot).truth
+            idle_w = idle_on_w if drawn.transmitter_on else 0.0
+            per_byte_wh = (drawn.transmit_power_w - idle_w) * dt_h
+            stats.transmitter_idle_wh += idle_w * dt_h
             if in_pass:
-                stats.pass_wh += traffic_w * dt_h
+                stats.pass_wh += per_byte_wh
             else:
-                stats.beacon_wh += traffic_w * dt_h
-            stats.transmitter_idle_wh += (
-                previous.get("comms", CommsSnapshot).truth.transmit_power_w * dt_h
-            )
+                stats.telemetry_wh += per_byte_wh
+            total_per_byte_wh += per_byte_wh
+
+            tick_bytes = 0
+            for frame in record.downlink_frames:
+                size = len(frame)
+                kind = decode_frame(frame).frame_type
+                name = _FRAME_NAMES.get(kind, "other")
+                if kind is FrameType.DATA and size != data_frame:
+                    name = "filler"  # the keyed profile's
+                stats.sent_bytes[name] = stats.sent_bytes.get(name, 0) + size
+                tick_bytes += size
+            total_sent += tick_bytes
+            recent_bytes = [recent_bytes[1], tick_bytes]
+            mode = ground.mode
+            if (
+                Mode.DOWNLINK in stats.modes
+                and mode is not Mode.DOWNLINK
+                and stats.buffered_after_downlink_bytes is None
+            ):
+                payload_now = state.get("payload", PayloadSnapshot).truth
+                stats.buffered_after_downlink_bytes = payload_now.buffered_bytes
+            stats.modes.add(mode)
+            stats.downlink_ticks += mode is Mode.DOWNLINK
 
             thermal = state.get("thermal", ThermalSnapshot).truth
             if not env.sunlit:
@@ -246,15 +328,15 @@ def run_profile(
                 in_eclipse = False
             heater_was_on = thermal.heater_on
             if heater_first_on is None and thermal.heater_on:
-                heater_first_on = clock.now_us
+                heater_first_on = now_us
             if heater_first_on is not None:
                 heater_ticks_after += 1
                 heater_on_after += thermal.heater_on
 
             for name in _raised(state):
                 if name not in flags:
-                    flags[name] = clock.now_us
-                    stats.flags[name] = clock.now_us
+                    flags[name] = now_us
+                    stats.flags[name] = now_us
             previous = state
             if stop_on is not None and stop_on in flags:
                 stop = True
@@ -267,6 +349,7 @@ def run_profile(
         results.append(stats)
         if stop:
             break
+    assert ground.downlink_bytes == total_sent  # receive() returned every frame sent
     return Result(
         profile=profile,
         config=config,
@@ -274,6 +357,9 @@ def run_profile(
         runtime_s=time.perf_counter() - started,
         flags=flags,
         heater_after_first_on=(heater_on_after, heater_ticks_after),
+        total_sent_bytes=total_sent,
+        total_per_byte_wh=total_per_byte_wh,
+        last_two_ticks_bytes=sum(recent_bytes),
     )
 
 
@@ -327,18 +413,20 @@ def describe(result: Result) -> str:
     """One line per orbit, for the budget document and the test log."""
     lines = [f"{result.profile.name} ({result.runtime_s:.1f} s wall)"]
     for i, o in enumerate(result.orbits, 1):
+        traffic = ", ".join(f"{k} {v}" for k, v in sorted(o.sent_bytes.items())) or "none"
         lines.append(
             f"  orbit {i}: {o.ticks} ticks, generation {o.generation_wh:.2f} Wh,"
             f" consumption {o.consumption_wh:.2f} Wh, net {o.net_wh:+.2f} Wh,"
             f" margin {o.margin:+.1%}, SOC {o.soc_start:.3f} -> {o.soc_end:.3f}"
             f" (min {o.soc_min:.3f}), heater {o.heater_wh:.2f} Wh"
             f" ({o.eclipse_heater_duty:.0%} of eclipse, cycles {o.eclipse_heater_cycles}),"
-            f" transmit idle {o.transmitter_idle_wh:.2f} / beacon {o.beacon_wh:.2f}"
-            f" / pass {o.pass_wh:.2f} Wh,"
+            f" transmit idle {o.transmitter_idle_wh:.3f} / telemetry {o.telemetry_wh:.3f}"
+            f" / pass {o.pass_wh:.3f} Wh, sent B: {traffic},"
+            f" DOWNLINK {o.downlink_ticks * DEFAULT_TICK_US / US_PER_S:.0f} s,"
             f" battery {o.battery_c[0]:.1f}..{o.battery_c[1]:.1f} °C,"
             f" electronics {o.electronics_c[0]:.1f}..{o.electronics_c[1]:.1f} °C,"
             f" produced {o.produced_bytes} B, buffered at end {o.buffered_end_bytes} B,"
-            f" flags {o.flags or 'none'}"
+            f" modes {sorted(m.name for m in o.modes)}, flags {o.flags or 'none'}"
         )
     return "\n".join(lines)
 
@@ -524,7 +612,7 @@ def test_known_extra_load_lowers_soc_by_the_expected_amount(reference: Result) -
 
 
 def test_data_per_orbit_fits_one_pass_with_margin(reference: Result) -> None:
-    capacity = pass_capacity_bytes(NOMINAL_CONFIG, SimClock().tick_us)
+    capacity = pass_capacity_bytes(NOMINAL_CONFIG, DEFAULT_TICK_US)
     for i, orbit in enumerate(reference.orbits, 1):
         margin = 1 - orbit.produced_bytes / capacity
         assert margin >= DATA_MARGIN, (
@@ -534,23 +622,63 @@ def test_data_per_orbit_fits_one_pass_with_margin(reference: Result) -> None:
 
 
 def test_buffer_does_not_grow_from_pass_to_pass(reference: Result) -> None:
-    # Each orbit ends with its pass, so the buffer at the end of each orbit is the
-    # buffer at the end of each pass: only the partial chunk still accumulating.
+    # Each pass's downlink session sends every stored chunk, so the buffer when it
+    # completes holds only the partial chunk still accumulating. The rest of the pass
+    # window is SCIENCE again (the payload is off only in DOWNLINK, #47), so the end of
+    # the orbit holds at most that remainder's data, never a backlog.
     chunk = NOMINAL_CONFIG.payload.chunk_size_bytes
-    ends = [orbit.buffered_end_bytes for orbit in reference.orbits]
-    assert all(end < chunk for end in ends), f"buffered at the end of each pass: {ends} B"
-    assert all(b <= a + chunk for a, b in itertools.pairwise(ends)), ends
+    ends = [orbit.buffered_after_downlink_bytes for orbit in reference.orbits]
+    assert all(end is not None and end < chunk for end in ends), (
+        f"buffered when each pass's session completed: {ends} B"
+    )
+    rate = NOMINAL_CONFIG.payload.data_rate_bytes_per_s
+    for orbit in reference.orbits:
+        remainder_s = (PASS_US // DEFAULT_TICK_US - orbit.downlink_ticks) * DEFAULT_TICK_US
+        assert orbit.buffered_end_bytes <= rate * remainder_s // US_PER_S + chunk
+
+
+def test_every_pass_completes_inside_the_window(reference: Result) -> None:
+    pass_ticks = PASS_US // DEFAULT_TICK_US
+    for i, orbit in enumerate(reference.orbits, 1):
+        assert 0 < orbit.downlink_ticks < pass_ticks, (
+            f"orbit {i}: {orbit.downlink_ticks} ticks in DOWNLINK, window {pass_ticks}"
+        )
+    modes = set().union(*(orbit.modes for orbit in reference.orbits))
+    assert modes == {Mode.BOOT, Mode.NOMINAL, Mode.SCIENCE, Mode.DOWNLINK}
+
+
+# --- Measured traffic (#98) ------------------------------------------------------------
+
+
+def test_reference_traffic_is_real_frames_and_comms_charges_every_byte(reference: Result) -> None:
+    # Only the flight computer's real frame types, every one within the capacity, and
+    # power's per-byte transmit energy is exactly transmit_power_per_byte_w x the bytes
+    # sent, two ticks later (so the last two ticks' bytes are not drawn yet).
+    for i, orbit in enumerate(reference.orbits, 1):
+        assert set(orbit.sent_bytes) == {"telemetry", "ack", "data"}, (i, orbit.sent_bytes)
+        assert orbit.sent_bytes["telemetry"] % TELEMETRY_FRAME_SIZE == 0
+        assert orbit.sent_bytes["data"] % data_frame_bytes(NOMINAL_CONFIG) == 0
+        # The ACKs of SET_MODE SCIENCE (orbit 1 only) and BEGIN_DOWNLINK.
+        assert orbit.sent_bytes["ack"] == (2 if i == 1 else 1) * ACK_FRAME_SIZE
+    per_byte_w = NOMINAL_CONFIG.comms.transmit_power_per_byte_w
+    dt_h = DEFAULT_TICK_US / US_PER_S / S_PER_H
+    charged = reference.total_sent_bytes - reference.last_two_ticks_bytes
+    assert reference.total_per_byte_wh == pytest.approx(per_byte_w * charged * dt_h, rel=1e-9)
 
 
 # --- Profiles that must fail -----------------------------------------------------------
 
 
-def test_continuous_downlink_runs_out_of_energy() -> None:
+def test_continuous_full_capacity_transmit_runs_out_of_energy() -> None:
+    # The transmitter keyed at full capacity all orbit with the payload acquiring: what
+    # #72 called continuous DOWNLINK, now as real frames through comms.
     result = _fixture(
-        lambda: run_profile(CONTINUOUS_DOWNLINK, DOWNLINK_LOW_BATTERY_ORBITS, stop_on="low_battery")
+        lambda: run_profile(CONTINUOUS_TRANSMIT, DOWNLINK_LOW_BATTERY_ORBITS, stop_on="low_battery")
     )
     first = result.orbits[0]
-    assert first.net_wh < 0, f"continuous DOWNLINK net {first.net_wh:+.3f} Wh, required < 0"
+    capacity = NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    assert sum(first.sent_bytes.values()) == capacity * first.ticks  # every tick full
+    assert first.net_wh < 0, f"continuous transmit net {first.net_wh:+.3f} Wh, required < 0"
     assert "low_battery" in result.flags, (
         f"low_battery not raised within {DOWNLINK_LOW_BATTERY_ORBITS} orbits"
         f" (SOC {result.orbits[-1].soc_end:.3f})"

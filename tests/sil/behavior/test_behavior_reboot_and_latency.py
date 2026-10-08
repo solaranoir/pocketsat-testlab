@@ -8,6 +8,7 @@ what the ground receives. The mechanics are unit-tested in ``tests/sil/test_sil_
 and ``tests/sil/test_boot_reset_story.py``.
 """
 
+import dataclasses
 from collections.abc import Callable
 
 import pytest
@@ -15,13 +16,19 @@ from _ground import BOOT_TICKS, TICK_US, Ground
 
 from pocketsat.flight import Mode, RejectReason, controls_for_mode
 from pocketsat.messages import Command, CommandId
-from pocketsat.spacecraft import PayloadState
+from pocketsat.spacecraft import NO_RADIO_TRAFFIC, PayloadState, SpacecraftControls
 from pocketsat.targets.base import TargetFault
 from pocketsat.targets.sil import FORCED_RESET, TRANSMITTER_OFF
 
 BOOT_CONTROLS = controls_for_mode(Mode.BOOT)
 NOMINAL_CONTROLS = controls_for_mode(Mode.NOMINAL)
 BOOT_IN_PROGRESS = RejectReason.BOOT_IN_PROGRESS
+
+
+def decided(controls: SpacecraftControls) -> SpacecraftControls:
+    """The controls without the radio traffic SilTarget merges in for comms (ADR-0007,
+    #98): what the flight computer decided."""
+    return dataclasses.replace(controls, radio_traffic=NO_RADIO_TRAFFIC)
 
 
 def booted() -> Ground:
@@ -58,13 +65,13 @@ def test_reboot_happens_in_tick_n_and_boot_controls_apply_from_n_plus_1(
     tick_n = sat.tick()
 
     # Then: the subsystems still obeyed NOMINAL's controls in tick N ...
-    assert sat.probe.controls == NOMINAL_CONTROLS
+    assert decided(sat.probe.controls) == NOMINAL_CONTROLS
     # ... the flight computer is already in BOOT: no telemetry, commands in N+1 refused
     assert tick_n.telemetry == ()
     tick_n1 = sat.tick(Command.set_mode(Mode.SCIENCE), Command.ping())
     assert tick_n1.answers == [(CommandId.SET_MODE, BOOT_IN_PROGRESS), (CommandId.PING, None)]
     # ... and BOOT's controls (attitude control off) apply from tick N+1
-    assert sat.probe.controls == BOOT_CONTROLS
+    assert decided(sat.probe.controls) == BOOT_CONTROLS
     assert not sat.probe.controls.attitude.enabled
 
     # ... until the restarted boot ends with a beacon that counts the reboot

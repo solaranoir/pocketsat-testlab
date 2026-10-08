@@ -17,8 +17,9 @@ Not here, by design:
 - The ``TestTarget`` contract suite runs against ``SilTarget`` with the real flight
   computer (``tests/contract``, #61); the 10,000-tick determinism test and the seed and
   mid-run reset guards are in ``test_sil_determinism.py`` (#61).
-- ``RadioTraffic`` in the controls and comms' counters are #98; here the per-tick
-  values are checked in ``SilTick.traffic`` and ``SilTarget.handover_traffic``.
+- The per-tick traffic values are checked here in ``SilTick.traffic`` and
+  ``SilTarget.handover_traffic``; their hand-over to comms (``RadioTraffic`` in the
+  controls, comms' counters and draw, ADR-0007) in ``test_radio_traffic_sil.py``.
 """
 
 import dataclasses
@@ -57,6 +58,7 @@ from pocketsat.messages import (
 )
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
+    NO_RADIO_TRAFFIC,
     NOMINAL_CONFIG,
     STEP_ORDER,
     AttitudeSnapshot,
@@ -65,6 +67,7 @@ from pocketsat.spacecraft import (
     PowerSnapshot,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SpacecraftControls,
     SpacecraftInitialState,
     ThermalSnapshot,
@@ -295,13 +298,19 @@ def test_controls_from_tick_n_are_obeyed_in_tick_n_plus_1() -> None:
     first, second, third = rig.ticks
     assert second.next_controls.radio.mode is RadioMode.RX_ONLY
     assert second.controls.radio.mode is RadioMode.RX_TX
-    assert third.controls == second.next_controls
+    # The flight computer's controls, with the previous tick's traffic merged in
+    # (ADR-0007): the ACK sent in the second tick is reported in the third.
+    ack_bytes = sum(len(frame) for frame in second.downlink_frames)
+    assert ack_bytes > 0
+    assert third.controls == dataclasses.replace(
+        second.next_controls, radio_traffic=RadioTraffic(ack_bytes)
+    )
     assert second.controls == first.next_controls
 
 
 def test_merge_is_a_pass_through_without_faults() -> None:
-    # Step a with no active fault and no radio traffic field (#98): the subsystems obey
-    # exactly the controls the flight computer produced the tick before.
+    # Step a with no active fault and no traffic to hand over (BOOT sends nothing): the
+    # subsystems obey exactly the controls the flight computer produced the tick before.
     target, ticks = real_target()
     target.reset(3)
     target.advance(5 * TICK)
@@ -310,9 +319,30 @@ def test_merge_is_a_pass_through_without_faults() -> None:
         assert after.controls is before.next_controls
 
 
+def test_merge_hands_the_previous_ticks_traffic_to_comms() -> None:
+    # ADR-0007 §1: the merge replaces radio_traffic with the previous tick's traffic,
+    # and changes nothing else; comms reports it in that tick.
+    rig = Rig(telemetry=True)
+    rig.tick(ping(sequence=1))
+    rig.tick()
+    first, second = rig.ticks
+    sent = sum(len(frame) for frame in first.downlink_frames)
+    assert len(first.downlink_frames) == 2  # the ACK and a telemetry frame
+    assert first.traffic == TickTraffic(sent_bytes=sent)
+    assert second.controls == dataclasses.replace(
+        first.next_controls, radio_traffic=RadioTraffic(sent_bytes=sent)
+    )
+    comms = second.state.get("comms", CommsSnapshot).truth
+    assert comms.previous_tick_sent_bytes == sent
+    assert comms.transmit_power_w == NOMINAL_CONFIG.comms.transmitter_on_power_w + (
+        NOMINAL_CONFIG.comms.transmit_power_per_byte_w * sent
+    )
+
+
 def test_timeline_ack_same_tick_effect_next_tick_power_two_ticks_later() -> None:
     # ADR-0004 §2: a command sent in tick N is ACKed in tick N, takes physical effect in
-    # tick N+1, and power (stepped before attitude) sees the draw in tick N+2.
+    # tick N+1, and power (stepped before attitude) sees the draw in tick N+2. The ACK's
+    # own transmit energy reaches power in tick N+2 too (ADR-0007 §2).
     rig = Rig()
     rig.target.apply_environment(QUIET)
     for _ in range(3):
@@ -333,8 +363,9 @@ def test_timeline_ack_same_tick_effect_next_tick_power_two_ticks_later() -> None
     assert control_w(tick_n) == 0.0
     assert control_w(tick_n1) == NOMINAL_CONFIG.attitude.control_power_w
     assert load_w(tick_n1) == load_w(tick_n)
+    ack_w = NOMINAL_CONFIG.comms.transmit_power_per_byte_w * len(downlink_n[0])
     assert load_w(tick_n2) - load_w(tick_n1) == pytest.approx(
-        NOMINAL_CONFIG.attitude.control_power_w
+        NOMINAL_CONFIG.attitude.control_power_w + ack_w
     )
 
 
@@ -681,7 +712,9 @@ def test_real_flight_computer_runs_and_is_reproducible() -> None:
     assert ticks_a == ticks_b
     # BOOT for the boot duration (5 s = 50 ticks), then NOMINAL (#49).
     nominal = controls_for_mode(Mode.NOMINAL)
-    assert [t.controls for t in ticks_a] == [BOOT_CONTROLS] * 50 + [nominal] * 150
+    assert [dataclasses.replace(t.controls, radio_traffic=NO_RADIO_TRAFFIC) for t in ticks_a] == [
+        BOOT_CONTROLS
+    ] * 50 + [nominal] * 150
 
 
 # --- Multi-orbit and performance -------------------------------------------------------

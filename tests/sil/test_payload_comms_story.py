@@ -156,7 +156,7 @@ def _check_tick(previous: SpacecraftState, state: SpacecraftState, extra_load_w:
     assert comms.radio_mode is RadioMode.RX_TX
     assert comms.receiver_on and comms.transmitter_on
     assert comms.transmit_capacity_bytes == NOMINAL_CONFIG.comms.transmit_capacity_bytes
-    assert comms.sent_bytes == 0
+    assert comms.previous_tick_sent_bytes == 0
     assert comms.uplink_lost_count == 0 and comms.outbound_suppressed_count == 0
 
     # Power sees every subsystem's draw one tick late.
@@ -245,7 +245,7 @@ def test_comms_sends_nothing_without_a_flight_computer(nominal: Run) -> None:
     # Checked every tick in the run; the final state confirms the counters.
     assert nominal.final is not None
     comms = nominal.final.get("comms", CommsSnapshot).truth
-    assert comms.sent_bytes == 0
+    assert comms.previous_tick_sent_bytes == 0
     assert comms.transmit_power_w == NOMINAL_CONFIG.comms.transmitter_on_power_w
 
 

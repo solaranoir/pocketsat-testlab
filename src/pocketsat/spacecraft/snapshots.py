@@ -368,20 +368,29 @@ class _CommsRecord:
     transmit_capacity_bytes: int
     """Bytes that may be sent this tick. Zero unless the transmitter is on."""
 
-    sent_bytes: int
-    """Bytes actually sent this tick: 0..``transmit_capacity_bytes``."""
+    previous_tick_sent_bytes: int
+    """Wire bytes the flight computer sent in the **previous** tick (ADR-0007): every
+    frame type, header, payload, and CRC. Per tick, not a running total. Bounded by the
+    previous tick's capacity, not this tick's, so it can be non-zero while
+    ``transmitter_on`` is false or exceed ``transmit_capacity_bytes`` (for example in
+    the first tick of ``transmitter_off``)."""
 
     uplink_lost_count: int
-    """Uplink frames lost because the receiver was off, since the last reset."""
+    """Uplink frames lost because the receiver was off, since ``reset(seed)``. Running
+    total, reported one tick late: a frame lost in tick N is counted from tick N+1
+    (ADR-0007)."""
 
     outbound_suppressed_count: int
-    """Outbound frames (ACK/NACK and telemetry) suppressed for lack of transmit
-    capacity, since the last reset."""
+    """Outbound frames (ACK/NACK and telemetry) the flight computer suppressed for lack
+    of transmit capacity, since ``reset(seed)``. Running total, reported one tick late
+    (ADR-0007). DATA that does not fit stays buffered and is not counted."""
 
     transmit_power_w: float
-    """Transmit draw this tick, watts: a fixed draw while the transmitter is on plus a
-    draw proportional to ``sent_bytes``. Never negative. Power adds it to the total
-    load."""
+    """Transmit draw this tick, watts: the idle draw of this tick's transmitter state
+    (``transmitter_on_power_w`` while on, 0 while off) plus
+    ``transmit_power_per_byte_w`` times ``previous_tick_sent_bytes`` (ADR-0007 §2).
+    Never negative. Power adds it to the total load one tick later, so a byte's energy
+    reaches the battery two ticks after it was sent."""
 
 
 @dataclass(frozen=True)

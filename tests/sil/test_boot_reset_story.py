@@ -25,9 +25,12 @@ from pocketsat.messages import (
 )
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
+    NO_RADIO_TRAFFIC,
     AttitudeSnapshot,
     PowerInitial,
     PowerSnapshot,
+    RadioTraffic,
+    SpacecraftControls,
     SpacecraftInitialState,
 )
 from pocketsat.targets.sil import SilTarget, SilTick
@@ -39,6 +42,12 @@ N = DEFAULT_SAFETY_CONFIG.sustain_tick_count
 
 BOOT_CONTROLS = controls_for_mode(Mode.BOOT)
 NOMINAL_CONTROLS = controls_for_mode(Mode.NOMINAL)
+
+
+def decided(controls: SpacecraftControls) -> SpacecraftControls:
+    """``controls`` without the radio traffic ``SilTarget`` merges in (ADR-0007): what the
+    flight computer decided and the faults overrode."""
+    return dataclasses.replace(controls, radio_traffic=NO_RADIO_TRAFFIC)
 
 
 class Recorder(FlightComputer):
@@ -101,8 +110,13 @@ def soc(record: SilTick) -> float:
 def test_power_on_runs_boot_then_nominal_in_simulated_time() -> None:
     rig = Rig()
     rig.run(BOOT_TICKS + 30)
-    controls = [r.controls for r in rig.records]
+    controls = [decided(r.controls) for r in rig.records]
     assert controls == [BOOT_CONTROLS] * BOOT_TICKS + [NOMINAL_CONTROLS] * 30
+    # The boot-complete beacon goes out in the last BOOT tick and is reported to comms
+    # in the next one (ADR-0007); BOOT itself sends nothing.
+    assert all(r.controls.radio_traffic is NO_RADIO_TRAFFIC for r in rig.records[:BOOT_TICKS])
+    beacon_bytes = sum(len(frame) for frame in rig.downlink[BOOT_TICKS - 1])
+    assert rig.records[BOOT_TICKS].controls.radio_traffic == RadioTraffic(beacon_bytes)
     assert rig.fc.modes == [Mode.BOOT] * (BOOT_TICKS - 1) + [Mode.NOMINAL] * 31
     # The boot completes at 5.0 s of simulated time.
     assert rig.records[BOOT_TICKS - 1].now_us == DEFAULT_BOOT_CONFIG.duration_us
@@ -158,7 +172,7 @@ def test_reset_command_is_acked_in_its_tick_then_boot_then_nominal() -> None:
     assert rig.records[reset_tick].next_controls == BOOT_CONTROLS
 
     # BOOT's controls for the boot duration after the RESET tick, then NOMINAL again.
-    after = [r.controls for r in rig.records[reset_tick + 1 :]]
+    after = [decided(r.controls) for r in rig.records[reset_tick + 1 :]]
     assert after == [BOOT_CONTROLS] * BOOT_TICKS + [NOMINAL_CONTROLS] * 9
     assert rig.fc.modes[reset_tick + BOOT_TICKS - 1] is Mode.BOOT
     assert rig.fc.modes[reset_tick + BOOT_TICKS] is Mode.NOMINAL
@@ -177,7 +191,7 @@ def test_critical_battery_at_power_on_goes_from_boot_straight_to_safe() -> None:
     # SAFE in the N-th tick, well inside the boot duration, and never NOMINAL.
     assert rig.fc.modes == [Mode.BOOT] * (N - 1) + [Mode.SAFE] * (3 * BOOT_TICKS - N + 1)
     # SAFE's controls (attitude control on) from the next tick.
-    assert [r.controls for r in rig.records[: N + 1]] == [BOOT_CONTROLS] * N + [
+    assert [decided(r.controls) for r in rig.records[: N + 1]] == [BOOT_CONTROLS] * N + [
         controls_for_mode(Mode.SAFE)
     ]
     assert attitude_control_w(rig.records[N]) > 0.0
