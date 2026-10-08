@@ -525,7 +525,7 @@ Every frame the spacecraft sends goes through one outbound queue in the flight c
   (`CommsConfig.transmit_rate_bytes_per_s`, 1200 bytes/s) over the tick, with the
   fraction of a byte carried to the next tick (#122): 120 bytes in every default
   100 ms tick, and a byte more or less from tick to tick when the rate does not divide
-  evenly into ticks. Frames are never split across ticks.
+  evenly into ticks. Frames are not yet split across ticks (see #132).
 - **Priority.** Frames are offered in priority order: ACK/NACK (step c), then telemetry
   (#55, at its per-mode cadence, `docs/spacecraft-modes.md`, "Telemetry cadence"), then
   DATA (#56) (step e). Each is sent if it fits what is left; one that does
