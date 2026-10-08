@@ -1,0 +1,2 @@
+# Golden telemetry captures are compared byte for byte (#64): keep LF line endings.
+tests/golden/*.golden text eol=lf
