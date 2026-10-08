@@ -381,7 +381,9 @@ class _CommsRecord:
     ``transmitter_off`` fault). A physical state, not a flag."""
 
     transmit_capacity_bytes: int
-    """Bytes that may be sent this tick. Zero unless the transmitter is on."""
+    """Bytes that may be sent this tick. Zero unless the transmitter is on; while it is
+    on, ``CommsConfig.transmit_rate_bytes_per_s`` over this tick, with the fraction of
+    a byte carried to the next tick (#122): 120 in every default 100 ms tick."""
 
     previous_tick_sent_bytes: int
     """Wire bytes the flight computer sent in the **previous** tick (ADR-0007): every
@@ -403,7 +405,9 @@ class _CommsRecord:
     transmit_power_w: float
     """Transmit draw this tick, watts: the idle draw of this tick's transmitter state
     (``transmitter_on_power_w`` while on, 0 while off) plus
-    ``transmit_power_per_byte_w`` times ``previous_tick_sent_bytes`` (ADR-0007 §2).
+    ``transmit_power_per_byte_w`` times ``previous_tick_sent_bytes`` (ADR-0007 §2),
+    scaled to the previous tick's length so a byte costs the same energy at any tick
+    length (#122; a factor of exactly 1 at the 100 ms tick).
     Never negative. Power adds it to the total load one tick later, so a byte's energy
     reaches the battery two ticks after it was sent."""
 

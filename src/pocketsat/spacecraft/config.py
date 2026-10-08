@@ -471,14 +471,26 @@ class PayloadConfig:
                 raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
 
 
+PER_BYTE_DRAW_TICK_US: Final = 100_000
+"""The tick ``CommsConfig.transmit_power_per_byte_w`` is stated for: 100 ms (#72, #122).
+
+The per-byte draw is the transmitter's extra draw, in watts, for each byte sent within
+one tick of this length, so one byte costs ``transmit_power_per_byte_w * 0.1 s`` of
+energy. Comms scales the draw to the actual tick, by ``PER_BYTE_DRAW_TICK_US / dt_us``,
+so a byte costs the same energy at any tick length; at the 100 ms tick the factor is
+exactly 1."""
+
+
 @dataclass(frozen=True)
 class CommsConfig:
     """Communications settings (#44).
 
-    The capacity matches a 9600 bit/s downlink at the default 100 ms tick and fits one
-    default payload chunk's DATA frame (64-byte chunk + 4-byte ID + 10 bytes of frame
-    header and CRC = 78 bytes) with room for an ACK. The capacity is per tick, so it is
-    9600 bit/s only at the 100 ms tick.
+    The transmit rate is a data rate, as on a real radio, so the downlink is 9600 bit/s
+    at any tick length (#122). Comms converts it into each tick's
+    ``transmit_capacity_bytes`` exactly, carrying the fraction of a byte (see
+    :mod:`pocketsat.spacecraft.comms`). At the default 100 ms tick that is 120 bytes
+    every tick, which fits one default payload chunk's DATA frame (64-byte chunk +
+    4-byte ID + 10 bytes of frame header and CRC = 78 bytes) with room for an ACK.
 
     The draws follow the power and thermal budget's transmitter model (#72, "Option
     C"): the radio stays ``RX_TX`` in every normal mode, so the fixed draw is a small
@@ -487,30 +499,33 @@ class CommsConfig:
     0.15 + 2.4 = 2.55 W keyed, typical of a small-satellite UHF transmitter.
 
     Attributes:
-        transmit_capacity_bytes: Bytes the transmitter may send in one tick while it
-            is on, whatever the tick length. Non-negative int. Default 120.
+        transmit_rate_bytes_per_s: The transmitter's data rate while it is on, wire
+            bytes per second, whatever the tick length. Non-negative int. Default 1200
+            (9600 bit/s).
         transmitter_on_power_w: Fixed transmit draw while the transmitter is on (idle,
             not keyed), watts. Non-negative. Default 0.15.
-        transmit_power_per_byte_w: Additional draw per byte sent in the tick, watts
-            per byte. Non-negative. Default 0.02 (2.4 W at full capacity). Being per
-            tick, it assumes the default 100 ms tick.
+        transmit_power_per_byte_w: Additional draw per byte sent within one 100 ms
+            tick (:data:`PER_BYTE_DRAW_TICK_US`), watts per byte; comms scales it to
+            the actual tick, so each byte costs the same energy (0.002 J by default)
+            and full rate costs 2.4 W at any tick length (#122). Non-negative.
+            Default 0.02.
 
     Raises:
-        TypeError: ``transmit_capacity_bytes`` is not an int, or a draw is not a
+        TypeError: ``transmit_rate_bytes_per_s`` is not an int, or a draw is not a
             number.
         ValueError: A field is negative or not finite.
     """
 
-    transmit_capacity_bytes: int = 120
+    transmit_rate_bytes_per_s: int = 1200
     transmitter_on_power_w: float = 0.15
     transmit_power_per_byte_w: float = 0.02
 
     def __post_init__(self) -> None:
-        capacity = self.transmit_capacity_bytes
-        if isinstance(capacity, bool) or not isinstance(capacity, int):
-            raise TypeError(f"transmit_capacity_bytes must be an int, got {capacity!r}")
-        if capacity < 0:
-            raise ValueError(f"transmit_capacity_bytes must be non-negative, got {capacity}")
+        rate = self.transmit_rate_bytes_per_s
+        if isinstance(rate, bool) or not isinstance(rate, int):
+            raise TypeError(f"transmit_rate_bytes_per_s must be an int, got {rate!r}")
+        if rate < 0:
+            raise ValueError(f"transmit_rate_bytes_per_s must be non-negative, got {rate}")
         for name in ("transmitter_on_power_w", "transmit_power_per_byte_w"):
             if _require_number(name, getattr(self, name)) < 0:
                 raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")

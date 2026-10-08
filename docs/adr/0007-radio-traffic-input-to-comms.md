@@ -1,6 +1,6 @@
 # ADR-0007: Radio traffic input to comms
 
-- **Status:** Accepted (implemented by #98)
+- **Status:** Accepted (implemented by #98; amended by #122, see below)
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0004 (§1 the controls record, §2 step a and the latency table, §10 transmit power). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #104. Implemented by #98.
 
@@ -65,7 +65,7 @@ transmit_power_w = transmit_draw_w(config, transmitter_on, 0)
                  + config.transmit_power_per_byte_w * radio_traffic.sent_bytes
 ```
 
-While the transmitter is on in both ticks this is bit-for-bit `transmit_draw_w(config, True, radio_traffic.sent_bytes)`, because `transmit_draw_w(config, True, 0)` returns `transmitter_on_power_w` exactly and the sum is evaluated in the same order. While the transmitter is off in tick N+1 (for example `transmitter_off` injected in tick N+1), the idle part is 0 and the per-byte part of tick N is still charged, so no transmitted byte goes unpaid.
+(#122: the per-byte part is scaled by `100 ms / tick N's length`, a factor of exactly 1 at the 100 ms tick; see the amendment at the end of section 4.) While the transmitter is on in both ticks this is bit-for-bit `transmit_draw_w(config, True, radio_traffic.sent_bytes)`, because `transmit_draw_w(config, True, 0)` returns `transmitter_on_power_w` exactly and the sum is evaluated in the same order. While the transmitter is off in tick N+1 (for example `transmitter_off` injected in tick N+1), the idle part is 0 and the per-byte part of tick N is still charged, so no transmitted byte goes unpaid.
 
 So the snapshot's byte count can be non-zero in a tick whose `transmitter_on` is false and whose capacity is 0: it is bounded by the **previous** tick's capacity. That is why section 3 renames the field to `previous_tick_sent_bytes`.
 
@@ -106,6 +106,7 @@ Over a pass, the per-byte energy is conserved and only shifted in time: the per-
 
 - **The flight computer guarantees the limits.** It reads `CommsReadings.transmit_capacity_bytes` for tick N after step b and sends at most that many bytes in tick N, in priority order. A capacity of 0 (radio `OFF`, `RX_ONLY`, or `transmitter_off`) means it sends nothing. `SilTarget` does not re-arbitrate, trim, or drop outbound frames.
 - **Comms enforces them**, as the owner of the rule, when it applies the record in tick N+1. It checks the record against its **own previous tick's** state (its tick N mode, which it remembers; this is its own history, not a read): it calls `transmit_draw_w(config, previous_transmitter_on, radio_traffic.sent_bytes)`, which already raises `ValueError` for bytes above the capacity or any bytes while the transmitter was off. It also rejects a non-zero `uplink_lost_count` when its receiver was on in the previous tick.
+- **Amendment (#122).** The capacity is no longer a config constant: comms derives each tick's `transmit_capacity_bytes` from `CommsConfig.transmit_rate_bytes_per_s` and the tick length, with an integer carry, so it can differ by a byte from tick to tick. Comms therefore also remembers its previous tick's capacity and length and calls `transmit_draw_w(config, previous_transmitter_on, sent_bytes, capacity_bytes=previous_capacity, dt_us=previous_dt_us)`. The rule is unchanged: bytes are bounded by the capacity of the tick they were sent in. The per-byte draw is scaled by `PER_BYTE_DRAW_TICK_US / dt_us` (100 ms over that tick's length) so a byte costs the same energy at any tick length. At the default 100 ms tick both are exactly as before (capacity 120 every tick, factor 1).
 - **On violation** the `ValueError` propagates out of `SilTarget.advance()` for tick N+1. A violation is a simulator bug (the flight computer or `SilTarget` broke the contract), never a scenario outcome, so it fails the run loudly. Nothing is clipped: clipping would silently hide transmit energy.
 
 ### 5. `transmitter_off` and other overrides

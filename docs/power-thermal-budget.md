@@ -6,7 +6,7 @@ Every subsystem ticket picked its own provisional defaults. Measured together th
 
 ## Operating profiles
 
-All profiles run on `SilTarget`: the real `Power`, `Thermal`, `Attitude`, `Payload`, and `Comms` on one `SnapshotBoard` and the real flight computer, driven only through the `TestTarget` interface by the ground helper `ProfileGround` (`tests/sil/_reference_profile.py`), under `NominalEnvironment` (92-minute orbit, 35% eclipse, 20 °C sunlit and -20 °C eclipse ambient) at the default **100 ms tick, never coarsened**: `transmit_capacity_bytes` and the per-byte transmit draw are per tick, so the 9600 bit/s link and the transmit energy below hold only at 100 ms. Seed 1, default starting state (`DEFAULT_INITIAL_STATE`) unless stated.
+All profiles run on `SilTarget`: the real `Power`, `Thermal`, `Attitude`, `Payload`, and `Comms` on one `SnapshotBoard` and the real flight computer, driven only through the `TestTarget` interface by the ground helper `ProfileGround` (`tests/sil/_reference_profile.py`), under `NominalEnvironment` (92-minute orbit, 35% eclipse, 20 °C sunlit and -20 °C eclipse ambient) at the default **100 ms tick, never coarsened**. Since #122 the link is a fixed 1200 bytes/s (9600 bit/s) at any tick length and a byte costs the same energy at any tick length (`docs/spacecraft.md`, "Communications"); at 100 ms comms' capacity is exactly 120 bytes every tick and the per-byte draw is unscaled, so every figure on this page is unchanged by #122. The profiles stay at 100 ms because the other models' dynamics, telemetry cadence and frame packing were budgeted there. Seed 1, default starting state (`DEFAULT_INITIAL_STATE`) unless stated.
 
 The flight computer sets the controls through its mode table (#47, [spacecraft-modes.md](spacecraft-modes.md)); the ground only sends commands:
 
@@ -30,7 +30,7 @@ The flight computer sets the controls through its mode table (#47, [spacecraft-m
 
 ### Transmitter energy model ("Option C", decided 2026-10-01)
 
-The radio stays `RX_TX` in every normal mode (ADR-0004 §10, #47), so beacons and ACKs can go out; this budget does not change that. What changed is the cost of the transmitter, through `CommsConfig` only, so energy follows airtime as on a real small-satellite UHF radio: a small idle draw while the transmitter is enabled but not keyed (`transmitter_on_power_w` 0.15 W) plus a per-byte draw (`transmit_power_per_byte_w` 0.02 W per byte per 100 ms tick), so full capacity (120 bytes per tick) costs 0.15 + 2.4 = **2.55 W keyed**.
+The radio stays `RX_TX` in every normal mode (ADR-0004 §10, #47), so beacons and ACKs can go out; this budget does not change that. What changed is the cost of the transmitter, through `CommsConfig` only, so energy follows airtime as on a real small-satellite UHF radio: a small idle draw while the transmitter is enabled but not keyed (`transmitter_on_power_w` 0.15 W) plus a per-byte draw (`transmit_power_per_byte_w` 0.02 W per byte sent within a 100 ms tick, 2 mJ per byte, scaled to the tick length since #122), so full rate (1200 bytes/s, 120 bytes per 100 ms tick) costs 0.15 + 2.4 = **2.55 W keyed** at any tick length.
 
 On its own (old base load and payload draws), Option C took the reference profile from -0.72 Wh to about +0.01 Wh per orbit (+0.1%), below the +5% floor. The rest of the gap was closed by the base load and payload draws (see the parameter table), not by enlarging the array or battery.
 
@@ -132,7 +132,7 @@ The ACK/NACK allowance (one per second) is pessimistic: a real pass sends one, B
 
 These prove the model can run out of energy and that the low-battery path fires from physics, not only from faults.
 
-- **Continuous full-capacity transmit** (the transmitter keyed at 120 bytes per tick for the whole orbit, payload acquiring) loses about 1.9 Wh per orbit; from the default start `low_battery` sets within **3 orbits** (seed 1: at the end of the second).
+- **Continuous full-capacity transmit** (the transmitter keyed at its full 120 bytes per 100 ms tick for the whole orbit, payload acquiring) loses about 1.9 Wh per orbit; from the default start `low_battery` sets within **3 orbits** (seed 1: at the end of the second).
 - **SCIENCE under `STRESSED_CONFIG`** loses about 1.6 Wh per orbit; `low_battery` sets within **2 orbits** (seed 1: 1.9 orbits in).
 - **Tumbling, for information only:** with attitude control off from the start, the rate drifts up, the payload never acquires (it needs `STABILIZED`), and the arrays sweep through all angles. Orbit-average generation 2.49 Wh (31% of the stabilized value), margin -43%, minimum SOC 0.405 after one orbit. Not a pass/fail check: the outcome depends on the disturbance.
 
@@ -147,8 +147,8 @@ Everything not listed is unchanged and was checked against the profiles above. R
 | Parameter | Old → new default | Plausible range | Rationale |
 |---|---|---|---|
 | `CommsConfig.transmitter_on_power_w` | 1.0 → **0.15** W | 0.05–0.5 W (UHF transceiver enabled, not keyed) | Option C: idle draw only, since the radio stays `RX_TX` |
-| `CommsConfig.transmit_power_per_byte_w` | 0.005 → **0.02** W/byte | full-capacity keyed draw 1.5–4 W for 0.5–1 W RF out | 2.55 W keyed at full capacity; per 100 ms tick |
-| `CommsConfig.transmit_capacity_bytes` | 120 (unchanged) | 1200–19 200 bit/s UHF | 9600 bit/s at the 100 ms tick |
+| `CommsConfig.transmit_power_per_byte_w` | 0.005 → **0.02** W/byte | full-capacity keyed draw 1.5–4 W for 0.5–1 W RF out | 2.55 W keyed at full rate; stated per 100 ms tick and scaled to the tick (#122), so 2 mJ per byte at any tick |
+| `CommsConfig.transmit_rate_bytes_per_s` (was `transmit_capacity_bytes` = 120 per tick until #122) | 1200 B/s (unchanged: 120 per 100 ms tick) | 1200–19 200 bit/s UHF | 9600 bit/s at any tick length |
 | `PowerConfig.base_load_w` | 2.0 → **1.8** W | 0.8–2.5 W (OBC, receiver, EPS quiescent, ADCS sensors) | closes the energy gap within a realistic avionics load |
 | `PayloadConfig.acquiring_power_w` | 2.0 → **1.5** W | 0.5–3 W (small imager or instrument) | closes the energy gap |
 | `PayloadConfig.idle_power_w` | 0.5 → **0.3** W | 0.1–0.5 W | consistent with the lower acquiring draw |

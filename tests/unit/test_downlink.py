@@ -71,7 +71,7 @@ from pocketsat.targets.sil import SilTarget
 TICK_US = 100_000
 CHUNK = 64
 FRAME = data_frame_size(CHUNK)  # 78
-CAPACITY = NOMINAL_CONFIG.comms.transmit_capacity_bytes  # 120
+CAPACITY = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s * TICK_US // 1_000_000  # 120
 FAST_BOOT = FlightComputerConfig(boot=BootConfig(duration_us=TICK_US))
 """Boot in one step, so a test reaches NOMINAL at once."""
 
