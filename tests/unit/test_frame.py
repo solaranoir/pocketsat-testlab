@@ -21,6 +21,7 @@ from pocketsat.frame import (
     crc16_ccitt_false_table,
     decode_frame,
     encode_frame,
+    encode_frame_fields,
 )
 
 
@@ -29,6 +30,30 @@ from pocketsat.frame import (
 def test_round_trip(frame_type: FrameType, payload: bytes) -> None:
     frame = Frame(frame_type=frame_type, sequence=42, payload=payload)
     assert decode_frame(encode_frame(frame)) == frame
+
+
+@pytest.mark.parametrize("frame_type", list(FrameType))
+@pytest.mark.parametrize("sequence", [0, 1, 0x1234, 0xFFFF])
+@pytest.mark.parametrize("payload", [b"", b"\x00", bytes(range(256)), bytes(MAX_PAYLOAD_SIZE)])
+def test_encode_frame_fields_is_encode_frame(
+    frame_type: FrameType, sequence: int, payload: bytes
+) -> None:
+    # The flight computer's encoder (#121) gives the bytes of the Frame path.
+    assert encode_frame_fields(frame_type, sequence, payload) == encode_frame(
+        Frame(frame_type, sequence, payload)
+    )
+
+
+@pytest.mark.parametrize(
+    ("sequence", "payload"),
+    [(-1, b""), (0x10000, b""), (0, bytes(MAX_PAYLOAD_SIZE + 1))],
+)
+def test_encode_frame_fields_rejects_what_frame_rejects(sequence: int, payload: bytes) -> None:
+    with pytest.raises(ValueError) as from_frame:
+        Frame(FrameType.DATA, sequence, payload)
+    with pytest.raises(ValueError) as from_fields:
+        encode_frame_fields(FrameType.DATA, sequence, payload)
+    assert str(from_fields.value) == str(from_frame.value)
 
 
 def test_encoded_size() -> None:

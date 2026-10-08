@@ -21,9 +21,10 @@ The records do not validate their values: they are built every tick, and each
 subsystem's own tests check the documented ranges and signs.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from enum import Enum
+from operator import attrgetter
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, Self
 
@@ -118,8 +119,22 @@ class ContractSnapshot[T, R](SubsystemSnapshot):
         return cls(truth=truth, readings=readings)
 
 
+_VALUE_GETTERS: Final[dict[type, Callable[[Any], tuple[object, ...]]]] = {}
+"""One getter per record type, made on first use: :func:`_values` runs twice in every
+tick a mirrored snapshot is rebuilt, and ``dataclasses.fields`` dominated it (#121)."""
+
+
 def _values(record: Any) -> tuple[object, ...]:
-    return tuple(getattr(record, f.name) for f in fields(record))
+    """The record's field values, in field order."""
+    getter = _VALUE_GETTERS.get(type(record))
+    if getter is None:
+        names = [f.name for f in fields(record)]
+        if len(names) > 1:
+            getter = attrgetter(*names)  # returns the tuple of values
+        else:
+            getter = lambda r: tuple(getattr(r, n) for n in names)  # noqa: E731
+        _VALUE_GETTERS[type(record)] = getter
+    return getter(record)
 
 
 # --- Power -----------------------------------------------------------------------------

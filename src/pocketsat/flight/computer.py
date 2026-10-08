@@ -97,11 +97,10 @@ from pocketsat.flight.telemetry import (
 from pocketsat.frame import (
     MAX_SEQUENCE,
     MIN_FRAME_SIZE,
-    Frame,
     FrameError,
     FrameType,
     decode_frame,
-    encode_frame,
+    encode_frame_fields,
 )
 from pocketsat.spacecraft.base import SpacecraftState
 from pocketsat.spacecraft.controls import SpacecraftControls
@@ -712,7 +711,7 @@ class FlightComputer:
         reboot; commands after a RESET in the same tick are answered as in BOOT.
         """
         state = self._mode_state
-        safe_exit_allowed = not active_flags(tick.readings)
+        safe_exit_allowed: bool | None = None  # worked out for the first mode command
         for received in tick.commands:
             command = received.command
             reason: messages.NackReason | None
@@ -721,6 +720,8 @@ class FlightComputer:
             elif command.command_id is messages.CommandId.PING:
                 reason = None
             else:
+                if safe_exit_allowed is None:
+                    safe_exit_allowed = not active_flags(tick.readings)
                 event = _mode_event(command)
                 result = transition(state, event, safe_exit_allowed=safe_exit_allowed)
                 state = result.state
@@ -934,8 +935,9 @@ class FlightComputer:
         """
         if not tick.reserve_outbound(MIN_FRAME_SIZE + len(payload), outbound_class):
             return False
-        frame = Frame(frame_type, self._downlink_sequence, payload)
-        tick.downlink_frames.append(encode_frame(frame))
+        tick.downlink_frames.append(
+            encode_frame_fields(frame_type, self._downlink_sequence, payload)
+        )
         self._downlink_sequence = (self._downlink_sequence + 1) & MAX_SEQUENCE
         return True
 

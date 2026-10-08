@@ -159,6 +159,16 @@ def crc16_ccitt_false_table(data: bytes) -> int:
     return crc
 
 
+_BODY_HEADER: Final = struct.Struct(">" + HEADER_FORMAT[2:])
+"""The header after the sync marker (version, type, sequence, length): the bytes the CRC
+covers start here."""
+
+_SYNC_BYTES: Final = SYNC.to_bytes(2, "big")
+
+_FRAME_TYPES: Final = {frame_type.value: frame_type for frame_type in FrameType}
+"""Frame type by code: a dict lookup, cheaper than calling the enum (#121)."""
+
+
 def encode_frame(frame: Frame) -> bytes:
     """Encode a frame into its wire bytes.
 
@@ -168,16 +178,41 @@ def encode_frame(frame: Frame) -> bytes:
     Returns:
         Header, payload, and trailing big-endian CRC.
     """
-    header = struct.pack(
-        HEADER_FORMAT,
-        SYNC,
-        frame.version,
-        frame.frame_type,
-        frame.sequence,
-        len(frame.payload),
-    )
-    body = header[2:] + frame.payload
-    return header[:2] + body + crc16_ccitt_false(body).to_bytes(CRC_SIZE, "big")
+    return _encode(frame.version, frame.frame_type, frame.sequence, frame.payload)
+
+
+def encode_frame_fields(frame_type: FrameType, sequence: int, payload: bytes) -> bytes:
+    """Encode a frame of the current protocol version from its fields.
+
+    Part of the public codec, for any sender that has the fields in hand and no use for
+    a :class:`Frame` object: the flight computer (up to three frames every tick, #121),
+    and later senders such as the Phase 2 ground station's uplink. It gives the same
+    bytes, and the same ``ValueError`` for an out-of-range field, as
+    ``encode_frame(Frame(frame_type, sequence, payload))``, without building the
+    :class:`Frame` (about 1 µs saved per frame). Use :func:`encode_frame` when you
+    already hold a :class:`Frame` or need another protocol version.
+
+    Args:
+        frame_type: Kind of frame.
+        sequence: Sequence number, ``0..0xFFFF``.
+        payload: Type-specific payload bytes, at most :data:`MAX_PAYLOAD_SIZE`.
+
+    Returns:
+        Header, payload, and trailing big-endian CRC.
+
+    Raises:
+        ValueError: ``sequence`` is out of range or ``payload`` is too long.
+    """
+    if not 0 <= sequence <= MAX_SEQUENCE:
+        raise ValueError(f"sequence out of range 0..{MAX_SEQUENCE}: {sequence}")
+    if len(payload) > MAX_PAYLOAD_SIZE:
+        raise ValueError(f"payload exceeds {MAX_PAYLOAD_SIZE} bytes: {len(payload)}")
+    return _encode(PROTOCOL_VERSION, frame_type, sequence, payload)
+
+
+def _encode(version: int, frame_type: FrameType, sequence: int, payload: bytes) -> bytes:
+    body = _BODY_HEADER.pack(version, frame_type, sequence, len(payload)) + payload
+    return _SYNC_BYTES + body + crc16_ccitt_false(body).to_bytes(CRC_SIZE, "big")
 
 
 def decode_frame(data: bytes) -> Frame:
@@ -203,7 +238,7 @@ def decode_frame(data: bytes) -> Frame:
     if len(data) < MIN_FRAME_SIZE:
         raise FrameLengthError(f"frame too short: {len(data)} bytes, minimum {MIN_FRAME_SIZE}")
 
-    _, version, type_code, sequence, length = struct.unpack_from(HEADER_FORMAT, data)
+    version, type_code, sequence, length = _BODY_HEADER.unpack_from(data, 2)
     expected_size = MIN_FRAME_SIZE + length
     if len(data) != expected_size:
         raise FrameLengthError(
@@ -218,14 +253,8 @@ def decode_frame(data: bytes) -> Frame:
             f"bad CRC: frame has 0x{received_crc:04X}, computed 0x{computed_crc:04X}"
         )
 
-    try:
-        frame_type = FrameType(type_code)
-    except ValueError:
-        raise FrameTypeError(f"unknown frame type 0x{type_code:02X}") from None
+    frame_type = _FRAME_TYPES.get(type_code)
+    if frame_type is None:
+        raise FrameTypeError(f"unknown frame type 0x{type_code:02X}")
 
-    return Frame(
-        frame_type=frame_type,
-        sequence=sequence,
-        payload=bytes(data[HEADER_SIZE:-CRC_SIZE]),
-        version=version,
-    )
+    return Frame(frame_type, sequence, bytes(data[HEADER_SIZE:-CRC_SIZE]), version)

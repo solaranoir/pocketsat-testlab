@@ -315,23 +315,32 @@ def decode_command(payload: bytes) -> ParsedCommand | MalformedCommand:
     if not payload:
         return MalformedCommand(RESERVED_COMMAND_ID, DecodeReason.PAYLOAD_TRUNCATED)
     code = payload[0]
-    try:
-        command_id = CommandId(code)
-    except ValueError:
+    command_id = _COMMAND_IDS.get(code)
+    if command_id is None:
         return MalformedCommand(code, DecodeReason.UNKNOWN_COMMAND)
-    arguments = payload[COMMAND_ID_SIZE:]
+    arguments = len(payload) - COMMAND_ID_SIZE
     expected = COMMAND_ARGUMENT_SIZES[command_id]
-    if len(arguments) < expected:
+    if arguments < expected:
         return MalformedCommand(code, DecodeReason.PAYLOAD_TRUNCATED)
-    if len(arguments) > expected:
+    if arguments > expected:
         return MalformedCommand(code, DecodeReason.PAYLOAD_TOO_LONG)
     if command_id is CommandId.SET_MODE:
-        try:
-            target = Mode(arguments[0])
-        except ValueError:
+        parsed = _PARSED_SET_MODE.get(payload[COMMAND_ID_SIZE])
+        if parsed is None:
             return MalformedCommand(code, DecodeReason.INVALID_ARGUMENT)
-        return ParsedCommand(command_id, target)
-    return ParsedCommand(command_id)
+        return parsed
+    return _PARSED_NO_ARGUMENTS[command_id]
+
+
+# Lookups for decode_command (#121): dicts instead of enum calls, and one shared record
+# per possible result, since a ParsedCommand is immutable and equal by value.
+_COMMAND_IDS: Final = {command_id.value: command_id for command_id in CommandId}
+_PARSED_NO_ARGUMENTS: Final = {
+    command_id: ParsedCommand(command_id)
+    for command_id in CommandId
+    if command_id is not CommandId.SET_MODE
+}
+_PARSED_SET_MODE: Final = {mode.value: ParsedCommand(CommandId.SET_MODE, mode) for mode in Mode}
 
 
 ACK_FORMAT: Final = ">HBB"
@@ -634,6 +643,11 @@ class Telemetry:
     pointing_error_deg: float
 
 
+_NUMBER_TYPES: Final = (int, float)
+"""What :func:`quantize` accepts (``bool`` aside), as a tuple: ``int | float`` would
+build a union object on every call."""
+
+
 def quantize(value: float, scale: int, minimum: int, maximum: int) -> int:
     """Convert a reported physical value to its wire integer (#54, ADR-0006).
 
@@ -660,10 +674,11 @@ def quantize(value: float, scale: int, minimum: int, maximum: int) -> int:
         TypeError: ``value`` is not an ``int`` or ``float`` (``bool`` is rejected).
         ValueError: ``value`` is NaN.
     """
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise TypeError(f"value must be a float, got {value!r}")
-    if isinstance(value, int):
-        return min(max(value * scale, minimum), maximum)
+    if type(value) is not float:  # every reading is a float: skip the checks (#121)
+        if isinstance(value, bool) or not isinstance(value, _NUMBER_TYPES):
+            raise TypeError(f"value must be a float, got {value!r}")
+        if isinstance(value, int):
+            return min(max(value * scale, minimum), maximum)
     if math.isnan(value):
         raise ValueError("value is NaN, which has no telemetry encoding")
     scaled = value * scale
@@ -684,10 +699,28 @@ def _saturate_count(name: str, value: int, maximum: int) -> int:
     return min(max(value, 0), maximum)
 
 
-def _flag(name: str, value: bool, flag: TelemetryFlags) -> TelemetryFlags:
+def _flag_bit(name: str, value: bool, bit: int) -> int:
     if not isinstance(value, bool):
         raise TypeError(f"{name} must be a bool, got {value!r}")
-    return flag if value else TelemetryFlags(0)
+    return bit if value else 0
+
+
+_LOW_BATTERY_BIT: Final = int(TelemetryFlags.low_battery)
+_CRITICAL_BATTERY_BIT: Final = int(TelemetryFlags.critical_battery)
+_OVER_TEMP_BIT: Final = int(TelemetryFlags.over_temp)
+_UNDER_TEMP_BIT: Final = int(TelemetryFlags.under_temp)
+
+
+def _flag_bits(power: PowerReadings, thermal: ThermalReadings) -> int:
+    """:func:`telemetry_flags` as a plain ``int``. ``IntFlag`` arithmetic runs in Python
+    and cost about 3 us of every telemetry frame, so the encoder ORs plain ints (#121);
+    ``struct`` packs both the same."""
+    return (
+        _flag_bit("low_battery", power.low_battery, _LOW_BATTERY_BIT)
+        | _flag_bit("critical_battery", power.critical_battery, _CRITICAL_BATTERY_BIT)
+        | _flag_bit("over_temp", thermal.over_temp, _OVER_TEMP_BIT)
+        | _flag_bit("under_temp", thermal.under_temp, _UNDER_TEMP_BIT)
+    )
 
 
 def _require_type(name: str, value: object, expected: type) -> None:
@@ -709,12 +742,7 @@ def telemetry_flags(power: PowerReadings, thermal: ThermalReadings) -> Telemetry
     Raises:
         TypeError: A flag is not a ``bool``.
     """
-    return (
-        _flag("low_battery", power.low_battery, TelemetryFlags.low_battery)
-        | _flag("critical_battery", power.critical_battery, TelemetryFlags.critical_battery)
-        | _flag("over_temp", thermal.over_temp, TelemetryFlags.over_temp)
-        | _flag("under_temp", thermal.under_temp, TelemetryFlags.under_temp)
-    )
+    return TelemetryFlags(_flag_bits(power, thermal))
 
 
 def encode_telemetry(
@@ -761,7 +789,7 @@ def encode_telemetry(
         TELEMETRY_FORMAT,
         flight_computer.uptime_ms & UINT32_MAX,
         min(flight_computer.boot_count, UINT16_MAX),
-        telemetry_flags(power, thermal),
+        _flag_bits(power, thermal),
         flight_computer.mode.value,
         RADIO_MODE_CODES[comms.radio_mode],
         ATTITUDE_STATE_CODES[attitude.state],
