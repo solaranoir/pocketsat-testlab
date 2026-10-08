@@ -158,10 +158,10 @@ def test_same_seed_same_downlink_at_an_uneven_tick(tick_us: int, rate: int) -> N
 def test_the_rate_not_the_tick_sets_how_long_a_pass_takes() -> None:
     # 60 chunks in 78-byte DATA frames are 4680 bytes: at 1200 bytes/s no pass can be
     # shorter than 3.9 s, at any tick length, and none is much longer (before #122 a
-    # 1 s tick allowed 120 bytes per second, about 40 s). Frames are not split across
+    # 1 s tick allowed 120 bytes per second, about 40 s). Frames are not yet split across
     # ticks, so the unused end of each tick makes the pass somewhat slower than the
     # rate; below 65 ms the default rate gives fewer than 78 bytes per tick and a DATA
-    # frame never fits.
+    # frame never fits (#132).
     rate = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s
     shortest_us = CHUNKS * 78 * US_PER_S // rate
     for tick_us in (70_000, 100_000, 1_000_000):

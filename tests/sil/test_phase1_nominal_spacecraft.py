@@ -56,8 +56,9 @@ from pocketsat.spacecraft import NOMINAL_CONFIG, PayloadState, chunk_content
 CHUNK = NOMINAL_CONFIG.payload.chunk_size_bytes
 """Payload chunk size, bytes (64): one DATA frame carries one chunk."""
 
-CAPACITY = NOMINAL_CONFIG.comms.transmit_capacity_bytes
-"""Comms' transmit capacity per tick, bytes (120 at the 100 ms tick)."""
+CAPACITY = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s * TICK_US // 1_000_000
+"""Comms' transmit capacity per tick, bytes: the 1200 bytes/s rate over the harness's
+100 ms tick, exactly 120 in every tick (#122)."""
 
 LOW_BATTERY = NOMINAL_CONFIG.power.low_battery_soc
 SOC_MARGIN = 0.10
