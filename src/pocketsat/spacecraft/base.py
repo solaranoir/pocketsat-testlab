@@ -235,6 +235,7 @@ class SubsystemStack:
                 raise ValueError(f"subsystem {subsystem.name!r} is not in the step order {order}")
             by_name[subsystem.name] = subsystem
         self._subsystems = tuple(by_name[name] for name in order if name in by_name)
+        self._names = tuple(s.name for s in self._subsystems)
         self._board = SnapshotBoard() if board is None else board
 
     @property
@@ -245,7 +246,7 @@ class SubsystemStack:
     @property
     def names(self) -> tuple[str, ...]:
         """Names of the subsystems in step order."""
-        return tuple(s.name for s in self._subsystems)
+        return self._names
 
     def reset(self, rng: RngFactory) -> None:
         """Reset every subsystem in step order, then publish their snapshots."""
@@ -279,10 +280,11 @@ class SubsystemStack:
         ``snapshot()`` runs once per tick. Before the first reset it collects fresh
         snapshots.
         """
-        if all(self._board.has(s.name) for s in self._subsystems):
-            return SpacecraftState(
-                subsystems={
-                    s.name: self._board.get(s.name, SubsystemSnapshot) for s in self._subsystems
-                }
-            )
-        return SpacecraftState(subsystems={s.name: s.snapshot() for s in self._subsystems})
+        # Read the board's dict directly: this runs every tick (#121), and publish()
+        # has already checked that every entry is a SubsystemSnapshot.
+        latest = self._board._latest
+        try:
+            published = {name: latest[name] for name in self._names}
+        except KeyError:
+            return SpacecraftState(subsystems={s.name: s.snapshot() for s in self._subsystems})
+        return SpacecraftState(subsystems=published)

@@ -621,6 +621,23 @@ def test_controls_for_mode_carries_the_release() -> None:
         controls_for_mode(Mode.DOWNLINK, release_through_chunk_id=-1)
 
 
+def test_a_repeated_release_reuses_the_controls_and_bad_releases_still_raise() -> None:
+    # #121 remembers the last releases' controls; they are immutable and equal by value.
+    first = controls_for_mode(Mode.DOWNLINK, release_through_chunk_id=7)
+    assert controls_for_mode(Mode.DOWNLINK, release_through_chunk_id=7) is first
+    for mode in Mode:
+        for release in (0, 7, 8):
+            controls = controls_for_mode(mode, release_through_chunk_id=release)
+            assert controls.payload.release_through_chunk_id == release
+            assert controls.payload.enabled is controls_for_mode(mode).payload.enabled
+            assert controls.radio == controls_for_mode(mode).radio
+            assert controls.attitude == controls_for_mode(mode).attitude
+    controls_for_mode(Mode.DOWNLINK, release_through_chunk_id=1)  # cached
+    for bad in (True, False, 1.0):
+        with pytest.raises(TypeError):
+            controls_for_mode(Mode.DOWNLINK, release_through_chunk_id=bad)  # type: ignore[arg-type]
+
+
 def test_the_release_is_in_the_controls_of_the_tick_that_sent() -> None:
     rig = Rig(chunks=5)
     rig.step(Command.begin_downlink())

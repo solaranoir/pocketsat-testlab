@@ -387,6 +387,39 @@ def test_chunk_content_is_a_prefix_of_longer_content() -> None:
     assert len(chunk_content(MAX_CHUNK_ID, MAX_CHUNK_SIZE_BYTES)) == MAX_CHUNK_SIZE_BYTES
 
 
+def _xorshift_reference(chunk_id: int, chunk_size_bytes: int) -> bytes:
+    """The definition in ``chunk_content``'s docstring, step by step (#43)."""
+    x = (chunk_id * 0x9E3779B1 + 0x7F4A7C15) % 2**32 or 1
+    out = b""
+    while len(out) < chunk_size_bytes:
+        x ^= (x << 13) % 2**32
+        x ^= x >> 17
+        x ^= (x << 5) % 2**32
+        out += x.to_bytes(4, "big")
+    return out[:chunk_size_bytes]
+
+
+SEED_ZERO_CHUNK_ID = 0x7F4A7C15 * pow(0x9E3779B1, -1, 2**32) * -1 % 2**32
+"""The chunk ID whose seed is 0 (so ``x`` starts at 1)."""
+
+
+@pytest.mark.parametrize("chunk_size_bytes", [*range(0, 70), 255, 256, 257, 300, 1000])
+def test_chunk_content_tables_match_the_definition(chunk_size_bytes: int) -> None:
+    # #121 builds chunks of up to 256 bytes from GF(2) tables and runs the loop above
+    # that: both must give the definition's bytes for every ID.
+    rng = Random(chunk_size_bytes)
+    ids = [0, 1, 2, 255, 256, 65535, 65536, SEED_ZERO_CHUNK_ID, MAX_CHUNK_ID]
+    ids += [rng.randrange(MAX_CHUNK_ID + 1) for _ in range(200)]
+    for chunk_id in ids:
+        assert chunk_content(chunk_id, chunk_size_bytes) == _xorshift_reference(
+            chunk_id, chunk_size_bytes
+        ), chunk_id
+
+
+def test_seed_zero_chunk_id_is_the_one_that_starts_at_one() -> None:
+    assert (SEED_ZERO_CHUNK_ID * 0x9E3779B1 + 0x7F4A7C15) % 2**32 == 0
+
+
 @pytest.mark.parametrize(
     ("args", "error"),
     [

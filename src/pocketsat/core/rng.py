@@ -112,7 +112,12 @@ def portable_normal(rng: Random, mu: float = 0.0, sigma: float = 1.0) -> float:
         raise ValueError(f"mu must be finite, got {mu}")
     if not math.isfinite(sigma) or sigma < 0:
         raise ValueError(f"sigma must be finite and non-negative, got {sigma}")
-    total = 0.0
-    for _ in range(NORMAL_DRAWS):
-        total += rng.random()
+    # The 12 draws, added left to right as ``total = 0.0; total += rng.random()`` would
+    # (adding the first draw to 0.0 is exact), unrolled because the loop cost about
+    # half of each call and the stack draws several samples every tick (#121).
+    draw = rng.random
+    total = (
+        draw() + draw() + draw() + draw() + draw() + draw()
+        + draw() + draw() + draw() + draw() + draw() + draw()
+    )  # fmt: skip
     return mu + sigma * (total - 6.0)

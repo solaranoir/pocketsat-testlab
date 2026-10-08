@@ -83,6 +83,18 @@ def test_normal_uses_exactly_twelve_draws() -> None:
     assert a.random() == b.random()
 
 
+def test_normal_equals_the_documented_sum_bit_for_bit() -> None:
+    # #121 unrolled the 12 draws; the sum must stay the loop's, added left to right.
+    a = RngFactory(121).stream("s")
+    b = RngFactory(121).stream("s")
+    for n in range(20_000):
+        mu, sigma = (n % 7) * 0.3 - 1.0, (n % 5) * 0.7
+        total = 0.0
+        for _ in range(NORMAL_DRAWS):
+            total += b.random()
+        assert portable_normal(a, mu, sigma) == mu + sigma * (total - 6.0)
+
+
 def test_normal_mean_and_variance() -> None:
     rng = RngFactory(42).stream("test.noise")
     samples = [portable_normal(rng) for _ in range(100_000)]

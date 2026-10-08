@@ -22,6 +22,7 @@ other entry or exit actions here.
 See ``docs/spacecraft-modes.md`` for the table, the state diagram, and the rationale.
 """
 
+import functools
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, IntEnum
@@ -415,15 +416,30 @@ def controls_for_mode(
 
     Returns:
         The controls for the next tick. Without a release, the same object for every
-        call in ``mode``.
+        call in ``mode``; with one, the same object as the last call or two with the
+        same arguments (the release repeats in every tick of a pass that sends no DATA).
 
     Raises:
         TypeError: ``release_through_chunk_id`` is not an int or ``None``.
         ValueError: ``release_through_chunk_id`` is negative.
     """
-    controls = _MODE_CONTROLS[mode]
     if release_through_chunk_id is None:
-        return controls
+        return _MODE_CONTROLS[mode]
+    if type(release_through_chunk_id) is int:  # not a bool, which hashes like 0 and 1
+        return _released_controls(mode, release_through_chunk_id)
+    return _build_released_controls(mode, release_through_chunk_id)  # raises
+
+
+@functools.lru_cache(maxsize=2)
+def _released_controls(mode: Mode, release_through_chunk_id: int) -> SpacecraftControls:
+    """:func:`_build_released_controls`, remembered for the last two releases: the
+    controls are immutable, and a pass tick with ACK and telemetry but no room for DATA
+    repeats the last tick's release (#121)."""
+    return _build_released_controls(mode, release_through_chunk_id)
+
+
+def _build_released_controls(mode: Mode, release_through_chunk_id: int) -> SpacecraftControls:
+    controls = _MODE_CONTROLS[mode]
     # Built field by field rather than with dataclasses.replace: this runs in every tick
     # of a DOWNLINK pass (#78's budget). The mode records carry no fault overrides.
     return SpacecraftControls(

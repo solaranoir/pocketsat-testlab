@@ -28,6 +28,7 @@ The payload never switches itself on: with ``enabled`` false it is ``OFF`` whate
 the inhibits say. Arithmetic is integer bytes and microseconds (ADR-0006).
 """
 
+import functools
 import math
 from typing import Final
 
@@ -85,6 +86,16 @@ def chunk_content(chunk_id: int, chunk_size_bytes: int) -> bytes:
 
     For example, ``chunk_content(0, 8).hex()`` is ``"29d04a5133d5399c"``.
 
+    Steps 2 and 3 are the definition, and :func:`_xorshift_content` runs them as
+    written. For chunks of up to :data:`_TABLE_MAX_CHUNK_SIZE_BYTES` (the default 64
+    included) this function gets the same bytes from lookup tables instead, because a
+    DOWNLINK pass builds a chunk every tick and the loop costs about 8 us of the tick
+    budget (#121). Each xorshift step only shifts and XORs, so the content is linear
+    over GF(2) in the starting ``x``: the content of ``x`` is the XOR of the contents
+    of its four bytes in place (:func:`_content_tables`). Integer XOR only, so exact on
+    every platform (ADR-0006); ``tests/unit/test_payload.py`` checks the two against
+    each other and the shared vectors pin the output.
+
     Args:
         chunk_id: Chunk ID, 0..:data:`MAX_CHUNK_ID`.
         chunk_size_bytes: Content length, bytes, 0..:data:`MAX_CHUNK_SIZE_BYTES`.
@@ -102,6 +113,20 @@ def chunk_content(chunk_id: int, chunk_size_bytes: int) -> bytes:
         if not 0 <= value <= high:
             raise ValueError(f"{name} must be in 0..{high}, got {value}")
     x = (chunk_id * _SEED_MULTIPLIER + _SEED_OFFSET) & _MASK32 or 1
+    if chunk_size_bytes > _TABLE_MAX_CHUNK_SIZE_BYTES:
+        return _xorshift_content(x, chunk_size_bytes)
+    byte0, byte1, byte2, byte3 = _content_tables(chunk_size_bytes)
+    content = byte0[x & 0xFF] ^ byte1[(x >> 8) & 0xFF] ^ byte2[(x >> 16) & 0xFF] ^ byte3[x >> 24]
+    return content.to_bytes(chunk_size_bytes, "big")
+
+
+_TABLE_MAX_CHUNK_SIZE_BYTES: Final = 256
+"""Largest chunk :func:`chunk_content` builds from tables (about 300 KB of tables at
+this size); larger chunks run the xorshift loop."""
+
+
+def _xorshift_content(x: int, chunk_size_bytes: int) -> bytes:
+    """Steps 2 and 3 of :func:`chunk_content` as written, from the starting ``x``."""
     out = bytearray()
     while len(out) < chunk_size_bytes:
         x ^= (x << 13) & _MASK32
@@ -109,6 +134,29 @@ def chunk_content(chunk_id: int, chunk_size_bytes: int) -> bytes:
         x ^= (x << 5) & _MASK32
         out += x.to_bytes(4, "big")
     return bytes(out[:chunk_size_bytes])
+
+
+@functools.lru_cache(maxsize=4)
+def _content_tables(chunk_size_bytes: int) -> tuple[tuple[int, ...], ...]:
+    """Four 256-entry tables: entry ``b`` of table ``j`` is the content (as a big-endian
+    integer) of the starting ``x`` that is ``b`` in byte ``j`` and 0 elsewhere.
+
+    The xorshift steps are linear over GF(2), so the content of any ``x`` is the XOR of
+    the four entries its bytes select. Built from the contents of the 32 one-bit
+    starting values, each entry from a smaller one and one basis content. Cached per
+    chunk size; a run uses one (``PayloadConfig.chunk_size_bytes``).
+    """
+    basis = [
+        int.from_bytes(_xorshift_content(1 << bit, chunk_size_bytes), "big") for bit in range(32)
+    ]
+    tables = []
+    for byte in range(4):
+        table = [0] * 256
+        for value in range(1, 256):
+            low = value & -value
+            table[value] = table[value ^ low] ^ basis[8 * byte + low.bit_length() - 1]
+        tables.append(tuple(table))
+    return tuple(tables)
 
 
 class Payload:
