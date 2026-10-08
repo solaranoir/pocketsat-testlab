@@ -23,7 +23,7 @@ import math
 import sys
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from typing import Any, TextIO
 
@@ -51,6 +51,7 @@ from pocketsat.spacecraft import (
     PowerSnapshot,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SnapshotBoard,
     SpacecraftConfig,
     SpacecraftControls,
@@ -293,10 +294,12 @@ class FlightComputerDriver:
 
     Called at the start of each tick with the state at the end of the previous one, it
     steps the flight computer for that tick (as ``SilTarget`` does after the subsystem
-    step) and returns the controls it produced. Its commands are scripted: SET_MODE
-    SCIENCE once the boot is over, and BEGIN_DOWNLINK at the start of each pass. The
-    flight computer sends the payload's chunks as DATA frames and releases them once
-    sent; the DATA frames it hands back are counted here, as the ground would.
+    step) and returns the controls it produced, with that tick's radio traffic merged
+    in for comms as ``SilTarget`` does (ADR-0007): comms reports and charges the bytes
+    one tick later. Its commands are scripted: SET_MODE SCIENCE once the boot is over,
+    and BEGIN_DOWNLINK at the start of each pass. The flight computer sends the
+    payload's chunks as DATA frames and releases them once sent; the DATA frames it
+    hands back are counted here, as the ground would.
     """
 
     orbit_us: int
@@ -329,7 +332,11 @@ class FlightComputerDriver:
             if frame.frame_type is FrameType.DATA:
                 self.data_frames += 1
                 self.data_chunk_bytes += len(decode_data(frame.payload).content)
-        self.controls = output.controls
+        traffic = RadioTraffic(
+            sent_bytes=output.sent_bytes,
+            outbound_suppressed_count=output.outbound_suppressed_count,
+        )
+        self.controls = replace(output.controls, radio_traffic=traffic)
         return self.controls
 
 
@@ -400,8 +407,10 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
         f" transmitter {'on' if radio.transmitter_on else 'off'},"
         f" capacity {radio.transmit_capacity_bytes} B per tick"
         f" ({radio.transmit_capacity_bytes * US_PER_S // tick_us} B/s at this tick),"
-        f" draw {radio.transmit_power_w:.2f} W, sent {radio.sent_bytes} B"
-        " (comms' traffic counters wait for #98)\n"
+        f" draw {radio.transmit_power_w:.2f} W;"
+        f" sent over the run {sum(s.comms.truth.previous_tick_sent_bytes for s in samples)} B,"
+        f" outbound suppressed {radio.outbound_suppressed_count}"
+        " (reported by comms one tick late, ADR-0007)\n"
     )
     out.write(f"  flags raised: {', '.join(raised_flags(samples))}\n")
 

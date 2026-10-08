@@ -28,11 +28,13 @@ from pocketsat.spacecraft.config import (
     ThermalInitial,
 )
 from pocketsat.spacecraft.controls import (
+    NO_RADIO_TRAFFIC,
     SENSOR_SUBSYSTEMS,
     AttitudeControls,
     PayloadControls,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SpacecraftControls,
 )
 from pocketsat.spacecraft.payload import (
@@ -73,6 +75,7 @@ __all__ = [
     "MAX_CHUNK_ID",
     "MAX_CHUNK_SIZE_BYTES",
     "NOMINAL_CONFIG",
+    "NO_RADIO_TRAFFIC",
     "READINGS_FLAGS",
     "SENSOR_SUBSYSTEMS",
     "SNAPSHOT_TYPES",
@@ -108,6 +111,7 @@ __all__ = [
     "PowerTruth",
     "RadioControls",
     "RadioMode",
+    "RadioTraffic",
     "SnapshotBoard",
     "SnapshotReader",
     "SpacecraftConfig",

@@ -84,8 +84,15 @@ class ConsistencyCheck(Enum):
     ``next_chunk_id`` (#43)."""
 
     COMMS_CAPACITY = "comms_capacity"
-    """Comms reports more bytes sent than its capacity, a negative count, or a
-    non-zero capacity with the transmitter off (#44)."""
+    """Comms reports more bytes sent than the capacity they were sent under, a negative
+    count, or a non-zero capacity with the transmitter off (#44).
+
+    ``previous_tick_sent_bytes`` reports the **previous** tick's bytes (ADR-0007), so it
+    is checked against the previous tick's ``transmit_capacity_bytes``, which
+    :class:`SafetyState` remembers, never against this tick's: on the first tick of
+    ``transmitter_off`` the capacity is already 0 while the bytes sent just before are
+    still being reported, which is consistent. In the first tick after power-on or a
+    reboot the previous capacity is unknown, and only the lower bound is checked."""
 
 
 @dataclass(frozen=True)
@@ -118,7 +125,8 @@ DEFAULT_SAFETY_CONFIG: Final = SafetyConfig()
 
 @dataclass(frozen=True)
 class SafetyState:
-    """What the rules remember between ticks: one persistence counter per flag.
+    """What the rules remember between ticks: one persistence counter per flag, and the
+    last evaluated tick's transmit capacity.
 
     Transient flight computer state: a reboot (RESET, ``forced_reset``) clears it, so
     a flag still set after a reboot must be sustained again from BOOT.
@@ -127,12 +135,18 @@ class SafetyState:
         flag_tick_counts: Consecutive ticks each flag in :data:`SAFE_FLAGS` has been
             set, up to and including the last evaluated tick. Saturates at the
             configured ``sustain_tick_count``, so it never grows without bound.
+        previous_transmit_capacity_bytes: Comms' ``transmit_capacity_bytes`` in the
+            readings of the last evaluated tick, the bound for this tick's
+            ``previous_tick_sent_bytes`` (ADR-0007, :attr:`ConsistencyCheck.COMMS_CAPACITY`);
+            ``None`` before the first evaluation after power-on or a reboot.
 
     Raises:
-        ValueError: The counts don't match :data:`SAFE_FLAGS` or one is negative.
+        ValueError: The counts don't match :data:`SAFE_FLAGS` or one is negative, or
+            the previous capacity is negative or not an int.
     """
 
     flag_tick_counts: tuple[int, ...] = (0,) * len(SAFE_FLAGS)
+    previous_transmit_capacity_bytes: int | None = None
 
     def __post_init__(self) -> None:
         counts = self.flag_tick_counts
@@ -142,6 +156,14 @@ class SafetyState:
             raise ValueError(
                 f"flag_tick_counts must be {len(SAFE_FLAGS)} non-negative ints, got {counts!r}"
             )
+        capacity = self.previous_transmit_capacity_bytes
+        if capacity is not None and (
+            isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 0
+        ):
+            raise ValueError(
+                f"previous_transmit_capacity_bytes must be a non-negative int or None,"
+                f" got {capacity!r}"
+            )
 
     def count(self, flag: SafeFlag) -> int:
         """Consecutive ticks ``flag`` has been set (saturated)."""
@@ -149,7 +171,7 @@ class SafetyState:
 
 
 INITIAL_SAFETY_STATE: Final = SafetyState()
-"""All counters at 0: after power-on and after every reboot."""
+"""All counters at 0 and no previous capacity: after power-on and after every reboot."""
 
 
 @dataclass(frozen=True)
@@ -205,8 +227,17 @@ def active_flags(readings: "SpacecraftReadings") -> frozenset[SafeFlag]:
     return frozenset(flag for flag in SAFE_FLAGS if values[flag])
 
 
-def consistency_failures(readings: "SpacecraftReadings") -> tuple[ConsistencyCheck, ...]:
-    """The :class:`ConsistencyCheck` invariants ``readings`` break, in check order."""
+def consistency_failures(
+    readings: "SpacecraftReadings", previous_transmit_capacity_bytes: int | None = None
+) -> tuple[ConsistencyCheck, ...]:
+    """The :class:`ConsistencyCheck` invariants ``readings`` break, in check order.
+
+    Args:
+        readings: This tick's readings.
+        previous_transmit_capacity_bytes: The previous tick's transmit capacity, the
+            bound for ``comms.previous_tick_sent_bytes``; ``None`` if unknown (the first
+            tick after power-on or a reboot), when only its lower bound is checked.
+    """
     power, thermal, attitude = readings.power, readings.thermal, readings.attitude
     payload, comms = readings.payload, readings.comms
     failed: list[ConsistencyCheck] = []
@@ -233,8 +264,12 @@ def consistency_failures(readings: "SpacecraftReadings") -> tuple[ConsistencyChe
     ):
         failed.append(ConsistencyCheck.PAYLOAD_BOOKKEEPING)
 
+    sent = comms.previous_tick_sent_bytes
     if (
-        not 0 <= comms.sent_bytes <= comms.transmit_capacity_bytes
+        sent < 0
+        or (
+            previous_transmit_capacity_bytes is not None and sent > previous_transmit_capacity_bytes
+        )
         or (comms.transmit_capacity_bytes != 0 and not comms.transmitter_on)
         or comms.uplink_lost_count < 0
         or comms.outbound_suppressed_count < 0
@@ -260,7 +295,8 @@ def evaluate(
         config: The persistence setting.
 
     Returns:
-        The updated counters, the active and sustained flags, and the failed checks.
+        The updated counters (and this tick's transmit capacity, for the next tick's
+        check), the active and sustained flags, and the failed checks.
     """
     active = active_flags(readings)
     limit = config.sustain_tick_count
@@ -271,8 +307,8 @@ def evaluate(
         flag for flag, count in zip(SAFE_FLAGS, counts, strict=True) if count >= limit
     )
     return SafetyVerdict(
-        state=SafetyState(counts),
+        state=SafetyState(counts, readings.comms.transmit_capacity_bytes),
         active=active,
         sustained=sustained,
-        failures=consistency_failures(readings),
+        failures=consistency_failures(readings, state.previous_transmit_capacity_bytes),
     )

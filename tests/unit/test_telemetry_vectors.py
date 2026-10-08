@@ -92,7 +92,7 @@ def encode_vector_input(inp: dict[str, Any]) -> bytes:
             receiver_on=True,
             transmitter_on=True,
             transmit_capacity_bytes=120,
-            sent_bytes=0,
+            previous_tick_sent_bytes=0,
             uplink_lost_count=0,
             outbound_suppressed_count=0,
             transmit_power_w=0.15,

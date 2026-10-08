@@ -2,24 +2,28 @@
 
 The real ``Power``, ``Thermal``, ``Attitude``, ``Payload``, and ``Comms`` run in one
 ``SubsystemStack`` (default ``STEP_ORDER``) sharing a ``SnapshotBoard``, driven by
-``NominalEnvironment`` and a ``SimClock`` at the default 100 ms tick, with
-``NOMINAL_CONFIG`` and the default starting state, under #72's reference profile:
-SCIENCE plus one 10-minute DOWNLINK pass per orbit. The profile driver and its traffic
-and release stand-ins are #72's own (``_reference_profile.py``), not a copy.
+``NominalEnvironment`` at the default 100 ms tick, with ``NOMINAL_CONFIG`` and the
+default starting state, under #72's reference profile: SCIENCE plus one DOWNLINK pass
+per orbit. The profile is #72's own (``_reference_profile.py``), not a copy.
 
 **Determinism** (:func:`test_same_seed_gives_an_identical_state_sequence`,
-:func:`test_a_different_seed_gives_different_noisy_readings`): three stacks run in
-lockstep for :data:`ORBITS` orbits, two with seed :data:`SEED` and one with
-:data:`OTHER_SEED`. The two same-seed stacks must produce an identical
-``SpacecraftState`` at every tick. The other seed must give different reported (noisy)
-values. Truth is *not* expected to match across seeds: the attitude disturbance is
-seeded true dynamics, and payload acquisition follows reported values (ADR-0004 §6),
-whose draw feeds back into the true SOC (see the #70 comments).
+:func:`test_a_different_seed_gives_different_noisy_readings`): three ``SilTarget`` runs
+with the real flight computer and real radio traffic (#98:
+``_reference_profile.ProfileGround``) go in lockstep for :data:`ORBITS` orbits, two
+with seed :data:`SEED` and one with :data:`OTHER_SEED`. The two same-seed runs must
+produce an identical tick record (``SpacecraftState``, the merged controls with their
+radio traffic, and the downlink frames) at every tick, so byte-identical downlink. The
+other seed must give different reported (noisy) values. Truth is *not* expected to
+match across seeds: the attitude disturbance is seeded true dynamics, and payload
+acquisition follows reported values (ADR-0004 §6), whose draw feeds back into the true
+SOC (see the #70 comments).
 
 **Named-stream independence** (ADR-0003;
 :func:`test_adding_or_removing_a_subsystem_leaves_other_streams_unchanged`,
 :func:`test_a_subsystem_alone_draws_what_it_draws_in_the_full_stack`) is checked at two
-levels, each run being one orbit of the reference profile:
+levels, each run being one orbit of the reference profile on a bare stack (fakes can
+only be swapped in there), driven by ``_reference_profile.ProfileDriver``, whose
+scripted traffic reaches comms through ``controls.radio_traffic`` like real traffic:
 
 1. *Raw stream outputs.* A recording ``RngFactory`` logs every ``random()`` value each
    named stream hands out. Against the full stack, each subsystem in turn is removed:
@@ -60,11 +64,12 @@ from dataclasses import dataclass, field
 from random import Random
 
 import pytest
-from _reference_profile import PASS_US, REFERENCE, ProfileDriver, real_stack, real_subsystems
+from _reference_profile import REFERENCE, ProfileDriver, ProfileGround, real_subsystems
 
 from pocketsat.core.clock import SimClock
 from pocketsat.core.rng import RngFactory, derive_seed
 from pocketsat.environment import NominalEnvironment
+from pocketsat.flight import Mode
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -137,18 +142,22 @@ def _ticks_per_orbit(environment: NominalEnvironment, clock: SimClock) -> int:
 @dataclass
 class LockstepRun:
     ticks: int = 0
-    pass_ticks: int = 0
+    downlink_ticks_per_orbit: list[int] = field(default_factory=list)
     first_divergence: int | None = None
-    """First tick (1-based) at which the two same-seed stacks differed, if any."""
+    """First tick (1-based) at which the two same-seed runs differed, if any."""
     differing: dict[str, int] = field(default_factory=lambda: dict.fromkeys(READINGS, 0))
     """Ticks in which each reported value differs between the two seeds."""
     flags: set[str] = field(default_factory=set)
     released_per_orbit: list[int] = field(default_factory=list)
     names: tuple[str, ...] = ()
     final: SpacecraftState | None = None
+    downlink_bytes: tuple[int, int] = (0, 0)
+    """Bytes ``receive()`` returned in the two same-seed runs."""
+    sent_bytes: int = 0
+    """Wire bytes sent in the first run, as handed to comms (``SilTick.traffic``)."""
     runtime_s: float = 0.0
-    one_stack_s: float = 0.0
-    """Time spent driving and stepping one stack, seconds."""
+    one_run_s: float = 0.0
+    """Time spent driving one ``SilTarget``, seconds."""
 
 
 def _flags(state: SpacecraftState) -> set[str]:
@@ -168,47 +177,44 @@ def _flags(state: SpacecraftState) -> set[str]:
 
 def _lockstep_run() -> LockstepRun:
     started = time.perf_counter()
-    environment = NominalEnvironment()
-    clock = SimClock()
-    ticks_per_orbit = _ticks_per_orbit(environment, clock)
-    driver = ProfileDriver(REFERENCE, NOMINAL_CONFIG, environment.orbit_period_us)
-    stacks = [real_stack(SEED), real_stack(SEED), real_stack(OTHER_SEED)]
-    run = LockstepRun(names=stacks[0].names)
-    previous = [stack.snapshot() for stack in stacks]
-    assert previous[0] == previous[1]
+    grounds = [
+        ProfileGround(REFERENCE, SEED),
+        ProfileGround(REFERENCE, SEED),
+        ProfileGround(REFERENCE, OTHER_SEED),
+    ]
+    ticks_per_orbit = grounds[0].ticks_per_orbit
+    run = LockstepRun()
     released_start = 0
+    downlink_ticks = 0
     for tick in range(1, ORBITS * ticks_per_orbit + 1):
-        now_us = clock.now_us
-        env = environment.state_at(now_us)
-        states = []
-        for i, (stack, before) in enumerate(zip(stacks, previous, strict=True)):
-            # Each stack is driven from its own state (its release follows its buffer).
-            t0 = time.perf_counter()
-            command = driver.command(now_us, before)
-            stack.step(clock.tick_us, env, command.controls)
-            states.append(stack.snapshot())
-            if i == 0:
-                run.one_stack_s += time.perf_counter() - t0
-                run.pass_ticks += command.in_pass
-        clock.advance_one_tick()
-        state, same, other = states
-        if run.first_divergence is None and state != same:
+        t0 = time.perf_counter()
+        record = grounds[0].tick()
+        run.one_run_s += time.perf_counter() - t0
+        same = grounds[1].tick()
+        other = grounds[2].tick()
+        state = record.state
+        if run.first_divergence is None and record != same:
             run.first_divergence = tick
         for name, read in READINGS.items():
-            run.differing[name] += read(state) != read(other)
+            run.differing[name] += read(state) != read(other.state)
         run.flags |= _flags(state)
+        run.sent_bytes += record.traffic.sent_bytes
+        downlink_ticks += grounds[0].mode is Mode.DOWNLINK
         if tick % ticks_per_orbit == 0:
             released = state.get("payload", PayloadSnapshot).truth.total_released_bytes
             run.released_per_orbit.append(released - released_start)
             released_start = released
-        previous = states
+            run.downlink_ticks_per_orbit.append(downlink_ticks)
+            downlink_ticks = 0
+        run.final = state
+    run.names = tuple(run.final.subsystems) if run.final is not None else ()
     run.ticks = ORBITS * ticks_per_orbit
-    run.final = previous[0]
+    run.downlink_bytes = (grounds[0].downlink_bytes, grounds[1].downlink_bytes)
     run.runtime_s = time.perf_counter() - started
     print(
-        f"\nepic #30 close-out: {ORBITS} orbits x 3 stacks in lockstep, {run.ticks} ticks"
-        f" each: {run.runtime_s:.1f} s wall; one stack {run.one_stack_s:.1f} s"
-        f" ({run.one_stack_s / ORBITS:.2f} s per orbit)"
+        f"\nepic #30 close-out: {ORBITS} orbits x 3 SilTarget runs in lockstep, {run.ticks}"
+        f" ticks each: {run.runtime_s:.1f} s wall; one run {run.one_run_s:.1f} s"
+        f" ({run.one_run_s / ORBITS:.2f} s per orbit)"
     )
     print(
         "  ticks with different readings, seed"
@@ -238,18 +244,23 @@ def test_all_five_real_subsystems_run_the_reference_profile(lockstep: LockstepRu
     assert clock.tick_us == 100_000  # the default tick, never coarsened
     orbit_ticks = NominalEnvironment().orbit_period_us // clock.tick_us
     assert lockstep.ticks == ORBITS * orbit_ticks
-    # One 10-minute DOWNLINK pass per orbit, and each pass downlinked (released) data.
-    assert lockstep.pass_ticks == ORBITS * PASS_US // clock.tick_us
+    # One DOWNLINK pass per orbit, and each pass downlinked (released) data.
+    assert len(lockstep.downlink_ticks_per_orbit) == ORBITS
+    assert all(ticks > 0 for ticks in lockstep.downlink_ticks_per_orbit)
     assert len(lockstep.released_per_orbit) == ORBITS
     assert all(released > 0 for released in lockstep.released_per_orbit)
+    # Every byte sent was handed to comms and returned by receive() (#98).
+    assert lockstep.sent_bytes == lockstep.downlink_bytes[0] > 0
     # The reference profile is the nominal case (#72): nothing is flagged.
     assert not lockstep.flags, f"flags raised in the reference profile: {lockstep.flags}"
 
 
 def test_same_seed_gives_an_identical_state_sequence(lockstep: LockstepRun) -> None:
     assert lockstep.first_divergence is None, (
-        f"same-seed stacks diverged at tick {lockstep.first_divergence}"
+        f"same-seed runs diverged at tick {lockstep.first_divergence}"
     )
+    # Byte-identical downlink (ADR-0003), with real traffic.
+    assert lockstep.downlink_bytes[0] == lockstep.downlink_bytes[1]
 
 
 def test_a_different_seed_gives_different_noisy_readings(lockstep: LockstepRun) -> None:
@@ -318,7 +329,7 @@ def _trace(subsystems: Iterable[Subsystem], board: SnapshotBoard, real: set[str]
     stack.reset(rng)
     environment = NominalEnvironment()
     clock = SimClock()
-    driver = ProfileDriver(REFERENCE, NOMINAL_CONFIG, environment.orbit_period_us)
+    driver = ProfileDriver(NOMINAL_CONFIG, environment.orbit_period_us)
     trace = Trace(draws=rng.draws)
     names = real
     noise = trace.noise
@@ -333,8 +344,8 @@ def _trace(subsystems: Iterable[Subsystem], board: SnapshotBoard, real: set[str]
     previous = stack.snapshot()
     for _ in range(_ticks_per_orbit(environment, clock)):
         now_us = clock.now_us
-        command = driver.command(now_us, previous)
-        stack.step(clock.tick_us, environment.state_at(now_us), command.controls)
+        controls, _ = driver.command(now_us, previous)
+        stack.step(clock.tick_us, environment.state_at(now_us), controls)
         clock.advance_one_tick()
         state = stack.snapshot()
         if "power" in names:

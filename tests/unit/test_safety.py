@@ -314,6 +314,12 @@ def with_comms(**changes: Any) -> SpacecraftReadings:
     )
 
 
+CAPACITY = NOMINAL_READINGS.comms.transmit_capacity_bytes
+"""The fake comms readings' transmit capacity (the nominal 120 bytes)."""
+
+AFTER_A_FULL_CAPACITY_TICK = SafetyState(previous_transmit_capacity_bytes=CAPACITY)
+"""The rules' state after a tick with the fake's full transmit capacity."""
+
 NON_FINITE = ConsistencyCheck.NON_FINITE_READING
 PAYLOAD = ConsistencyCheck.PAYLOAD_BOOKKEEPING
 COMMS = ConsistencyCheck.COMMS_CAPACITY
@@ -350,15 +356,15 @@ FAILURE_CASES: list[tuple[str, SpacecraftReadings, tuple[ConsistencyCheck, ...]]
         (PAYLOAD,),
     ),
     ("oldest chunk past next", with_payload(oldest_unreleased_chunk_id=1_001), (PAYLOAD,)),
-    ("sent over capacity", with_comms(sent_bytes=121), (COMMS,)),
-    ("sent negative", with_comms(sent_bytes=-1), (COMMS,)),
+    ("sent over capacity", with_comms(previous_tick_sent_bytes=121), (COMMS,)),
+    ("sent negative", with_comms(previous_tick_sent_bytes=-1), (COMMS,)),
     ("capacity with transmitter off", with_comms(transmitter_on=False), (COMMS,)),
     ("lost count negative", with_comms(uplink_lost_count=-1), (COMMS,)),
     ("suppressed count negative", with_comms(outbound_suppressed_count=-1), (COMMS,)),
     (
         "several at once, in check order",
         dataclasses.replace(
-            with_comms(sent_bytes=500),
+            with_comms(previous_tick_sent_bytes=500),
             power=dataclasses.replace(NOMINAL_READINGS.power, soc=math.nan, critical_battery=True),
         ),
         (NON_FINITE, ConsistencyCheck.BATTERY_FLAG_ORDER, COMMS),
@@ -374,8 +380,9 @@ FAILURE_CASES: list[tuple[str, SpacecraftReadings, tuple[ConsistencyCheck, ...]]
 def test_consistency_failures(
     readings: SpacecraftReadings, expected: tuple[ConsistencyCheck, ...]
 ) -> None:
-    assert consistency_failures(readings) == expected
-    verdict = evaluate(INITIAL_SAFETY_STATE, readings)
+    # The previous tick had the fake's full capacity, so the bytes are bounded by it.
+    assert consistency_failures(readings, CAPACITY) == expected
+    verdict = evaluate(AFTER_A_FULL_CAPACITY_TICK, readings)
     assert verdict.fault_detected
     assert verdict.events[0] == ModeEvent(EventKind.FAULT_DETECTED)
 
@@ -395,7 +402,7 @@ PASSING_CASES: list[tuple[str, SpacecraftReadings]] = [
         ),
     ),
     ("no chunk stored", with_payload(oldest_unreleased_chunk_id=5, next_chunk_id=5)),
-    ("full capacity sent", with_comms(sent_bytes=120)),
+    ("full capacity sent", with_comms(previous_tick_sent_bytes=120)),
     (
         "transmitter off (transmitter_off fault or RX_ONLY)",
         with_comms(transmitter_on=False, transmit_capacity_bytes=0),
@@ -408,23 +415,91 @@ PASSING_CASES: list[tuple[str, SpacecraftReadings]] = [
     "readings", [case[1] for case in PASSING_CASES], ids=[case[0] for case in PASSING_CASES]
 )
 def test_consistent_readings_pass_every_check(readings: SpacecraftReadings) -> None:
+    assert consistency_failures(readings, CAPACITY) == ()
     assert consistency_failures(readings) == ()
+    assert not evaluate(AFTER_A_FULL_CAPACITY_TICK, readings).fault_detected
     assert not evaluate(INITIAL_SAFETY_STATE, readings).fault_detected
 
 
 def test_fault_is_raised_in_the_first_tick_without_persistence() -> None:
-    bad = with_comms(sent_bytes=999)
-    verdict = evaluate(INITIAL_SAFETY_STATE, bad, SafetyConfig(sustain_tick_count=50))
+    bad = with_comms(previous_tick_sent_bytes=999)
+    verdict = evaluate(AFTER_A_FULL_CAPACITY_TICK, bad, SafetyConfig(sustain_tick_count=50))
     assert verdict.events == (ModeEvent(EventKind.FAULT_DETECTED),)
 
 
 def test_fault_comes_before_safe_condition_in_the_same_tick() -> None:
-    bad = readings_with(frozenset({SafeFlag.UNDER_TEMP}), base=with_comms(sent_bytes=999))
-    verdict = evaluate(INITIAL_SAFETY_STATE, bad, SafetyConfig(sustain_tick_count=1))
+    bad = readings_with(
+        frozenset({SafeFlag.UNDER_TEMP}), base=with_comms(previous_tick_sent_bytes=999)
+    )
+    verdict = evaluate(AFTER_A_FULL_CAPACITY_TICK, bad, SafetyConfig(sustain_tick_count=1))
     assert verdict.events == (
         ModeEvent(EventKind.FAULT_DETECTED),
         ModeEvent(EventKind.SAFE_CONDITION),
     )
+
+
+# --- Comms bytes against the previous tick's capacity (#98, from PR #110) -----------------
+
+TRANSMITTER_JUST_OFF = with_comms(
+    transmitter_on=False, transmit_capacity_bytes=0, previous_tick_sent_bytes=CAPACITY
+)
+"""The first tick of ``transmitter_off``: capacity 0 now, but the previous tick's full
+capacity is still being reported (ADR-0007)."""
+
+
+def test_bytes_sent_before_the_transmitter_switched_off_are_consistent() -> None:
+    # Checked against the previous tick's capacity, not this tick's 0: no false FAULT.
+    assert consistency_failures(TRANSMITTER_JUST_OFF, CAPACITY) == ()
+    assert not evaluate(AFTER_A_FULL_CAPACITY_TICK, TRANSMITTER_JUST_OFF).fault_detected
+
+
+def test_bytes_while_the_transmitter_was_already_off_are_a_fault() -> None:
+    # Two ticks into transmitter_off the previous capacity is 0 too.
+    after_off = evaluate(AFTER_A_FULL_CAPACITY_TICK, TRANSMITTER_JUST_OFF).state
+    assert after_off.previous_transmit_capacity_bytes == 0
+    still_sending = with_comms(
+        transmitter_on=False, transmit_capacity_bytes=0, previous_tick_sent_bytes=1
+    )
+    assert evaluate(after_off, still_sending).failures == (COMMS,)
+
+
+def test_evaluate_remembers_this_ticks_capacity_for_the_next_tick() -> None:
+    assert evaluate(INITIAL_SAFETY_STATE, NOMINAL_READINGS).state == SafetyState(
+        (0, 0, 0), CAPACITY
+    )
+    off = with_comms(transmitter_on=False, transmit_capacity_bytes=0)
+    assert evaluate(AFTER_A_FULL_CAPACITY_TICK, off).state.previous_transmit_capacity_bytes == 0
+
+
+def test_unknown_previous_capacity_checks_only_the_lower_bound() -> None:
+    # The first tick after power-on or a reboot: the bytes were sent by the software
+    # before the reboot, under a capacity this one never saw.
+    assert INITIAL_SAFETY_STATE.previous_transmit_capacity_bytes is None
+    assert consistency_failures(TRANSMITTER_JUST_OFF) == ()
+    assert consistency_failures(with_comms(previous_tick_sent_bytes=999)) == ()
+    assert consistency_failures(with_comms(previous_tick_sent_bytes=-1)) == (COMMS,)
+
+
+@pytest.mark.parametrize("bad", [-1, 1.0, True, "120"])
+def test_state_rejects_a_bad_previous_capacity(bad: Any) -> None:
+    with pytest.raises(ValueError):
+        SafetyState((0, 0, 0), bad)
+
+
+def test_transmitter_switching_off_with_bytes_in_flight_raises_no_fault() -> None:
+    # The flight computer itself, across the two ticks: full capacity sent in tick N,
+    # transmitter_off from tick N+1 (comms reports the bytes with capacity 0).
+    fc = FlightComputer()
+    fc.reset()
+    fc.step((), NOMINAL_READINGS, TICK_US)
+    fc.step((), with_comms(previous_tick_sent_bytes=CAPACITY), 2 * TICK_US)
+    modes = []
+    for n, readings in enumerate((TRANSMITTER_JUST_OFF, TRANSMITTER_JUST_OFF), start=3):
+        fc.step((), readings, n * TICK_US)
+        modes.append(fc.mode)
+    # No FAULT in the first tick of transmitter_off; 120 bytes reported again in the
+    # next tick, when the previous capacity was 0 too, is one.
+    assert modes == [Mode.BOOT, Mode.FAULT]
 
 
 # --- The flight computer -----------------------------------------------------------------

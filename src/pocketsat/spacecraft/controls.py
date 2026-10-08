@@ -6,6 +6,8 @@ Fault overrides are merged in by ``SilTarget`` with precedence fault > flight
 computer, and act on the same tick they are injected.
 
 Each subsystem reads only its own record (and the overrides that concern it).
+``radio_traffic`` is the one field that reports rather than decides: ``SilTarget``
+fills it with the previous tick's radio traffic, for comms (ADR-0007).
 """
 
 import math
@@ -95,6 +97,49 @@ class AttitudeControls:
 
 
 @dataclass(frozen=True)
+class RadioTraffic:
+    """One tick's radio traffic, reported to comms in the next tick (ADR-0007).
+
+    ``SilTarget`` fills ``SpacecraftControls.radio_traffic`` with it at step a of tick
+    N+1, from what happened in tick N; the flight computer never sets it (its controls
+    carry the default, all zeros). Comms validates it against its own tick N state,
+    charges the bytes' transmit energy in tick N+1, and adds the two counts to its
+    running totals (ADR-0007 §2 to §4). All values are per tick, never running totals.
+
+    Attributes:
+        sent_bytes: Wire bytes (header, payload, and CRC) of every frame the flight
+            computer sent in the tick: ACK/NACK, telemetry, and DATA. At most that
+            tick's ``transmit_capacity_bytes``.
+        uplink_lost_count: Uplink frames ``SilTarget`` dropped in the tick because
+            comms' receiver was off.
+        outbound_suppressed_count: ACK/NACK and telemetry frames the flight computer
+            suppressed in the tick for lack of transmit capacity (DATA that does not fit
+            stays in the payload buffer and is not counted).
+
+    Raises:
+        TypeError: A field is not an int (or is a bool).
+        ValueError: A field is negative.
+    """
+
+    sent_bytes: int = 0
+    uplink_lost_count: int = 0
+    outbound_suppressed_count: int = 0
+
+    def __post_init__(self) -> None:
+        for name in ("sent_bytes", "uplink_lost_count", "outbound_suppressed_count"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int, got {value!r}")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative, got {value}")
+
+
+NO_RADIO_TRAFFIC: Final = RadioTraffic()
+"""No traffic: the default of ``SpacecraftControls.radio_traffic``, shared by every
+record that does not set it."""
+
+
+@dataclass(frozen=True)
 class SpacecraftControls:
     """Everything the subsystems obey for one tick (ADR-0004 §1).
 
@@ -110,6 +155,9 @@ class SpacecraftControls:
             readings are held at their last value. Subset of :data:`SENSOR_SUBSYSTEMS`.
         extra_load_w: Fault override from ``battery_drain``: extra load added to the
             power draw, in watts. Non-negative.
+        radio_traffic: The previous tick's radio traffic, for comms (ADR-0007). Filled
+            by ``SilTarget``'s merge at step a, like the fault overrides; the flight
+            computer leaves it at :data:`NO_RADIO_TRAFFIC`.
 
     Raises:
         TypeError: A field has the wrong type.
@@ -122,12 +170,14 @@ class SpacecraftControls:
     attitude: AttitudeControls = field(default_factory=AttitudeControls)
     frozen_sensors: frozenset[str] = frozenset()
     extra_load_w: float = 0.0
+    radio_traffic: RadioTraffic = NO_RADIO_TRAFFIC
 
     def __post_init__(self) -> None:
         for name, kind in (
             ("payload", PayloadControls),
             ("radio", RadioControls),
             ("attitude", AttitudeControls),
+            ("radio_traffic", RadioTraffic),
         ):
             if not isinstance(getattr(self, name), kind):
                 raise TypeError(f"{name} must be a {kind.__name__}, got {getattr(self, name)!r}")

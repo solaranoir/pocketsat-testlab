@@ -124,12 +124,13 @@ The flight computer commands subsystems through one frozen `SpacecraftControls` 
 | `AttitudeControls(enabled)` | Attitude | Attitude control on/off |
 | `frozen_sensors` | Power, thermal, attitude | Fault override from `sensor_freeze` |
 | `extra_load_w` | Power | Fault override from `battery_drain` |
+| `radio_traffic` | Comms | `RadioTraffic(sent_bytes, uplink_lost_count, outbound_suppressed_count)`: the previous tick's radio traffic, filled by `SilTarget` (ADR-0007); the flight computer leaves it at zero |
 
 The defaults (payload off, radio `RX_TX`, attitude control on, no overrides) are a test convenience; after a reset, the flight computer's BOOT controls apply to tick 0. Subsystems never read the mode, and each reads only its own record and the overrides that concern it. `SilTarget` merges fault overrides into the controls in one place, with precedence fault > flight computer.
 
 **The flight computer is not part of `STEP_ORDER`.** It always runs after all subsystems. ADR-0003's step 6, `advance(dt_us)`, expands to:
 
-- a. Merge the flight computer's tick N-1 controls with the active fault overrides.
+- a. Merge the flight computer's tick N-1 controls with the active fault overrides and the tick N-1 radio traffic (ADR-0007).
 - b. Subsystems step in `STEP_ORDER` with the merged controls.
 - c. The flight computer decodes queued uplink, executes commands, and sends ACK/NACK.
 - d. The flight computer evaluates flags and state and updates the mode.
@@ -146,8 +147,11 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 | Command → physical effect | +1 tick |
 | Effect → power sees the draw | +1 tick (downstream read) |
 | Fault → effect | 0 ticks |
+| Frame sent → comms reports `previous_tick_sent_bytes` | +1 tick |
+| Frame sent → power sees its transmit energy | +2 ticks |
+| Uplink lost or outbound suppressed → comms' count | +1 tick |
 
-**Radio traffic (ADR-0007, Proposed, implemented by #98).** Comms reads nothing, so each tick's radio traffic (bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in the controls at step a of the next tick. Comms reports tick N's traffic in tick N+1, and power sees the transmit energy in tick N+2; comms' byte count is therefore named `previous_tick_sent_bytes`. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
+**Radio traffic (ADR-0007, #98).** Comms reads nothing, so each tick's radio traffic (wire bytes sent, uplink frames lost, outbound frames suppressed) reaches it as a `RadioTraffic` record that `SilTarget` places in `controls.radio_traffic` at step a of the next tick. Comms checks the record against its own previous tick (bytes within that tick's capacity, none while the transmitter was off, no lost uplink while the receiver was on) and raises `ValueError` on a violation, a simulator bug, never clipped. It reports tick N's bytes as `previous_tick_sent_bytes` in tick N+1, adds the counts to its running totals (`uplink_lost_count`, `outbound_suppressed_count`, since `reset(seed)`), and charges the bytes in that tick's `transmit_power_w`, so power sees the transmit energy in tick N+2. The flight computer's consistency check bounds `previous_tick_sent_bytes` by the previous tick's capacity (#48). These timings are SIL properties, asserted in `tests/sil/test_radio_traffic_sil.py`, never in the contract suite. See [ADR-0007](adr/0007-radio-traffic-input-to-comms.md).
 
 #### The SIL target (#59)
 
@@ -155,8 +159,8 @@ So commands act one tick later and faults act on the same tick. Telemetry at tic
 
 - `advance(dt_us)` runs `dt_us // tick_us` ticks, each steps a to f above; `dt_us` must be a multiple of the tick (events are quantized to ticks before a run, ADR-0003), and a partial tick raises `ValueError`. The flight computer is called with the time at the end of the tick.
 - Uplink queued by `send()` arrives in the next tick. It reaches the flight computer only if comms' receiver is on after step b; otherwise it is lost (not queued) and counted. Received frames that are not valid wire frames are dropped and counted, and never raise.
-- Step a is one merge function, `SilTarget._merge_controls()`. It applies the fault overrides (#60, below) and, with #98, the radio traffic. With no fault active it passes the flight computer's controls through unchanged.
-- Each tick is described by a `SilTick` record: the merged controls next to the `SpacecraftState` they produced, the uplink delivered, the undecodable count, the downlink, the next controls, and the tick's traffic (`TickTraffic`: bytes sent, uplink lost, outbound suppressed). `TickTraffic` has `RadioTraffic`'s fields and is held for the hand-over that #98 wires into the controls. It also records the active override faults, whether a `forced_reset` held or rebooted the flight computer, and the uplink dropped while it was held.
+- Step a is one merge function, `SilTarget._merge_controls()`. It applies the fault overrides (#60, below) and the previous tick's radio traffic (#98). With no fault active and no traffic to hand over it passes the flight computer's controls through unchanged.
+- Each tick is described by a `SilTick` record: the merged controls next to the `SpacecraftState` they produced, the uplink delivered, the undecodable count, the downlink, the next controls, and the tick's traffic (`TickTraffic`: bytes sent, uplink lost, outbound suppressed). `TickTraffic` has `RadioTraffic`'s fields and is handed to comms as the next tick's `controls.radio_traffic`. It also records the active override faults, whether a `forced_reset` held or rebooted the flight computer, and the uplink dropped while it was held.
 
 #### SIL target faults (#60)
 

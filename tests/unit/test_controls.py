@@ -8,11 +8,13 @@ import pytest
 
 from pocketsat.core.rng import RngFactory
 from pocketsat.spacecraft import (
+    NO_RADIO_TRAFFIC,
     SENSOR_SUBSYSTEMS,
     AttitudeControls,
     PayloadControls,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SpacecraftControls,
     SpacecraftState,
     Subsystem,
@@ -35,6 +37,14 @@ def test_defaults_describe_nominal_operation() -> None:
     assert controls.attitude.enabled is True
     assert controls.frozen_sensors == frozenset()
     assert controls.extra_load_w == 0.0
+    assert controls.radio_traffic == RadioTraffic(0, 0, 0)
+    assert controls.radio_traffic is NO_RADIO_TRAFFIC  # shared, not rebuilt per record
+
+
+def test_radio_traffic_is_per_tick_counts() -> None:
+    traffic = RadioTraffic(sent_bytes=114, uplink_lost_count=2, outbound_suppressed_count=1)
+    assert SpacecraftControls(radio_traffic=traffic).radio_traffic is traffic
+    assert RadioTraffic() == NO_RADIO_TRAFFIC
 
 
 def test_radio_modes() -> None:
@@ -53,6 +63,8 @@ def test_sensor_subsystems() -> None:
         (PayloadControls(), "enabled"),
         (RadioControls(), "mode"),
         (AttitudeControls(), "enabled"),
+        (SpacecraftControls(), "radio_traffic"),
+        (RadioTraffic(), "sent_bytes"),
     ],
 )
 def test_records_are_frozen(record: object, field: str) -> None:
@@ -90,6 +102,13 @@ def test_valid_overrides_accepted() -> None:
         (lambda: SpacecraftControls(extra_load_w=float("inf")), ValueError),
         (lambda: SpacecraftControls(extra_load_w="1"), TypeError),  # type: ignore[arg-type]
         (lambda: SpacecraftControls(extra_load_w=True), TypeError),
+        (lambda: SpacecraftControls(radio_traffic=(0, 0, 0)), TypeError),  # type: ignore[arg-type]
+        (lambda: RadioTraffic(sent_bytes=-1), ValueError),
+        (lambda: RadioTraffic(uplink_lost_count=-1), ValueError),
+        (lambda: RadioTraffic(outbound_suppressed_count=-1), ValueError),
+        (lambda: RadioTraffic(sent_bytes=1.0), TypeError),  # type: ignore[arg-type]
+        (lambda: RadioTraffic(uplink_lost_count=True), TypeError),
+        (lambda: RadioTraffic(outbound_suppressed_count=None), TypeError),  # type: ignore[arg-type]
     ],
 )
 def test_invalid_controls_rejected(build: Callable[[], object], error: type[Exception]) -> None:

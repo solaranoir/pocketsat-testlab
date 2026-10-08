@@ -1,37 +1,60 @@
-"""#72's operating profiles and traffic stand-ins, shared by the SIL tests that use them.
+"""#72's operating profiles, run with real radio traffic (#98), shared by the SIL tests.
 
-The power and thermal budget tests (#72, ``test_power_thermal_budget.py``) and the
-epic #30 close-out test (#70, ``test_epic_30_closeout.py``) drive the five real
-subsystems with the same **reference profile**: SCIENCE for the whole orbit except one
-10-minute DOWNLINK pass at the end of each orbit. There is no flight computer yet, so
-:class:`ProfileDriver` scripts ``SpacecraftControls`` the way the flight computer's mode
-table will (#47): payload enabled in SCIENCE and DOWNLINK, radio ``RX_TX`` in every mode
-(ADR-0004 §10), attitude control on.
+The power and thermal budget tests (#72, ``test_power_thermal_budget.py``) and the epic
+#30 close-out test (#70, ``test_epic_30_closeout.py``) run the **reference profile**:
+SCIENCE for the whole orbit, and BEGIN_DOWNLINK 10 minutes before the end of each orbit
+(the end of eclipse, the worst place for the minimum SOC).
 
-**Stand-ins until #56 and #59 send real traffic** (comms' ``sent_bytes`` is always 0):
+**Real traffic (#98).** :class:`ProfileGround` drives a ``SilTarget`` with the real
+flight computer through the ``TestTarget`` interface, as the ground will: COMMAND frames
+in with ``send()``, ``NominalEnvironment`` applied before every tick, one tick per
+``advance()``. Every byte the spacecraft transmits is a real frame (36-byte telemetry at
+the per-mode cadence, ACK/NACK, 78-byte DATA frames in DOWNLINK), handed to comms by
+``SilTarget`` (ADR-0007), so comms' own ``transmit_power_w`` carries the transmit
+energy and power integrates it two ticks after each frame. The flight computer follows
+its mode table (#47): payload enabled only in SCIENCE (off in DOWNLINK), radio
+``RX_TX``, attitude control on after BOOT; the downlink session sends every stored
+chunk and releases it once sent (#56), then ``DOWNLINK_COMPLETE`` returns to SCIENCE.
+#72's traffic stand-ins (an assumed 64-byte beacon once a second and full transmit
+capacity for the whole pass, charged through ``extra_load_w``, and a scripted chunk
+release) are gone.
 
-- *Traffic energy.* The bytes a real flight computer would send are costed with
-  :func:`~pocketsat.spacecraft.comms.transmit_draw_w` and added through
-  ``SpacecraftControls.extra_load_w`` in the ticks they would be sent: an assumed
-  beacon of one :data:`TELEMETRY_FRAME_BYTES` telemetry frame per second outside the
-  pass, and full transmit capacity in every tick of the DOWNLINK pass. Comms' own
-  truth already carries the idle draw (``transmitter_on_power_w``), so only the
-  per-byte part is added.
-- *Data release.* In each pass tick the driver releases as many of the oldest chunks as
-  whole DATA frames fit in the capacity left after telemetry and ACK/NACK (ADR-0004
-  §10 priority), as #56 will.
+Two must-fail and information profiles ask for what the flight software never does.
+They use :class:`ProfileFlightComputer`, the real flight computer with one documented
+change to its output, so their traffic is still real frames through comms:
 
-Re-check the budget once #56 and #59 send real traffic.
+- ``keyed``: the transmitter at full capacity in every tick (the old "continuous
+  DOWNLINK" worst case, with the payload acquiring as in SCIENCE): after the real
+  frames, filler frames fill the rest of comms' capacity.
+- ``attitude=False``: attitude control off (tumbling).
+
+:class:`ProfileDriver` is the stack-level driver kept for the one test that cannot run
+``SilTarget``: the close-out's named-stream independence check swaps subsystems for
+fakes, which needs a bare ``SubsystemStack``. It scripts the mode table's controls and
+reports scripted traffic of the real frame sizes through ``controls.radio_traffic``,
+comms' real input (never ``extra_load_w``).
 """
 
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from pocketsat.core.rng import RngFactory
-from pocketsat.frame import MIN_FRAME_SIZE
+from pocketsat.environment import NominalEnvironment
+from pocketsat.flight import (
+    DEFAULT_FLIGHT_COMPUTER_CONFIG,
+    FlightComputer,
+    FlightComputerConfig,
+    FlightComputerOutput,
+    Mode,
+    SpacecraftReadings,
+)
+from pocketsat.frame import MIN_FRAME_SIZE, Frame, FrameType, encode_frame
+from pocketsat.messages import TELEMETRY_FRAME_SIZE, Command, encode_command
 from pocketsat.spacecraft import (
     CHUNK_ID_SIZE_BYTES,
     DEFAULT_INITIAL_STATE,
+    NO_RADIO_TRAFFIC,
     NOMINAL_CONFIG,
     Attitude,
     AttitudeControls,
@@ -42,6 +65,7 @@ from pocketsat.spacecraft import (
     Power,
     RadioControls,
     RadioMode,
+    RadioTraffic,
     SnapshotBoard,
     SpacecraftConfig,
     SpacecraftControls,
@@ -50,48 +74,196 @@ from pocketsat.spacecraft import (
     Subsystem,
     SubsystemStack,
     Thermal,
-    transmit_draw_w,
 )
+from pocketsat.targets.base import TargetFault
+from pocketsat.targets.sil import BATTERY_DRAIN, SilTarget, SilTick
 
 US_PER_S = 1_000_000
-
-# --- Traffic assumptions (stand-ins until #56 and #59) ---------------------------------
-
-TELEMETRY_PAYLOAD_BYTES = 54
-"""Assumed telemetry payload, bytes. #54's field list (uptime, mode, flags, voltage,
-SOC, two temperatures, pointing error, buffer fill, radio, attitude and payload states,
-boot count) encodes to about 24 bytes; 54 leaves room for growth."""
-
-TELEMETRY_FRAME_BYTES = MIN_FRAME_SIZE + TELEMETRY_PAYLOAD_BYTES
-"""Assumed telemetry (beacon) frame, bytes: 64 with the 10-byte frame overhead
-(``docs/protocol.md``)."""
-
-ACK_FRAME_BYTES = MIN_FRAME_SIZE + 3
-"""Assumed ACK/NACK frame, bytes: acknowledged sequence (2) and status (1) plus the
-frame overhead, 13."""
-
-BEACON_PERIOD_US = US_PER_S
-"""One telemetry frame per second, in every mode."""
 
 PASS_US = 10 * 60 * US_PER_S
 """DOWNLINK pass length: 10 minutes, at the end of each orbit (the end of eclipse, the
 worst place for the minimum SOC)."""
 
-Downlink = Literal["none", "pass", "continuous"]
+SCIENCE_COMMAND_US = 6 * US_PER_S
+"""When the ground sends SET_MODE SCIENCE: one second after the default 5 s boot."""
+
+TELEMETRY_PERIOD_US = DEFAULT_FLIGHT_COMPUTER_CONFIG.telemetry.science_period_us
+"""The real telemetry cadence in SCIENCE and DOWNLINK (1 s, #55)."""
+
+Downlink = Literal["none", "pass"]
 
 
 @dataclass(frozen=True)
 class Profile:
-    """An operating profile: what the flight computer would command."""
+    """An operating profile: what the ground commands, and the flight computer's one
+    scripted deviation, if any (see the module docstring).
+
+    Attributes:
+        name: For reports.
+        science: Command SCIENCE after the boot; otherwise the flight computer stays in
+            NOMINAL (payload off).
+        downlink: ``"pass"``: BEGIN_DOWNLINK at the start of the last
+            :data:`PASS_US` of every orbit.
+        attitude: Attitude control as the mode table commands it; ``False`` holds it
+            off (tumbling).
+        keyed: Fill the transmit capacity with filler frames in every tick.
+    """
 
     name: str
-    payload: bool = True
-    attitude: bool = True
+    science: bool = True
     downlink: Downlink = "pass"
+    attitude: bool = True
+    keyed: bool = False
 
 
-REFERENCE = Profile("reference (SCIENCE + 10-min DOWNLINK)")
+REFERENCE = Profile("reference (SCIENCE + 10-min DOWNLINK pass)")
 """#72's reference profile, used by #63 and #70."""
+
+
+# --- The SilTarget harness (real traffic) ----------------------------------------------
+
+
+class ProfileFlightComputer(FlightComputer):
+    """The real flight computer, with at most one scripted change to its output.
+
+    Args:
+        config: The flight computer's settings.
+        attitude: ``False`` turns attitude control off in every controls record it
+            produces (BOOT already has it off).
+        keyed: After the real frames, fill what is left of comms' capacity with filler
+            frames (never decoded), so the transmitter sends at full capacity in every
+            tick it is on.
+    """
+
+    def __init__(
+        self,
+        config: FlightComputerConfig = DEFAULT_FLIGHT_COMPUTER_CONFIG,
+        *,
+        attitude: bool = True,
+        keyed: bool = False,
+    ) -> None:
+        super().__init__(config)
+        self._attitude_off = not attitude
+        self._keyed = keyed
+
+    def step(
+        self, uplink_frames: Iterable[bytes], readings: SpacecraftReadings, now_us: int
+    ) -> FlightComputerOutput:
+        output = super().step(uplink_frames, readings, now_us)
+        if self._attitude_off and output.controls.attitude.enabled:
+            output = replace(
+                output, controls=replace(output.controls, attitude=AttitudeControls(False))
+            )
+        if self._keyed:
+            room = readings.comms.transmit_capacity_bytes - output.sent_bytes
+            if room >= MIN_FRAME_SIZE:
+                filler = encode_frame(Frame(FrameType.DATA, 0, bytes(room - MIN_FRAME_SIZE)))
+                output = replace(output, downlink_frames=(*output.downlink_frames, filler))
+        return output
+
+
+class ProfileGround:
+    """Runs ``profile`` on a ``SilTarget`` with real traffic, one tick per :meth:`tick`.
+
+    Only the ``TestTarget`` methods drive the run (``apply_environment``, ``send``,
+    ``advance``, ``receive``, ``inject``); the tests read each tick's
+    :class:`~pocketsat.targets.sil.SilTick` to measure it.
+
+    Args:
+        profile: What to command.
+        seed: The run's seed.
+        config: Spacecraft settings.
+        initial: Starting state.
+        environment: The orbit; ``NominalEnvironment()`` by default.
+        extra_load_w: A ``battery_drain`` fault of this load for the whole run, watts
+            (0: none).
+        observer: Called with every tick's record.
+    """
+
+    def __init__(
+        self,
+        profile: Profile,
+        seed: int,
+        *,
+        config: SpacecraftConfig = NOMINAL_CONFIG,
+        initial: SpacecraftInitialState = DEFAULT_INITIAL_STATE,
+        environment: NominalEnvironment | None = None,
+        extra_load_w: float = 0.0,
+        observer: Callable[[SilTick], None] | None = None,
+    ) -> None:
+        self.profile = profile
+        self.environment = NominalEnvironment() if environment is None else environment
+        self.computers: list[ProfileFlightComputer] = []
+
+        def factory() -> ProfileFlightComputer:
+            computer = ProfileFlightComputer(attitude=profile.attitude, keyed=profile.keyed)
+            self.computers.append(computer)
+            return computer
+
+        self.target = SilTarget(
+            config=config, initial=initial, flight_computer_factory=factory, tick_observer=observer
+        )
+        self.target.connect()
+        self.target.reset(seed)
+        if extra_load_w:
+            self.target.inject(TargetFault(BATTERY_DRAIN, {"load_w": extra_load_w}))
+        self.tick_us = self.target.tick_us
+        period = self.environment.orbit_period_us
+        assert period % self.tick_us == 0 and PASS_US % self.tick_us == 0
+        self.ticks_per_orbit = period // self.tick_us
+        self._pass_start_tick = (period - PASS_US) // self.tick_us
+        self._science_tick = SCIENCE_COMMAND_US // self.tick_us
+        self.count = 0
+        """Ticks run so far."""
+        self.sequence = 0
+        self.downlink_bytes = 0
+        """Bytes ``receive()`` returned over the run."""
+
+    @property
+    def mode(self) -> Mode:
+        """The flight computer's mode (for reports only; the ground never reads it)."""
+        return self.computers[-1].mode
+
+    def in_pass(self, tick_index: int) -> bool:
+        """Whether tick ``tick_index`` is in the 10-minute pass window."""
+        return (
+            self.profile.downlink == "pass"
+            and tick_index % self.ticks_per_orbit >= self._pass_start_tick
+        )
+
+    def _send(self, command: Command) -> None:
+        self.sequence += 1
+        frame = Frame(FrameType.COMMAND, self.sequence, encode_command(command))
+        self.target.send(encode_frame(frame))
+
+    def tick(self) -> SilTick:
+        """Run one tick: the environment, the ground's commands, the tick, the downlink."""
+        n = self.count
+        target = self.target
+        target.apply_environment(self.environment.state_at(target.now_us))
+        if self.profile.science and n == self._science_tick:
+            self._send(Command.set_mode(Mode.SCIENCE))
+        if self.profile.downlink == "pass" and n % self.ticks_per_orbit == self._pass_start_tick:
+            self._send(Command.begin_downlink())
+        target.advance(self.tick_us)
+        self.downlink_bytes += sum(len(frame) for frame in target.receive())
+        self.count += 1
+        record = target.last_tick
+        assert record is not None
+        return record
+
+
+def reset_state(
+    seed: int,
+    config: SpacecraftConfig = NOMINAL_CONFIG,
+    initial: SpacecraftInitialState = DEFAULT_INITIAL_STATE,
+) -> SpacecraftState:
+    """The subsystems' state after ``reset(seed)``, before tick 0: what ``SilTarget``
+    starts from (it builds the same stack from the same settings)."""
+    return real_stack(seed, config, initial).snapshot()
+
+
+# --- Subsystem stacks ------------------------------------------------------------------
 
 
 def real_subsystems(
@@ -126,88 +298,44 @@ def data_frame_bytes(config: SpacecraftConfig) -> int:
     return CHUNK_ID_SIZE_BYTES + config.payload.chunk_size_bytes + MIN_FRAME_SIZE
 
 
-def data_frames_in_tick(config: SpacecraftConfig, beacon_tick: bool) -> int:
-    """Whole DATA frames that fit in one pass tick after ACK/NACK and telemetry.
-
-    Frames that don't fit are not queued (ADR-0004 §10). In the beacon tick the
-    telemetry frame and an assumed ACK/NACK come first.
-    """
-    overhead = TELEMETRY_FRAME_BYTES + ACK_FRAME_BYTES if beacon_tick else 0
-    return max(0, config.comms.transmit_capacity_bytes - overhead) // data_frame_bytes(config)
-
-
-@dataclass(frozen=True)
-class TickCommand:
-    """What :class:`ProfileDriver` commands for one tick."""
-
-    controls: SpacecraftControls
-    in_pass: bool
-    """Whether this tick is in a DOWNLINK pass."""
-    traffic_w: float
-    """Per-byte transmit draw of the stand-in traffic, watts (included in
-    ``controls.extra_load_w``)."""
+# --- The stack-level driver (for the close-out's stream-independence check) ------------
 
 
 class ProfileDriver:
-    """Scripts ``SpacecraftControls`` for ``profile``, tick by tick (see the module
-    docstring for the traffic and release stand-ins)."""
+    """Scripts ``SpacecraftControls`` for the reference profile on a bare stack.
 
-    def __init__(
-        self,
-        profile: Profile,
-        config: SpacecraftConfig,
-        orbit_period_us: int,
-        extra_load_w: float = 0.0,
-    ) -> None:
-        """Create a driver.
+    Only for tests that cannot use ``SilTarget`` (see the module docstring). It follows
+    the mode table: payload enabled outside the pass and off in it, radio ``RX_TX``,
+    attitude control on. In each pass tick it sends (and releases at once) one DATA
+    frame if a whole chunk is stored; a 36-byte telemetry frame goes out once a second.
+    Each tick's bytes reach comms in the next tick's ``radio_traffic``, as ``SilTarget``
+    hands them over (ADR-0007), so comms charges them.
+    """
 
-        Args:
-            profile: What to command.
-            config: The spacecraft settings (capacity, chunk size, transmit draw).
-            orbit_period_us: The environment's orbit period; the pass is the last
-                :data:`PASS_US` of each orbit.
-            extra_load_w: A constant extra load added to every tick, watts.
-        """
-        self.profile = profile
-        comms = config.comms
-        idle_w = transmit_draw_w(comms, True, 0)
-        self.beacon_w = transmit_draw_w(comms, True, TELEMETRY_FRAME_BYTES) - idle_w
-        """Per-byte draw of one telemetry frame, watts."""
-        self.pass_w = transmit_draw_w(comms, True, comms.transmit_capacity_bytes) - idle_w
-        """Per-byte draw of a tick at full transmit capacity, watts."""
-        self._frames = {beacon: data_frames_in_tick(config, beacon) for beacon in (False, True)}
+    def __init__(self, config: SpacecraftConfig, orbit_period_us: int) -> None:
         self._period_us = orbit_period_us
         self._pass_start_us = orbit_period_us - PASS_US
-        self._extra_load_w = extra_load_w
-        self._attitude = AttitudeControls(enabled=profile.attitude)
+        self._data_frame = data_frame_bytes(config)
         self._radio = RadioControls(mode=RadioMode.RX_TX)
+        self._attitude = AttitudeControls(enabled=True)
+        self._traffic = NO_RADIO_TRAFFIC
 
-    def command(self, now_us: int, previous: SpacecraftState) -> TickCommand:
-        """The controls for the tick starting at ``now_us``, given the state before it.
-
-        In a pass tick, releases the oldest chunks that fit in this tick's DATA frames,
-        read from ``previous`` (the flight computer acts on the last published state).
-        """
-        profile = self.profile
-        beacon = now_us % BEACON_PERIOD_US == 0
-        in_pass = profile.downlink == "continuous" or (
-            profile.downlink == "pass" and now_us % self._period_us >= self._pass_start_us
-        )
+    def command(self, now_us: int, previous: SpacecraftState) -> tuple[SpacecraftControls, bool]:
+        """The controls for the tick starting at ``now_us``, given the state before it,
+        and whether the tick is in the pass."""
+        in_pass = now_us % self._period_us >= self._pass_start_us
+        sent = TELEMETRY_FRAME_SIZE if now_us % TELEMETRY_PERIOD_US == 0 else 0
         release = None
         if in_pass:
-            traffic_w = self.pass_w
-            chunks = self._frames[beacon]
             payload = previous.get("payload", PayloadSnapshot).truth
-            if chunks and payload.next_chunk_id > payload.oldest_unreleased_chunk_id:
-                release = (
-                    min(payload.oldest_unreleased_chunk_id + chunks, payload.next_chunk_id) - 1
-                )
-        else:
-            traffic_w = self.beacon_w if beacon else 0.0
+            if payload.next_chunk_id > payload.oldest_unreleased_chunk_id:
+                release = payload.oldest_unreleased_chunk_id
+                sent += self._data_frame
         controls = SpacecraftControls(
-            payload=PayloadControls(enabled=profile.payload, release_through_chunk_id=release),
+            payload=PayloadControls(enabled=not in_pass, release_through_chunk_id=release),
             radio=self._radio,
             attitude=self._attitude,
-            extra_load_w=traffic_w + self._extra_load_w,
+            radio_traffic=self._traffic,
         )
-        return TickCommand(controls=controls, in_pass=in_pass, traffic_w=traffic_w)
+        self._traffic = RadioTraffic(sent) if sent else NO_RADIO_TRAFFIC
+        return controls, in_pass

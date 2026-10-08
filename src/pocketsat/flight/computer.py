@@ -247,11 +247,12 @@ class FlightComputerOutput:
         controls: The :class:`SpacecraftControls` for the next tick (ADR-0004 §2 step
             f), from the single controls function, with the downlink session's chunk
             release (#56). ``SilTarget`` merges fault overrides
-            and the radio traffic into them at step a of the next tick (#59, #98).
+            and the radio traffic into them at step a of the next tick (#59,
+            ADR-0007).
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick
             because they did not fit comms' transmit capacity (ADR-0004 §10,
             ADR-0007 §3). Per tick, not a running total; ``SilTarget`` passes it on in
-            ``RadioTraffic.outbound_suppressed_count`` (#98). Counted for ACK/NACK
+            ``RadioTraffic.outbound_suppressed_count``. Counted for ACK/NACK
             (#51) and telemetry (#55).
 
     Raises:
@@ -286,7 +287,7 @@ class FlightComputerOutput:
 
         This is ADR-0007's ``RadioTraffic.sent_bytes`` (header, payload, and CRC of
         every frame type), derived from the frames so the two can never disagree.
-        ``SilTarget`` passes it on (#98). Never more than comms'
+        ``SilTarget`` passes it on to comms. Never more than comms'
         ``transmit_capacity_bytes`` for the tick.
         """
         return sum(len(frame) for frame in self.downlink_frames)

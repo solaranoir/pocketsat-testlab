@@ -141,9 +141,9 @@ def test_replace_readings_and_mirrored_rules() -> None:
     assert isinstance(hot, ThermalSnapshot)
     assert hot.readings.over_temp and hot.truth == thermal.truth
     with pytest.raises(TypeError, match="use replace_truth"):
-        replace_readings(default_snapshot("comms"), sent_bytes=10)
-    comms = replace_truth(default_snapshot("comms"), sent_bytes=10)
-    assert comms.readings.sent_bytes == 10
+        replace_readings(default_snapshot("comms"), previous_tick_sent_bytes=10)
+    comms = replace_truth(default_snapshot("comms"), previous_tick_sent_bytes=10)
+    assert comms.readings.previous_tick_sent_bytes == 10
 
 
 # --- Fake-only stack ----------------------------------------------------------------------

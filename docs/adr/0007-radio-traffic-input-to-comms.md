@@ -1,6 +1,6 @@
 # ADR-0007: Radio traffic input to comms
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented by #98)
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0004 (§1 the controls record, §2 step a and the latency table, §10 transmit power). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #104. Implemented by #98.
 
