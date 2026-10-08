@@ -451,7 +451,7 @@ def _check_worst_case_scenario(run: TimedRun, scenario: WorstCaseScenario) -> No
     ]
     assert len(acks) == len(range(0, scenario.ticks, scenario.command_period_ticks))
     assert all(ack.accepted for ack in acks)
-    capacity = NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    capacity = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s * TICK_US // 1_000_000  # 120
     data_frame = MIN_FRAME_SIZE + DATA_CHUNK_ID_SIZE + NOMINAL_CONFIG.payload.chunk_size_bytes
     for frames in run.frames:
         used = sum(MIN_FRAME_SIZE + len(frame.payload) for frame in frames)

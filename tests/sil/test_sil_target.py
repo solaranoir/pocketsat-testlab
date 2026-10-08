@@ -557,7 +557,7 @@ def test_suppressed_count_is_passed_on_when_capacity_runs_out() -> None:
     # 120 bytes of capacity (#44) hold eight 14-byte ACKs (#51) with 8 bytes left. With
     # twelve commands, four ACKs and the 36-byte telemetry frame (#55) do not fit and
     # are suppressed by the real flight computer; SilTarget passes the count on.
-    capacity = NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    capacity = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s * TICK // 1_000_000  # 120
     assert (capacity // ACK_FRAME_SIZE, TELEMETRY_FRAME_SIZE) == (8, 36)
     target, ticks = telemetry_every_tick_target()
     for n in range(1, 13):

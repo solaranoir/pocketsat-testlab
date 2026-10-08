@@ -202,23 +202,25 @@ class Result:
     """Bytes sent in the last two ticks, whose energy power has not drawn yet."""
 
 
-def data_frames_in_tick(config: SpacecraftConfig, telemetry_tick: bool) -> int:
+def data_frames_in_tick(config: SpacecraftConfig, tick_us: int, telemetry_tick: bool) -> int:
     """Whole DATA frames that fit in one pass tick after ACK/NACK and telemetry.
 
-    In a telemetry tick the real 36-byte telemetry frame and an ACK/NACK allowance (one
-    per second, pessimistic: a pass has one ACK, BEGIN_DOWNLINK's) come first
-    (ADR-0004 §10).
+    The tick's capacity is the transmit rate over the tick (#122), rounded down: exact
+    at the 100 ms tick, and a lower bound where the carry adds a byte. In a telemetry
+    tick the real 36-byte telemetry frame and an ACK/NACK allowance (one per second,
+    pessimistic: a pass has one ACK, BEGIN_DOWNLINK's) come first (ADR-0004 §10).
     """
     overhead = TELEMETRY_FRAME_SIZE + ACK_FRAME_SIZE if telemetry_tick else 0
-    return max(0, config.comms.transmit_capacity_bytes - overhead) // data_frame_bytes(config)
+    capacity = config.comms.transmit_rate_bytes_per_s * tick_us // US_PER_S
+    return max(0, capacity - overhead) // data_frame_bytes(config)
 
 
 def pass_capacity_bytes(config: SpacecraftConfig, tick_us: int) -> int:
     """Chunk bytes one DOWNLINK pass can carry, net of ACK/NACK and telemetry."""
     ticks_per_period = TELEMETRY_PERIOD_US // tick_us
-    frames_per_period = data_frames_in_tick(config, True) + (
+    frames_per_period = data_frames_in_tick(config, tick_us, True) + (
         ticks_per_period - 1
-    ) * data_frames_in_tick(config, False)
+    ) * data_frames_in_tick(config, tick_us, False)
     periods = PASS_US // TELEMETRY_PERIOD_US
     return periods * frames_per_period * config.payload.chunk_size_bytes
 
@@ -676,7 +678,8 @@ def test_continuous_full_capacity_transmit_runs_out_of_energy() -> None:
         lambda: run_profile(CONTINUOUS_TRANSMIT, DOWNLINK_LOW_BATTERY_ORBITS, stop_on="low_battery")
     )
     first = result.orbits[0]
-    capacity = NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    capacity = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s * DEFAULT_TICK_US // US_PER_S
+    assert capacity == 120  # exactly, every 100 ms tick (#122)
     assert sum(first.sent_bytes.values()) == capacity * first.ticks  # every tick full
     assert first.net_wh < 0, f"continuous transmit net {first.net_wh:+.3f} Wh, required < 0"
     assert "low_battery" in result.flags, (

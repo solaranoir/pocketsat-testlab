@@ -50,6 +50,8 @@ from pocketsat.targets.base import TargetFault
 from pocketsat.targets.sil import FORCED_RESET, TRANSMITTER_OFF, SilTarget, SilTick
 
 COMMS = NOMINAL_CONFIG.comms
+CAPACITY = COMMS.transmit_rate_bytes_per_s * TICK // 1_000_000
+"""Bytes per tick: exactly 120 in every 100 ms tick (#122)."""
 IDLE_W = COMMS.transmitter_on_power_w
 PER_BYTE_W = COMMS.transmit_power_per_byte_w
 DATA_FRAME_SIZE = MIN_FRAME_SIZE + DATA_CHUNK_ID_SIZE + CHUNK
@@ -121,7 +123,7 @@ def test_data_during_a_pass_is_reported_one_tick_later_and_accounted() -> None:
     check_handover(ticks)
     data_ticks = [t for t in ticks if any(len(f) == DATA_FRAME_SIZE for f in t.downlink_frames)]
     assert len(data_ticks) >= 40
-    assert max(sent(t) for t in ticks) <= COMMS.transmit_capacity_bytes
+    assert max(sent(t) for t in ticks) <= CAPACITY
     # The first pass tick carries the BEGIN_DOWNLINK ACK and DOWNLINK's first telemetry.
     assert sent(ticks[0]) >= ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE
     assert ground.order == list(range(40))
@@ -265,7 +267,7 @@ class Overcommitted(ScriptedFlightComputer):
 
 @pytest.mark.parametrize(
     ("size", "radio", "match"),
-    [(COMMS.transmit_capacity_bytes + 1, RadioMode.RX_TX, "0..120"), (20, RadioMode.OFF, "off")],
+    [(CAPACITY + 1, RadioMode.RX_TX, "0..120"), (20, RadioMode.OFF, "off")],
 )
 def test_traffic_over_the_previous_capacity_fails_the_next_tick(
     size: int, radio: RadioMode, match: str

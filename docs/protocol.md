@@ -455,8 +455,9 @@ The chunk size is not on the wire: every chunk has the payload's configured size
 (`PayloadConfig.chunk_size_bytes`, default **64**), which the flight software is built
 with (`FlightComputerConfig.downlink`) and the ground knows, and the content is simply
 the rest of the payload. So a DATA payload is 4 + the chunk size, and a DATA frame is 14
-+ the chunk size: **78 bytes** for the default chunk, which fits the default 120-byte
-transmit capacity of one tick with room for an ACK or a telemetry frame, not both.
++ the chunk size: **78 bytes** for the default chunk, which fits the 120-byte transmit
+capacity of one default 100 ms tick (1200 bytes/s, #122) with room for an ACK or a
+telemetry frame, not both.
 
 Example, the `chunk_0_size_8` vector (DATA, sequence 0, chunk 0 of an 8-byte chunk size):
 
@@ -520,7 +521,11 @@ Every frame the spacecraft sends goes through one outbound queue in the flight c
 
 - **Capacity.** Each tick the frames sent fit within comms' `transmit_capacity_bytes`
   for that tick (wire bytes: header, payload, and CRC), read from comms' readings. A
-  capacity of 0 sends nothing.
+  capacity of 0 sends nothing. The capacity is the radio's fixed data rate
+  (`CommsConfig.transmit_rate_bytes_per_s`, 1200 bytes/s) over the tick, with the
+  fraction of a byte carried to the next tick (#122): 120 bytes in every default
+  100 ms tick, and a byte more or less from tick to tick when the rate does not divide
+  evenly into ticks. Frames are never split across ticks.
 - **Priority.** Frames are offered in priority order: ACK/NACK (step c), then telemetry
   (#55, at its per-mode cadence, `docs/spacecraft-modes.md`, "Telemetry cadence"), then
   DATA (#56) (step e). Each is sent if it fits what is left; one that does

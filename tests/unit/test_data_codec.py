@@ -36,8 +36,8 @@ def test_sizes() -> None:
     assert DATA_CHUNK_ID_SIZE == CHUNK_ID_SIZE_BYTES == 4
     assert MIN_DATA_PAYLOAD_SIZE == 5
     assert data_frame_size(NOMINAL_CONFIG.payload.chunk_size_bytes) == 78
-    # The default DATA frame fits one tick's default capacity (#44, #72).
-    assert data_frame_size(64) <= NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    # The default DATA frame fits one default 100 ms tick's capacity (#44, #72, #122).
+    assert data_frame_size(64) <= NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s // 10
 
 
 @pytest.mark.parametrize(

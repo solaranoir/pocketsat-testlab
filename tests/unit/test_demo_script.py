@@ -51,14 +51,17 @@ def test_each_scenario_runs(demo: ModuleType, scenario: str, expected: list[str]
 def test_nominal_orbit_downlinks_through_the_flight_computer(demo: ModuleType) -> None:
     # #56: the nominal orbit's chunks are released by the real flight computer once sent
     # as DATA frames, not by a scripted stand-in. A whole orbit at 10 s ticks has one
-    # 10-minute pass: 60 ticks, one 64-byte chunk in each but the first (which carries
-    # the ACK and the mode-change telemetry frame).
+    # pass, which empties the buffer: the radio's rate is 1200 B/s at any tick length
+    # (#122), 12 000 B in each 10 s tick, so the pass sends as much as at 100 ms.
     out = io.StringIO()
     assert demo.main(["--tick-ms", "10000", "--orbits", "1", "--scenario", "nominal"], out=out) == 0
     text = out.getvalue()
-    assert "downlink: passes from min 82.0; 59 DATA frames, 3776 B of chunks sent" in text
-    assert "released 3776 B once sent" in text
+    assert "downlink: passes from min 82.0; 2993 DATA frames, 191552 B of chunks sent" in text
+    assert "released 191552 B once sent" in text
+    assert "rate 1200 B/s (12000 B this tick)" in text
+    assert "flags raised: none" in text
     assert "stand-in" not in text
+    assert "per tick" not in text  # no warning that the rate depends on the tick (#122)
 
 
 def test_sensor_freeze_holds_readings(demo: ModuleType) -> None:

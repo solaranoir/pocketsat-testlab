@@ -155,7 +155,8 @@ def _check_tick(previous: SpacecraftState, state: SpacecraftState, extra_load_w:
     comms = state.get("comms", CommsSnapshot).truth
     assert comms.radio_mode is RadioMode.RX_TX
     assert comms.receiver_on and comms.transmitter_on
-    assert comms.transmit_capacity_bytes == NOMINAL_CONFIG.comms.transmit_capacity_bytes
+    # 1200 bytes/s over a 100 ms tick: exactly 120 bytes in every tick (#122).
+    assert comms.transmit_capacity_bytes == 120
     assert comms.previous_tick_sent_bytes == 0
     assert comms.uplink_lost_count == 0 and comms.outbound_suppressed_count == 0
 

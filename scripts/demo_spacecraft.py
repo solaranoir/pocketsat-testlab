@@ -297,7 +297,8 @@ class FlightComputerDriver:
     step) and returns the controls it produced, with that tick's radio traffic merged
     in for comms as ``SilTarget`` does (ADR-0007): comms reports and charges the bytes
     one tick later. Its commands are scripted: SET_MODE SCIENCE once the boot is over,
-    and BEGIN_DOWNLINK at the start of each pass. The flight computer sends the
+    and one BEGIN_DOWNLINK at the start of each pass (the session ends by itself once
+    the buffer is sent, #56). The flight computer sends the
     payload's chunks as DATA frames and releases them once sent; the DATA frames it
     hands back are counted here, as the ground would.
     """
@@ -309,6 +310,7 @@ class FlightComputerDriver:
     data_frames: int = 0
     data_chunk_bytes: int = 0
     passes: list[float] = field(default_factory=list)
+    last_pass_orbit: int = -1
 
     def __post_init__(self) -> None:
         self.controls = self.fc.reset()
@@ -323,9 +325,15 @@ class FlightComputerDriver:
         uplink = []
         if self.fc.mode is Mode.NOMINAL:
             uplink.append(self._command(Command.set_mode(Mode.SCIENCE)))
-        if self.fc.mode is Mode.SCIENCE and now_us % self.orbit_us >= self.orbit_us - PASS_US:
+        orbit = now_us // self.orbit_us
+        if (
+            self.fc.mode is Mode.SCIENCE
+            and orbit != self.last_pass_orbit
+            and now_us % self.orbit_us >= self.orbit_us - PASS_US
+        ):
             uplink.append(self._command(Command.begin_downlink()))
             self.passes.append(now_us / US_PER_MIN)
+            self.last_pass_orbit = orbit
         output = self.fc.step(uplink, SpacecraftReadings.from_state(state), now_us)
         for raw in output.downlink_frames:
             frame = decode_frame(raw)
@@ -356,7 +364,8 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
         f" boot, then a DOWNLINK pass {PASS_US // US_PER_MIN} min\n"
         "before the end of each orbit, sending the stored chunks as DATA frames and releasing"
         " them once sent (#56). The\n"
-        "capacity is per tick (120 B), so a longer tick downlinks less per second.\n\n"
+        f"radio sends {NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s} B/s at any tick length"
+        " (#122), so the pass carries the same data whatever the tick.\n\n"
     )
     write_timeline(out, every(samples, 5 * US_PER_MIN))
 
@@ -405,8 +414,8 @@ def scenario_nominal(out: TextIO, seed: int, tick_us: int, orbits: Fraction) -> 
     out.write(
         f"  comms: {radio.radio_mode.value}, receiver {'on' if radio.receiver_on else 'off'},"
         f" transmitter {'on' if radio.transmitter_on else 'off'},"
-        f" capacity {radio.transmit_capacity_bytes} B per tick"
-        f" ({radio.transmit_capacity_bytes * US_PER_S // tick_us} B/s at this tick),"
+        f" rate {NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s} B/s"
+        f" ({radio.transmit_capacity_bytes} B this tick),"
         f" draw {radio.transmit_power_w:.2f} W;"
         f" sent over the run {sum(s.comms.truth.previous_tick_sent_bytes for s in samples)} B,"
         f" outbound suppressed {radio.outbound_suppressed_count}"
