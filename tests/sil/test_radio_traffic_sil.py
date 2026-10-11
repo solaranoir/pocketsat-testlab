@@ -262,7 +262,7 @@ class Overcommitted(ScriptedFlightComputer):
         output = super().step(uplink_frames, readings, now_us)
         payload = bytes(self.size - MIN_FRAME_SIZE)
         frame = encode_frame(Frame(FrameType.TELEMETRY, 0, payload))
-        return dataclasses.replace(output, downlink_frames=(frame,))
+        return dataclasses.replace(output, downlink_frames=(frame,), sent_bytes=len(frame))
 
 
 @pytest.mark.parametrize(

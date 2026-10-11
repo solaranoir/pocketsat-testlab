@@ -107,14 +107,16 @@ class RadioTraffic:
     running totals (ADR-0007 §2 to §4). All values are per tick, never running totals.
 
     Attributes:
-        sent_bytes: Wire bytes (header, payload, and CRC) of every frame the flight
-            computer sent in the tick: ACK/NACK, telemetry, and DATA. At most that
-            tick's ``transmit_capacity_bytes``.
+        sent_bytes: Wire bytes (header, payload, and CRC) the flight computer
+            transmitted in the tick, of every frame type (ACK/NACK, telemetry, and
+            DATA), including parts of frames delivered in other ticks (ADR-0008 §3). At
+            most that tick's ``transmit_capacity_bytes``.
         uplink_lost_count: Uplink frames ``SilTarget`` dropped in the tick because
             comms' receiver was off.
-        outbound_suppressed_count: ACK/NACK and telemetry frames the flight computer
-            suppressed in the tick for lack of transmit capacity (DATA that does not fit
-            stays in the payload buffer and is not counted).
+        outbound_suppressed_count: ACK/NACK and telemetry frames that were due but
+            never delivered, counted by the flight computer in the tick: no room, the
+            held-frame bound, or aborted mid-transmission (ADR-0008 §6). DATA that does
+            not fit or is aborted stays in the payload buffer and is not counted.
 
     Raises:
         TypeError: A field is not an int (or is a bool).

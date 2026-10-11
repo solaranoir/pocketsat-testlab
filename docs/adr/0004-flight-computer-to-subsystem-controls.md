@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0003 (refines step 6, `advance(dt_us)`, into steps a to f). Related: ADR-0002 (`inject()` and target faults). Issue: #71.
+- Amended by ADR-0008 (§2 latency table, §9 RESET timing at short ticks, §10).
 
 ## Context
 
@@ -50,7 +51,8 @@ Latency of the main chains, at the 100 ms default tick:
 
 | Chain | Latency |
 |---|---|
-| Command → ACK | same tick |
+| Command → ACK | same tick in a whole-frame tick (ADR-0008 §2: always at the 100 ms default); at shorter ticks, the tick the ACK's last byte is transmitted, after the frame in transmission and any ACKs ahead of it (ADR-0008 §5) |
+| RESET command → reboot | step d of the RESET tick in a whole-frame tick (always at the 100 ms default); at shorter ticks, step d of the tick in which the RESET ACK's last byte is transmitted, at most one frame in transmission plus the ACK's airtime later (ADR-0008 §6a) |
 | Command → physical effect | +1 tick |
 | Effect → power sees the draw | +1 tick (downstream read, section 3) |
 | Fault → effect | 0 ticks |
@@ -100,6 +102,8 @@ Each frozen reading holds exactly the last value it reported before the freeze (
 
 `forced_reset` reboots the flight computer through the same path as the RESET command (#49): mode to BOOT, transient flight computer state cleared, uptime reset, boot counter incremented. Subsystem physical state (battery SOC, temperatures, attitude) continues unchanged.
 
+**RESET waits for its ACK (ADR-0008 §6a).** The RESET command reboots in step d of the tick in which its ACK's last byte is transmitted. In a whole-frame tick (always at the 100 ms default) that is the RESET tick itself, as before. At shorter ticks a frame already in transmission can delay it by at most that frame plus the ACK's own airtime. Until then the flight computer handles no further uplink, raises no mode events and creates no new frames, while its transmitter finishes; BOOT's controls then apply from the next tick, and uptime counts from the reboot. If the ACK cannot be transmitted (it was suppressed, or the transmitter is off), the reboot happens at once. `forced_reset` does not wait: it cancels a pending RESET reboot, aborts its ACK, and reboots once.
+
 `duration_us` is the time held in reset. During the hold the flight computer performs no command handling, telemetry, or new controls, and subsystems keep stepping under the controls that were in force when the reset began. When the reboot completes, the controls revert to BOOT's: the flight computer produces BOOT's controls at step f of the tick in which the hold ends, so they apply from the next tick, like any controls it produces. `None` or `0` means a momentary pulse: the flight computer reboots in the tick the fault is injected and produces BOOT's controls at step f of that tick.
 
 Active faults persist through the RESET command and `forced_reset`, as a physical failure would survive a flight computer reboot; only the target's `reset(seed)` clears them.
@@ -115,7 +119,7 @@ The radio is a crossband transceiver (separate uplink receiver and downlink tran
 | `RX_TX` | on | on | Every normal flight mode, so beacons and ACKs can go out |
 
 - Uplink is received only while the receiver is on, judged from comms' true state for that tick. Frames delivered while it is off are lost, not queued, and counted.
-- Outbound frames share the transmit capacity in priority order: ACK/NACK, then telemetry, then DATA. Frames that don't fit are not queued; suppressed ACK/NACK and telemetry are counted.
+- Outbound frames share the transmit capacity in priority order: ACK/NACK, then telemetry, then DATA; the priority applies when a frame is chosen, and a frame in transmission finishes first. A frame may span ticks (ADR-0008): it is delivered in the tick its last byte is transmitted. In a whole-frame tick, frames that don't fit are not queued and suppressed ACK/NACK and telemetry are counted; in a streaming tick, ACK/NACK and telemetry wait (bounded) behind the frame in transmission.
 - Transmit power is proportional to the bytes actually sent.
 - `transmitter_off` disables the transmitter only. The receiver keeps working, so the spacecraft can hear and execute commands but cannot reply.
 

@@ -250,12 +250,12 @@ The boot counter persists across RESET and `forced_reset` and is cleared only by
 `reboot(*, now_us)` is the one RESET path (ADR-0004 §9). It takes effect immediately and:
 
 1. increments the boot counter;
-2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; the telemetry schedule (#55), so the next frame is the boot-complete beacon; and the downlink session (#56), so a reboot aborts a pass and the next one resumes from the oldest unreleased chunk;
+2. clears all transient flight computer state: the mode (back to BOOT) and the safe-mode persistence counters (#48), so a flag still set must be sustained again from BOOT; the telemetry schedule (#55), so the next frame is the boot-complete beacon; the downlink session (#56), so a reboot aborts a pass and the next one resumes from the oldest unreleased chunk; and the outbound transmitter (#132, ADR-0008 §6): the frame in transmission is aborted and held frames are dropped (counted as aborted, and ACK/NACK and telemetry as suppressed), and a pending RESET reboot is cancelled;
 3. restarts uptime, and with it the boot duration.
 
 Subsystem physical state (battery charge, temperatures, attitude, the payload buffer) is never touched: it isn't the flight computer's. Active target faults also survive (#60).
 
-**The RESET command.** #51 decodes RESET, queues its ACK, and appends a `RESET` mode event in the execute-commands phase (step c). The update-mode phase (step d) applies it through `transition()` and then calls `reboot(now_us=<this tick>)`. So, within the RESET tick:
+**The RESET command.** #51 decodes RESET, queues its ACK, and appends a `RESET` mode event in the execute-commands phase (step c). The update-mode phase (step d) applies it through `transition()` and then calls `reboot(now_us=<this tick>)`. So, within the RESET tick, in a whole-frame tick (ADR-0008 §2: always at the default 100 ms tick):
 
 | Step | What happens |
 |---|---|
@@ -264,9 +264,18 @@ Subsystem physical state (battery charge, temperatures, attitude, the payload bu
 | e | The frames already queued, the ACK included, go out in this tick: the ground sees the ACK. No telemetry: the mode is BOOT, which sends none except the boot-complete beacon at the end of the boot (#55) |
 | f | BOOT's controls, which apply from the next tick |
 
-The ACK therefore always precedes the reboot's effect: it is sent in the RESET tick, and the subsystems see BOOT's controls from the tick after.
+The ACK therefore always precedes the reboot's effect: it is sent in the RESET tick, and the subsystems see BOOT's controls from the tick after. If the ACK does not fit the tick (more than eight ACKs ahead of it) or the transmitter is off, it is suppressed and counted, and the reboot happens all the same.
 
-**forced_reset** (#60) calls `reboot()` from `SilTarget`, between steps; BOOT's controls then come from the next step's step f. The RESET command is always momentary.
+**The pending reboot (ADR-0008 §6a).** The reboot waits until the RESET ACK has been transmitted, so the ground learns the reset was accepted. In a streaming tick (shorter ticks, when a frame may be in transmission) the RESET ACK is committed right after the frame in transmission, ahead of the ACK/NACK still waiting (held, or from earlier in the tick, which keep their order behind it). If its last byte is not out by step d, the reboot is **pending** (`FlightComputer.reboot_pending`, `SilTick.reboot_pending`): the `RESET` and every event after it are kept, in order. While pending, in each step:
+
+- uplink is not decoded, executed or answered; it is counted in `FlightComputerOutput.uplink_ignored_count` and in `SilTick.uplink_dropped_in_reset_count`;
+- no flag rule runs and no mode event applies: the mode, the safe-mode counters and the telemetry schedule stay as they were;
+- the transmitter finishes the frame ahead of the RESET ACK, the ACK, and the frames behind it; no new telemetry or DATA is created (a DATA frame already in transmission finishes and is released);
+- step f produces the unchanged mode's controls.
+
+The reboot happens in step d of the tick in which the RESET ACK's last byte is transmitted: the kept events apply as above, frames completed in that tick are delivered (the ACK numbered from before the reboot), the frame still in transmission is aborted and the held frames dropped, uptime counts from the end of that tick, and BOOT's controls apply from the next. That is at most one frame in transmission plus the ACK's airtime after the RESET tick (about 76 ms at 1200 bytes/s: two ticks later at 30 ms, one at 50 ms). If the transmitter is off in the RESET tick or goes off while the reboot is pending, the reboot happens in that tick and the ACK is counted as suppressed. A `forced_reset` during a pending reboot cancels it: the ACK is aborted and counted, and there is one reboot.
+
+**forced_reset** (#60) calls `reboot()` from `SilTarget`, between steps; BOOT's controls then come from the next step's step f. The RESET command is always momentary. While held in reset the flight computer transmits nothing; a frame in transmission when the hold began stays frozen in its state until the reboot aborts it, and the abort counts appear in the output of the step after the reboot.
 
 **Held in reset: `SilTarget`'s `forced_reset` (#60).** ADR-0004 §9 gives `forced_reset` an optional time held in reset, during which the flight computer handles no commands, sends nothing, and produces no new controls. The hold belongs to `SilTarget`, not to the flight computer: `SilTarget` doesn't step the flight computer during the hold (dropping and counting uplink) and calls `reboot(now_us=<end of the hold>)` once, so uptime and the boot duration count from leaving reset. A RESET command has no hold.
 
@@ -303,7 +312,8 @@ The telemetry scheduler (#55): the flight computer's emit-telemetry phase (ADR-0
 - **No telemetry in BOOT, except the boot-complete beacon.** The beacon is the first frame of the mode BOOT leaves for, sent in the step that raises `BOOT_COMPLETE` (uptime 5.0 s at the defaults, tick 49 after power-on), so it shows NOMINAL, the boot count, and the uptime. A RESET tick sends its ACK but no telemetry (the mode after step d is BOOT). See [Boot sequence and RESET](#boot-sequence-and-reset).
 - **A frame at every mode change.** The step whose step d changes the mode sends a frame at once, after the tick's ACK/NACK, and the new mode's period counts from there. So telemetry from a command's ACK tick shows the new mode (ADR-0004 §2), SAFE and FAULT entry reach the ground at once, and the beacon is this same rule leaving BOOT. A command that changes nothing (`NO_CHANGE`) adds no frame. SAFE or FAULT entered during BOOT sends SAFE's (or FAULT's) first frame instead of a beacon.
 - **Content.** `encode_telemetry` (#54) from this tick's readings only (ADR-0004 §7) plus the flight computer's own state: the mode after step d, `uptime_ms`, and `boot_count`.
-- **Outbound priority and capacity** (ADR-0004 §10, ADR-0007 §3; `docs/protocol.md`, "Downlink sequence and transmit capacity"). Telemetry goes through the outbound queue after any ACK/NACK and before DATA (#56), within what is left of comms' `transmit_capacity_bytes`, and takes the next number of the shared downlink sequence. A due frame that doesn't fit is **suppressed**: not queued, never sent later, counted in `outbound_suppressed_count`, and given no sequence number. Its slot is used, so the next frame is due one period later: the cadence resumes as soon as capacity returns, without a burst of missed frames. Under `transmitter_off` (capacity 0) every due frame is suppressed and counted.
+- **Outbound priority and capacity** (ADR-0004 §10, ADR-0007 §3; `docs/protocol.md`, "Downlink sequence and transmit capacity"). Telemetry goes through the outbound queue after any ACK/NACK and before DATA (#56), within what is left of comms' `transmit_capacity_bytes`, and takes the next number of the shared downlink sequence. In a whole-frame tick (always at the default 100 ms) a due frame that doesn't fit is **suppressed**: not queued, never sent later, counted in `outbound_suppressed_count`, and given no sequence number. Its slot is used, so the next frame is due one period later: the cadence resumes as soon as capacity returns, without a burst of missed frames. Under `transmitter_off` (capacity 0) every due frame is suppressed and counted, and so is a frame partly transmitted when it goes off.
+- **At shorter ticks** (streaming ticks, ADR-0008 §5) a due frame that cannot start at once is **held** behind the frame in transmission (at most one; a newer due frame replaces it, and the older is counted as suppressed) and goes out when the transmitter is free, numbered then, with the readings of the tick it was due in. A held frame waits at most for one frame in transmission and the ACK/NACK ahead of it (about 76 ms at 1200 bytes/s), far less than any default period, so **telemetry keeps its period** at any tick length while the transmitter is on. The one case in which a held frame is replaced with the default periods is a mode change in the tick it waits: the new mode's frame is due at once and replaces it.
 - **Transient.** The schedule is cleared by power-on and every reboot (RESET, `forced_reset`), with the mode; the next frame is the beacon.
 - **A NaN reading** has no telemetry encoding (`docs/protocol.md`). The same tick raises `FAULT_DETECTED` (`NON_FINITE_READING`, #48), and the due frame is dropped, uncounted, rather than stopping the flight computer; FAULT's cadence carries on from that slot.
 
@@ -316,7 +326,9 @@ runs them from its phases. The DATA frame layout is in
 [docs/protocol.md](protocol.md#data-payload). Tests: `tests/unit/test_downlink.py`
 (the flight computer and the real payload), `tests/sil/test_downlink_sil.py` (through
 `SilTarget`), `tests/sil/test_downlink_story.py` (three orbits of the reference profile,
-slow), and the `transmitter_off` case in `tests/sil/test_sil_faults.py`.
+slow), the `transmitter_off` case in `tests/sil/test_sil_faults.py`, and, for frames
+that span ticks (#132, ADR-0008), `tests/unit/test_outbound_spanning.py` and
+`tests/sil/test_frame_spanning_sil.py`.
 
 ```mermaid
 stateDiagram-v2
@@ -332,11 +344,11 @@ stateDiagram-v2
 | Step | What happens | Phase (ADR-0004 §2) |
 |---|---|---|
 | **Start** | When the mode becomes DOWNLINK (BEGIN_DOWNLINK from NOMINAL or SCIENCE), a session starts at the payload's oldest unreleased chunk (`PayloadReadings.oldest_unreleased_chunk_id`). BEGIN_DOWNLINK during a session is ACKed and changes nothing | update mode (d) |
-| **Send** | Each step in DOWNLINK, after ACK/NACK and telemetry, the oldest unsent whole chunks go out as DATA frames, one chunk each, in ID order, while their frames fit what is left of comms' `transmit_capacity_bytes`. The session stops at the first chunk that does not fit, so chunks are never sent out of order; that chunk is not counted as suppressed and is sent in a later tick. The partial chunk still accumulating is never sent | emit telemetry (e) |
-| **Release** | The controls for the next tick carry `release_through_chunk_id` = the last chunk sent (Phase 1: release once sent), so the payload deletes every sent chunk in the next tick. The value repeats while nothing new is sent, which the payload ignores | produce controls (f) |
-| **Complete** | In a step that starts in DOWNLINK, when no unsent whole chunk is left, `DOWNLINK_COMPLETE` is raised (after the command and safety events) and the mode returns to the one DOWNLINK was entered from. A session therefore runs at least one step, even with an empty buffer, so the ground sees DOWNLINK in telemetry | evaluate flags (d) |
-| **Abort** | Any other exit from DOWNLINK (SET_MODE, ENTER_SAFE_MODE, `SAFE_CONDITION`, `FAULT_DETECTED`, RESET, `forced_reset`) ends the session at once, and no DATA goes out in that step. Chunks already sent were released in the step after they were sent; every other chunk stays in the payload buffer | update mode (d), or the reboot |
-| **Resume** | The next session starts at the oldest unreleased chunk, which is the first chunk not sent: nothing is skipped or sent twice | update mode (d) |
+| **Send** | Each step in DOWNLINK, after ACK/NACK and telemetry, the oldest unsent whole chunks go out as DATA frames, one chunk each, in ID order. In a whole-frame tick (always at the default 100 ms, ADR-0008 §2) they go while their frames fit what is left of comms' `transmit_capacity_bytes`; the session stops at the first chunk that does not fit, so chunks are never sent out of order; that chunk is not counted as suppressed and is sent in a later tick. In a streaming tick (shorter ticks) the session commits one chunk at a time whenever the transmitter is free and nothing else waits, and a frame that does not finish continues in the next tick. A chunk counts as sent when its frame's last byte is transmitted. The partial chunk still accumulating is never sent | emit telemetry (e); a frame carried in completes at the start of step c |
+| **Release** | The controls for the next tick carry `release_through_chunk_id` = the last chunk sent (Phase 1: release once sent), so the payload deletes every sent chunk in the next tick. The value repeats while nothing new is sent, which the payload ignores. A chunk whose frame completes in a tick whose step d ends the session is still released by that tick's step f (ADR-0008 §6) | produce controls (f) |
+| **Complete** | In a step that starts in DOWNLINK, when no unsent whole chunk is left, `DOWNLINK_COMPLETE` is raised (after the command and safety events) and the mode returns to the one DOWNLINK was entered from. A session therefore runs at least one step, even with an empty buffer, so the ground sees DOWNLINK in telemetry. A chunk still in transmission is unsent, so the pass cannot complete before its frame does | evaluate flags (d) |
+| **Abort** | Any other exit from DOWNLINK (SET_MODE, ENTER_SAFE_MODE, `SAFE_CONDITION`, `FAULT_DETECTED`, RESET, `forced_reset`) ends the session at once, and no DATA goes out in that step. A DATA frame still in transmission is aborted (counted in `outbound_aborted_count`, not as suppressed); its chunk was never released. Chunks already sent were released in the step they completed in; every other chunk stays in the payload buffer | update mode (d), or the reboot |
+| **Resume** | The next session starts at the oldest unreleased chunk, which is the first chunk not sent (an aborted chunk goes first, in a new frame): nothing is skipped or sent twice | update mode (d) |
 
 **Radio-transmit inhibits** (carried over from story #42). DATA is sent only while no
 power or thermal flag is set in this tick's **readings** (ADR-0004 §6): `low_battery`,
@@ -345,21 +357,30 @@ stop payload acquisition (#43). Comms reads nothing, so the check is the flight
 computer's. A flag stops DATA in the tick it appears in the readings; ACK/NACK and
 telemetry still go out, so the ground sees why. `low_battery` is not a safe-mode flag,
 so the pass pauses in DOWNLINK and resumes when it clears; the others take the
-spacecraft to SAFE once sustained (#48), which aborts the session.
+spacecraft to SAFE once sustained (#48), which aborts the session. An inhibit stops
+new DATA only: a DATA frame already in transmission (at shorter ticks) finishes, at
+most 77 more bytes (ADR-0008 §6).
 
 **Rate.** The transfer rate is limited by comms' capacity, which is 0 while the radio is
 `RX_ONLY` or `OFF` or the `transmitter_off` fault holds (the session then stalls, and
-with it the release; the data stays in the buffer), and by the inhibits. At the defaults
-a 78-byte DATA frame fits each 120-byte tick, with the 36-byte telemetry frame once a
-second beside it: one 64-byte chunk per tick, 640 B/s. The entry step carries the
-BEGIN_DOWNLINK ACK and the mode-change telemetry frame (50 bytes), so its first DATA
-frame goes out in the next step. A DOWNLINK session never times out (#47): without
-capacity it stays in DOWNLINK until the ground or a safety rule ends it.
+with it the release; the data stays in the buffer; a DATA frame in transmission is
+aborted and resent later), and by the inhibits. At the defaults a 78-byte DATA frame
+fits each 120-byte tick, with the 36-byte telemetry frame once a second beside it: one
+64-byte chunk per tick, 640 B/s. The entry step carries the BEGIN_DOWNLINK ACK and the
+mode-change telemetry frame (50 bytes), so its first DATA frame goes out in the next
+step. At ticks shorter than one DATA frame's airtime (65 ms at the default rate) frames
+span ticks and every tick of the pass is full, so the pass runs at the configured rate
+less the telemetry: about 1164 B/s of DATA frames, 955 B/s of chunk data. A pass at
+30 ms therefore finishes sooner than at 100 ms, where the whole-frame rule leaves each
+tick's last 42 bytes unused (ADR-0008, "Consequences"). A DOWNLINK session never times
+out (#47): without capacity it stays in DOWNLINK until the ground or a safety rule ends
+it.
 
 **Accounting.** At every tick the payload keeps produced = buffered + released (#43), and
 because the release reaches the payload one tick after the send, the bytes sent minus
 the bytes released are exactly the chunks sent in that tick, never more than one tick's
-worth (story #42).
+worth (story #42); at most one when a tick holds less than one frame. At most one more
+chunk is in flight: partly transmitted, unreleased, still buffered.
 
 **Session state and the acknowledgement hook.** `FlightComputer.downlink_session`
 (`DownlinkSession`) records where the session started, the next chunk to send, how many

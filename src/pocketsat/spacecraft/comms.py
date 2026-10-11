@@ -41,9 +41,11 @@ the capacity 0) while the receiver keeps working. Comms has no fault hook and no
 **Radio traffic (ADR-0007).** Comms does not see the frames; it is told about them.
 ``SilTarget`` fills ``controls.radio_traffic`` (a
 :class:`~pocketsat.spacecraft.controls.RadioTraffic`) at step a of tick N+1 with what
-happened in tick N: the wire bytes the flight computer sent (every frame type), the
-uplink frames lost because the receiver was off, and the ACK/NACK and telemetry frames
-the flight computer suppressed for lack of capacity. In tick N+1 comms
+happened in tick N: the wire bytes the flight computer transmitted in the tick (every
+frame type, including parts of frames delivered in other ticks: a frame may span ticks,
+ADR-0008), the uplink frames lost because the receiver was off, and the ACK/NACK and
+telemetry frames the flight computer suppressed (due but never delivered). In tick N+1
+comms
 
 - **validates** the record against its own tick N state, which it remembers (its own
   history, not a read): ``transmit_draw_w(config, previous_transmitter_on, sent_bytes,

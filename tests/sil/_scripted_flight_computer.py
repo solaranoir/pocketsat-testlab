@@ -202,6 +202,7 @@ class ScriptedFlightComputer(FlightComputer):
             downlink_frames=tuple(sent),
             controls=controls,
             outbound_suppressed_count=suppressed,
+            sent_bytes=sum(len(frame) for frame in sent),  # whole frames only
         )
         self.calls.append(StepCall(frames, readings, now_us, output))
         return output

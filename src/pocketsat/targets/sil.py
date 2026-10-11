@@ -66,7 +66,16 @@ tick itself for a pulse): :meth:`FlightComputer.reboot` is called with that tick
 start time, so uptime counts from the moment the processor leaves reset, and the
 flight computer then steps as usual in that tick and produces BOOT's controls at step
 f. A ``forced_reset`` injected while another is pending extends the hold to the later
-end; the two make one reboot.
+end; the two make one reboot. While held, nothing is transmitted; a frame that was in
+transmission stays frozen in the flight computer (:attr:`SilTick.transmitting`) until
+the reboot aborts it (ADR-0008 §6), and a RESET command's pending reboot is cancelled
+by it (one reboot, ADR-0008 §6a).
+
+**A RESET command's pending reboot (ADR-0008 §6a).** At ticks too short for the RESET
+ACK to go out in the RESET tick, the flight computer reboots only once it has. Until
+then it ignores the uplink it is given and counts it
+(``FlightComputerOutput.uplink_ignored_count``), which ``SilTarget`` adds to
+:attr:`SilTick.uplink_dropped_in_reset_count`: heard while no software could take it.
 
 **Time.** Simulated time is integer microseconds on the target's own ``SimClock``
 (ADR-0003), which starts at 0 on ``reset(seed)``. ``advance(dt_us)`` runs
@@ -77,8 +86,9 @@ computer is called with the time at the **end** of the tick, the instant the rea
 it receives describe.
 
 **Radio traffic (ADR-0007, #98).** Each tick ``SilTarget`` computes the tick's three
-per-tick traffic values, the wire bytes of the flight computer's downlink frames
-(``FlightComputerOutput.sent_bytes``), the uplink frames lost because the receiver was
+per-tick traffic values, the wire bytes the flight computer transmitted
+(``FlightComputerOutput.sent_bytes``; a frame may span ticks, ADR-0008, so these can
+differ from the frames delivered in the tick), the uplink frames lost because the receiver was
 off, and the flight computer's suppressed-frame count, and holds them in
 :class:`TickTraffic` (:attr:`SilTarget.handover_traffic`). At step a of the next tick
 :meth:`SilTarget._merge_controls` puts them into ``SpacecraftControls.radio_traffic``
@@ -103,7 +113,7 @@ from typing import Final
 
 from pocketsat.core.clock import DEFAULT_TICK_US, SimClock, check_us
 from pocketsat.core.rng import RngFactory
-from pocketsat.flight.computer import FlightComputer, SpacecraftReadings
+from pocketsat.flight.computer import FlightComputer, OutboundProgress, SpacecraftReadings
 from pocketsat.frame import FrameError, decode_frame
 from pocketsat.spacecraft.attitude import Attitude
 from pocketsat.spacecraft.base import SnapshotBoard, SpacecraftState, Subsystem, SubsystemStack
@@ -183,8 +193,9 @@ class TickTraffic:
     ``RadioTraffic`` built from it is).
 
     Attributes:
-        sent_bytes: Wire bytes of every frame the flight computer sent in the tick
-            (``FlightComputerOutput.sent_bytes``: header, payload, and CRC, all types).
+        sent_bytes: Wire bytes the flight computer transmitted in the tick
+            (``FlightComputerOutput.sent_bytes``: header, payload, and CRC, all types),
+            including parts of frames delivered in other ticks (ADR-0008 §3).
         uplink_lost_count: Uplink frames dropped in the tick because comms' receiver
             was off after the subsystem step.
         outbound_suppressed_count: ACK/NACK and telemetry frames the flight computer
@@ -222,8 +233,9 @@ class SilTick:
         traffic: The tick's radio traffic, handed to comms in the next tick as
             ``controls.radio_traffic`` (ADR-0007). This tick's :attr:`controls` carry
             the previous tick's.
-        downlink_frames: The frames the flight computer sent, in transmit order; the
-            same frames :meth:`SilTarget.receive` returns.
+        downlink_frames: The frames the flight computer delivered (their last byte was
+            transmitted in this tick, ADR-0008 §3), in transmit order; the same frames
+            :meth:`SilTarget.receive` returns.
         next_controls: The controls the flight computer produced for the next tick
             (step f), before any merge. While the flight computer is held in reset,
             the controls in force when the reset began, unchanged.
@@ -234,9 +246,19 @@ class SilTick:
             so it did not step this tick.
         flight_computer_rebooted: A ``forced_reset`` ended at the start of this tick:
             the flight computer was rebooted, then stepped.
-        uplink_dropped_in_reset_count: Frames the receiver heard while the flight
-            computer was held in reset; dropped and never passed on. Not part of
+        uplink_dropped_in_reset_count: Frames the receiver heard while no software
+            could take them: while a ``forced_reset`` held the flight computer in
+            reset (dropped and never passed on), or while a RESET command's reboot was
+            pending (passed on, but ignored and counted by the flight computer,
+            ``FlightComputerOutput.uplink_ignored_count``, ADR-0008 §6a). Not part of
             ``uplink_lost_count``, because the receiver was on.
+        outbound_aborted_count: Frames the flight computer aborted mid-transmission
+            or dropped while held this tick (``FlightComputerOutput``, ADR-0008 §6).
+            0 while held in reset.
+        transmitting: The frame in transmission at the end of the tick (ADR-0008 §1),
+            or ``None``. While held in reset, the frame frozen in the flight computer.
+        reboot_pending: A RESET command's reboot is waiting for its ACK at the end of
+            the tick (ADR-0008 §6a).
     """
 
     now_us: int
@@ -252,6 +274,9 @@ class SilTick:
     flight_computer_held: bool
     flight_computer_rebooted: bool
     uplink_dropped_in_reset_count: int
+    outbound_aborted_count: int = 0
+    transmitting: OutboundProgress | None = None
+    reboot_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,9 +728,12 @@ class SilTarget:
 
         # c. to f. The flight computer: commands, mode, telemetry, next controls. Held
         # in reset, it does nothing and the controls in force stay in force.
+        aborted = 0
         if held:
             downlink: tuple[bytes, ...] = ()
             traffic = TickTraffic(uplink_lost_count=lost)
+            transmitting = flight_computer.transmitting
+            reboot_pending = flight_computer.reboot_pending
         else:
             if rebooted:
                 flight_computer.reboot(now_us=start_us)
@@ -717,6 +745,10 @@ class SilTarget:
                 uplink_lost_count=lost,
                 outbound_suppressed_count=output.outbound_suppressed_count,
             )
+            dropped_in_reset += output.uplink_ignored_count
+            aborted = output.outbound_aborted_count
+            transmitting = output.transmitting
+            reboot_pending = output.reboot_pending
 
         self._outbox.extend(downlink)
         self._handover_traffic = traffic
@@ -734,6 +766,9 @@ class SilTarget:
             flight_computer_held=held,
             flight_computer_rebooted=rebooted,
             uplink_dropped_in_reset_count=dropped_in_reset,
+            outbound_aborted_count=aborted,
+            transmitting=transmitting,
+            reboot_pending=reboot_pending,
         )
         self._last_tick = record
         if self._tick_observer is not None:

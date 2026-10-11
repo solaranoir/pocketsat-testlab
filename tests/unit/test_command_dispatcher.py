@@ -474,13 +474,16 @@ def test_acks_fill_the_capacity_in_order_and_the_rest_are_counted(count: int) ->
 
 @pytest.mark.parametrize(
     ("capacity", "sent"),
-    [(0, 0), (1, 0), (13, 0), (14, 1), (27, 1), (28, 2), (41, 2), (42, 3), (1000, 3)],
+    [(0, 0), (83, 5), (84, 6), (97, 6), (98, 7), (111, 7), (112, 8), (1000, 8)],
 )
 def test_capacity_boundaries(capacity: int, sent: int) -> None:
+    # Whole-frame ticks (ADR-0008 §2: a capacity of at least 78 bytes, the largest
+    # frame): an ACK goes out only if all 14 bytes fit. Below 78 bytes a tick streams
+    # instead (test_outbound_spanning.py).
     fc = in_state(ModeState(Mode.NOMINAL))
-    out = fc.step([frame_for(Command.ping())] * 3, with_capacity(capacity), 0)
+    out = fc.step([frame_for(Command.ping())] * 8, with_capacity(capacity), 0)
     assert len(out.downlink_frames) == sent
-    assert out.outbound_suppressed_count == 3 - sent
+    assert out.outbound_suppressed_count == 8 - sent
     assert out.sent_bytes == sent * ACK_FRAME_SIZE
 
 
@@ -554,12 +557,12 @@ def emit_after_acks(fc: FlightComputer, monkeypatch: pytest.MonkeyPatch) -> list
 @pytest.mark.parametrize(
     ("capacity", "acks", "telemetry", "data", "suppressed"),
     [
-        (120, 2, True, True, 0),  # 28 + 36 + 30 = 94 fit
-        (64, 2, True, False, 0),  # ACKs and telemetry fit; DATA waits, not counted
-        (63, 2, False, True, 1),  # telemetry doesn't fit; the smaller DATA frame does
-        (28, 2, False, False, 1),  # only the ACKs
-        (14, 1, False, False, 2),  # one ACK; the other ACK and telemetry are counted
-        (0, 0, False, False, 3),  # transmitter off: everything suppressed but DATA
+        (150, 6, True, True, 0),  # 84 + 36 + 30 = 150 fit
+        (120, 6, True, False, 0),  # ACKs and telemetry fit; DATA waits, not counted
+        (119, 6, False, True, 1),  # telemetry doesn't fit; the smaller DATA frame does
+        (84, 6, False, False, 1),  # only the ACKs
+        (78, 5, False, False, 2),  # five ACKs; the sixth ACK and telemetry are counted
+        (0, 0, False, False, 7),  # transmitter off: everything suppressed but DATA
     ],
 )
 def test_acks_go_ahead_of_telemetry_and_data_when_capacity_is_tight(
@@ -570,9 +573,11 @@ def test_acks_go_ahead_of_telemetry_and_data_when_capacity_is_tight(
     suppressed: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Whole-frame ticks (at least 78 bytes, ADR-0008 §2), with six ACKs so the
+    # boundaries sit above 78; streaming ticks are in test_outbound_spanning.py.
     fc = in_state(ModeState(Mode.NOMINAL))
     queued = emit_after_acks(fc, monkeypatch)
-    out = fc.step([frame_for(Command.ping())] * 2, with_capacity(capacity), 0)
+    out = fc.step([frame_for(Command.ping())] * 6, with_capacity(capacity), 0)
 
     assert queued == [telemetry, data]
     kinds = [decode_frame(frame) for frame in out.downlink_frames]

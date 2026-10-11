@@ -63,6 +63,9 @@ FRACTIONS = frozenset(
 EXISTING_UNITLESS = frozenset({"sequence", "version", "schema_version", "master_seed"})
 """Existing Phase 0 unitless numbers, kept as they are."""
 
+FRAME_COUNTS = frozenset({"max_held_ack_frames"})
+"""Settings counted in frames, named as their ADR names them (ADR-0008 §5)."""
+
 
 def follows_convention(name: str) -> bool:
     """Whether a numeric field name follows the convention."""
@@ -70,6 +73,7 @@ def follows_convention(name: str) -> bool:
         name.endswith(UNIT_SUFFIXES + UNITLESS_SUFFIXES)
         or name in FRACTIONS
         or name in EXISTING_UNITLESS
+        or name in FRAME_COUNTS
     )
 
 
@@ -181,5 +185,11 @@ def test_architecture_documents_the_same_lists() -> None:
     text = (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
     start = text.index("#### Naming and units convention")
     section = text[start : text.index("\n## ", start)]
-    for entry in (*UNIT_SUFFIXES, *UNITLESS_SUFFIXES, *FRACTIONS, *EXISTING_UNITLESS):
+    for entry in (
+        *UNIT_SUFFIXES,
+        *UNITLESS_SUFFIXES,
+        *FRACTIONS,
+        *EXISTING_UNITLESS,
+        *FRAME_COUNTS,
+    ):
         assert f"`{entry}`" in section, f"{entry} is not documented in architecture §4.1"
