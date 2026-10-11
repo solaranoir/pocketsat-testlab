@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Phase:** 1
-- **Amends / Supersedes:** Amends ADR-0004 (§2 the latency table, §10 outbound capacity and priority) and ADR-0007 (§1 where `sent_bytes` comes from, §3 who counts what, §4 how the flight computer keeps within the capacity). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #132. Follows #122 (PR #131).
+- **Amends / Supersedes:** Amends ADR-0004 (§2 the latency table, §9 the RESET command's reboot timing at short ticks, §10 outbound capacity and priority) and ADR-0007 (§1 where `sent_bytes` comes from, §3 who counts what, §4 how the flight computer keeps within the capacity). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #132. Follows #122 (PR #131).
 
 ## Context
 
@@ -25,7 +25,7 @@ The constraints come from the accepted ADRs and tickets:
 - **`TestTarget` is bytes in, bytes out** (ADR-0002). `receive()` returns whole frames. SIL and HIL must behave the same at that boundary.
 - **Within-tick order** (ADR-0004 §2): a. merge, b. subsystems step (comms last), c. decode uplink, execute commands, ACK/NACK, d. flags and mode, e. telemetry and DATA, f. controls for N+1. The flight computer runs at the end of tick N (`now_us` is the end of the tick). The frames it sends in steps c and e are the frames on air during tick N.
 - **Priority** (ADR-0004 §10): ACK/NACK, then telemetry, then DATA.
-- **ACK timing** (ADR-0004 §2 latency table, `docs/protocol.md` "Dispatch and ACK timing"): command → ACK in the same tick. The RESET ACK goes out in the RESET tick, numbered from before the reboot (#49).
+- **ACK timing** (ADR-0004 §2 latency table, `docs/protocol.md` "Dispatch and ACK timing"): command → ACK in the same tick. The RESET ACK goes out in the RESET tick, numbered from before the reboot (#49), which happens in step d of that tick (ADR-0004 §9).
 - **Downlink session** (#56): chunks go out in ID order, once each. A chunk is released (applied by the payload in the next tick) only after its frame was sent. produced = buffered + released, and sent − released is the chunks sent in the tick. Any exit from DOWNLINK aborts the session, and no DATA goes out in that step. The next session resumes at the oldest unreleased chunk.
 - **Telemetry** (#55): a due frame uses its slot whether or not it is sent, and a suppressed frame is not retried.
 - **`transmitter_off`** (#60): commands are executed, but every ACK and telemetry frame is suppressed and counted, and none is sent later. **Reboots** (#49, #60) clear transient flight computer state; `forced_reset` may hold the flight computer, which is then not stepped.
@@ -113,8 +113,8 @@ A partly transmitted frame is **aborted, not resent**. Its bytes so far were tra
 | Interruption | What happens |
 |---|---|
 | **Transmitter off** (a tick with `C_N = 0` and a frame in transmission: `transmitter_off`, or the radio `RX_ONLY`/`OFF`) | The frame in transmission is aborted at the start of the tick. Held ACK/NACK and telemetry are suppressed and counted, as are this tick's (today's rule for capacity 0). None is sent later, as #60 requires. When the transmitter returns, the next tick starts idle. |
-| **Reboot by the RESET command** (step d of tick N) | Frames completed in tick N before the reboot are delivered. That includes the RESET ACK when it completes in tick N, which it always does in a whole-frame tick. A frame still in transmission at the end of tick N, which can be the RESET ACK itself in a streaming tick, is aborted, and held frames are dropped. The reboot is at the end of tick N (`now_us`), after tick N's airtime, so a frame that needed airtime after tick N is cut by the reset. This matches the sequence restart: the next frame is numbered 0. |
-| **Reboot by `forced_reset`** (between steps; a pulse, or the end of a hold) | The same: the frame in transmission is aborted and held frames are dropped, when `reboot()` runs. **While held**, the flight computer is not stepped, so it transmits nothing: `sent_bytes` is 0, as today ("no telemetry, no new controls"). The frame stays in the flight computer's state, frozen, until the reboot aborts it. The counts are reported in the output of the next step. |
+| **Reboot by the RESET command** | The reboot waits until the RESET ACK has been transmitted (section 6a). When it happens, in step d of the tick in which the ACK's last byte went out, frames completed in that tick before the reboot are delivered. A frame still in transmission at that point is aborted, and held frames are dropped. The reboot is at the end of the tick (`now_us`), after that tick's airtime. This matches the sequence restart: the next frame is numbered 0. |
+| **Reboot by `forced_reset`** (between steps; a pulse, or the end of a hold) | A hardware-style reset: it does not wait for anything. The frame in transmission is aborted and held frames are dropped, when `reboot()` runs. That includes a RESET ACK whose reboot is pending (section 6a). **While held**, the flight computer is not stepped, so it transmits nothing: `sent_bytes` is 0, as today ("no telemetry, no new controls"). The frame stays in the flight computer's state, frozen, until the reboot aborts it. The counts are reported in the output of the next step. |
 | **Leaving DOWNLINK** (SET_MODE, ENTER_SAFE_MODE, SAFE_CONDITION, FAULT_DETECTED in step d of tick N) | A DATA frame still in transmission at the end of tick N is aborted with its session, consistent with #56's "the session ends at once, and no DATA goes out in that step". Its chunk was never released, so it stays in the payload buffer, and the next session sends it first, in a new frame with a new sequence number. ACK/NACK and telemetry in transmission are not session state and continue. |
 | **Radio-transmit inhibit** (a power or thermal flag, #56) | The flag stops the session from **committing** new DATA. A DATA frame already in transmission finishes, at most 77 bytes. The pass stays in DOWNLINK and resumes when the flag clears, as today. |
 
@@ -137,6 +137,56 @@ A partly transmitted frame is **aborted, not resent**. Its bytes so far were tra
 - Chunks delivered − chunks released = exactly the chunks delivered in that tick. That is at most one when `C_N < L_max`, because at most one 78-byte frame can complete in fewer than 78 bytes, and it is never more than one tick's worth.
 - At most one further chunk is in flight (partly transmitted, unreleased, still buffered).
 
+### 6a. A RESET command reboots only once its ACK has been transmitted (maintainer decision)
+
+Real flight software makes sure the RESET ACK is out before it reboots, so the ground learns the reset was accepted. This section replaces "the RESET reboots in step d of its tick" for the one case where the ACK has not finished by then.
+
+**Tick N, the RESET tick.**
+
+- **Step c, as today.** The dispatcher answers the RESET in arrival order (the preview `transition()`, #51), raises its `RESET` event, and queues its ACK. Commands after it in tick N are still answered as in BOOT (a NACK `BOOT_IN_PROGRESS`, or another RESET's ACK).
+- **Ordering in streaming ticks.** The RESET ACK is committed next: right after the frame in transmission, ahead of any ACK/NACK or telemetry still waiting, held or from earlier in tick N. This is the only exception to first-in, first-out ordering within the ACK class. It bounds the wait, below. The ACKs it overtakes keep their order behind it. In a whole-frame tick nothing is waiting, so the order is today's.
+- **Step d.** Events before the `RESET` apply normally. Then one of three things happens:
+  1. **The RESET ACK has completed in tick N.** It does in every whole-frame tick in which it fits. The `RESET` and every event after it apply exactly as today: `transition()` to BOOT, `reboot(now_us)`, automatic events after it IGNORED, and later command events through the table in BOOT.
+  2. **The RESET ACK was suppressed or aborted.** That is, it did not fit a whole-frame tick, or the capacity is 0 (`transmitter_off`, `RX_ONLY`, `OFF`). It can never go out, so **the reboot happens now, as today**. The ACK is counted in `outbound_suppressed_count`.
+  3. **Otherwise** (a streaming tick: the RESET ACK is in transmission, or waiting behind the frame in transmission), **the reboot is pending**. The `RESET` and every event after it in tick N are kept, in order, and applied at the reboot.
+
+**While a reboot is pending** (from step d of tick N until the reboot), the flight computer is shutting down. In each step:
+
+- **Uplink:** frames it is given are not decoded, executed or answered. They are counted in a new per-tick `FlightComputerOutput.uplink_ignored_count`. `SilTarget` adds this count to `SilTick.uplink_dropped_in_reset_count`, which has the same meaning: heard while no software could take it.
+- **Flags and mode:** the evaluate-flags rules (#48 safe-mode and fault checks, `BOOT_COMPLETE`, `DOWNLINK_COMPLETE`) do not run, and no mode event is applied. The mode, the safety counters and the telemetry schedule stay as they were after step d of tick N. This pause lasts at most the bound below, about 76 ms of airtime.
+- **Outbound:**
+  - The transmitter keeps going: the frame in transmission, then the RESET ACK, then the frames waiting behind it, in order.
+  - Nothing new is created: no telemetry is checked for being due, and no DATA is committed. The downlink session sends nothing new, but a DATA frame already in transmission finishes and is released by the completion rule (section 6).
+- **Controls:** step f produces the controls of the unchanged mode, with the release of any chunk completed in this tick, as before the RESET. BOOT's controls come only after the reboot.
+- **The reboot** happens in **step d of tick M**, the tick in which the RESET ACK's last byte is transmitted. The kept events apply there, in order, exactly as case 1 applies them: `transition()`, then `reboot(now_us=<end of tick M>)`. Then:
+  - Frames completed in tick M are delivered: the RESET ACK, plus any frames behind it that also finished in M.
+  - The frame in transmission is aborted. Held ACK/NACK and telemetry are dropped and counted as suppressed (section 6). The session ends.
+  - Step f produces BOOT's controls, which apply from tick M+1. Uptime and the boot duration count from the end of tick M. The downlink sequence restarts at 0.
+
+**The bound.** The RESET ACK is committed after at most the frame in transmission (`r ≤ L_max − 1` bytes left). So the reboot happens in the first tick M ≥ N with
+
+```
+C_N + … + C_M  ≥  r + 14
+```
+
+That is at most `L_max − 1 + 14 = 91` bytes of airtime after the start of tick N, about 76 ms at 1200 bytes/s. In ticks:
+
+- 30 ms (36 bytes per tick): at most N+2.
+- 50 ms (60 bytes per tick): at most N+1.
+- A whole-frame tick: always N (case 1 or case 2), which keeps 100 ms bit-identical.
+
+**Interactions.**
+
+- **`transmitter_off` (or any capacity 0) during a pending reboot.** A tick with capacity 0 aborts the frame in transmission (section 6), and the RESET ACK can no longer go out. **The reboot happens in step d of that tick** instead of waiting for a transmitter that may never return. The RESET ACK, aborted or never committed, is counted in `outbound_suppressed_count`. The same applies when the capacity is 0 in tick N itself (case 2).
+- **`forced_reset` during a pending reboot.** `forced_reset` is a hardware-style reset (ADR-0004 §9, #60): it reboots at the start of its tick (a pulse) or at the end of its hold, and it waits for nothing.
+  - It **cancels** the pending reboot. The RESET ACK, if not yet delivered, is aborted and counted as suppressed.
+  - The kept events are discarded, and **one** reboot happens: the boot count goes up by 1, not 2. This matches #60's rule that overlapping resets make one reboot.
+  - During a hold the flight computer is not stepped, so nothing is transmitted, as today.
+- **A second RESET command in tick N** is one of the kept events. At the reboot it goes through the table in BOOT, exactly as it would today. Its ACK is queued behind the first RESET's ACK and is delivered only if it completes by the reboot. No RESET command can arrive during the pending period, because uplink is ignored then.
+- **A DATA frame in transmission at the RESET.** It finishes ahead of the RESET ACK and is released in the step it completes (section 6's completion rule). Its chunk therefore goes down once. Chunks never committed stay buffered, and the next session resumes at the oldest unreleased chunk.
+
+**Reported state.** `FlightComputer.reboot_pending` (bool) is exposed for tests. `FlightComputerOutput.reboot_pending` and `SilTick.reboot_pending` record it per tick.
+
 ### 7. No change at the default 100 ms tick
 
 At 1200 bytes/s and 100 ms, comms gives `C_N = 120` in every tick, with a carry of 0 (#131, asserted over 10,000 ticks). `L_max = 78 ≤ 120`. By induction over ticks:
@@ -157,7 +207,7 @@ ACK 14 + telemetry 36 + DATA 78 = 128 > 120 still means the three never go out i
 - **Leftover bytes after whole frames** (for example the 70 bytes after ACK + telemetry): a streamer would start DATA in them. Whole-frame ticks never span.
 - **Overflow** (seven or more ACKs plus telemetry, or nine ACKs): today the excess is suppressed. Holding happens only in streaming ticks, so it is still suppressed.
 - **`transmitter_off`**: capacity 0 makes a streaming tick, but with nothing in transmission or held it suppresses exactly what today's rule suppresses, and none is sent later.
-- **The RESET ACK** is sent and numbered before the reboot, as today. It is framed when committed, in step c.
+- **The RESET ACK** is sent and numbered before the reboot, as today. It is framed when committed, in step c. In a whole-frame tick it either completes in the RESET tick or is suppressed, so the reboot is always in step d of the RESET tick (section 6a, cases 1 and 2). A reboot is never pending at 100 ms, so commands are never ignored, flags never pause, and BOOT's timing is unchanged.
 - **The completion-release corner** (section 6) needs a carried-in DATA frame, which never exists at 100 ms.
 - **Configurations at 100 ms with `C_N < L_max`**, for example a chunk size above 102 bytes (DATA frame over 120) or a lower rate, are streaming ticks. No default scenario, golden capture or digest uses them.
 
@@ -171,16 +221,18 @@ The unit tests that drive the outbound queue with **hand-set capacities below 78
   - `sent_bytes` becomes a validated `int` field (non-negative): the bytes transmitted this tick. It was a property summing `downlink_frames`.
   - New `outbound_aborted_count: int = 0`: frames of any class aborted mid-transmission or dropped while held, this tick.
   - New `transmitting: OutboundProgress | None`: the frame in transmission at the end of the tick, if any. `OutboundProgress(frame_type, sequence, size_bytes, sent_bytes)` is a frozen record for tests and run records.
+  - New `reboot_pending: bool = False` and `uplink_ignored_count: int = 0` (section 6a).
   - The docstring of `downlink_frames` changes: frames **delivered** this tick, which can total more than the tick's capacity.
 - **`FlightComputer`:**
-  - New transient state: the frame in transmission (the encoded frame, bytes sent so far, its class, its chunk ID for DATA), the held ACK FIFO and the held telemetry payload, and the abort count pending from a reboot between steps. All are cleared by `reset()` and `reboot()`, with the rest of the transient state.
+  - New transient state: the frame in transmission (the encoded frame, bytes sent so far, its class, its chunk ID for DATA), the held ACK FIFO and the held telemetry payload, the abort count pending from a reboot between steps, and the pending reboot with its kept events (section 6a). All are cleared by `reset()` and `reboot()`, with the rest of the transient state, so a `forced_reset` cancels a pending reboot.
+  - `_update_mode` defers the `RESET` and the events after it while the RESET ACK is outstanding in a streaming tick. `step()` runs the shutting-down path while a reboot is pending: the transmitter only, then step f. A new read-only property `reboot_pending` is added.
   - `TickContext.reserve_outbound` takes the section 2 rule. A new `_continue_transmission(tick)` runs at the start of step c.
   - The session update moves to completion.
   - `_produce_controls` gets the completion-release corner of section 6.
 - **`FlightComputerConfig`** gains `outbound: OutboundConfig = OutboundConfig()`, with `max_held_ack_frames: int = 8`. It is validated as an int ≥ 0; 0 means never hold ACKs.
 - **`SilTarget`:**
   - `TickTraffic.sent_bytes` takes `output.sent_bytes` (already the case, now a field).
-  - `SilTick` gains `outbound_aborted_count` and `transmitting`, copied from the output.
+  - `SilTick` gains `outbound_aborted_count`, `transmitting` and `reboot_pending`, copied from the output. `uplink_dropped_in_reset_count` also counts `output.uplink_ignored_count`.
   - The merge, the hold, the uplink rules and `receive()` are unchanged.
 - **Docstrings:** `RadioTraffic.sent_bytes` ("bytes transmitted in the tick, including parts of frames delivered in other ticks") and `outbound_suppressed_count` ("ACK/NACK and telemetry frames that were due but never delivered: no room, overflow, or aborted").
 
@@ -228,6 +280,9 @@ Nothing crosses `TestTarget`, which is unchanged.
 - **Preempt a DATA frame for an ACK** (abort and resend it later, or interleave). Interleaving is forbidden by #132. Aborting wastes airtime and makes a pass's progress depend on the uplink. The ACK wait is already bounded by about 76 ms. Rejected.
 - **Resume or resend a partly transmitted frame after `transmitter_off`.** Resuming mid-frame is not what a radio does: the receiver loses sync. Resending an ACK or telemetry frame contradicts #60's "none is sent later". DATA is resent anyway, as a new frame, because its chunk was never released. Rejected.
 - **Finish an in-progress DATA frame after its session ends.** It needs a release path outside the session (the chunk would be delivered while the session that would release it is gone). A new session started before that release could also send the chunk twice. It also delays the SAFE/FAULT entry telemetry frame by up to 77 bytes. Rejected in favour of aborting it (open question 6).
+- **Abort the RESET ACK at the reboot in step d of the RESET tick** (the original recommendation). This keeps the reboot timing unchanged at every tick length, but at short ticks the ground may never learn the reset was accepted. The maintainer chose to wait for the ACK (section 6a). Rejected.
+- **Wait for the RESET ACK in first-in, first-out order** (no overtaking). The wait would grow with the ACKs held ahead of it, up to 8 × 14 bytes more, and the flight computer would ignore uplink and pause its flag rules for longer. Overtaking keeps the bound at one frame plus the ACK. Rejected.
+- **Wait for the RESET ACK even with the transmitter off.** The reboot could be delayed for ever by a fault. Rejected: it reboots at once and counts the ACK as suppressed.
 - **Assign sequence numbers when a frame is created (queued) rather than committed.** Held frames that are later dropped would leave gaps that do not mean "lost on the way down". Rejected.
 
 ## Consequences
@@ -241,6 +296,7 @@ Nothing crosses `TestTarget`, which is unchanged.
 - ADR-0007's traffic path, its timing and comms are unchanged. Only the source of `RadioTraffic.sent_bytes` changes.
 - **Cost: the pass rate depends on which kind of tick runs.** At 100 ms a pass moves one 78-byte DATA frame per 120-byte tick: 780 bytes/s of DATA frames, 640 bytes/s of chunk data. In streaming ticks a pass moves about 1164 bytes/s of DATA frames, which is 1200 minus telemetry at 1 Hz. A pass at 30 ms therefore finishes sooner than at 100 ms. This is the whole-frame rule's unused tail at 100 ms, kept to stay bit-identical, not something new. It is open question 1.
 - **Cost:** ACK latency at short ticks is one frame's airtime at worst (about 76 ms), not "same tick". The latency table says so.
+- **Cost (section 6a):** at short ticks a RESET command can reboot up to about 76 ms of airtime after its tick (N+2 at 30 ms). The ground always learns the reset was accepted, unless the transmitter is off or a `forced_reset` intervenes. In those few ticks the flight computer ignores uplink and pauses its flag rules. ADR-0004 §9's timing changes at short ticks only.
 - **Cost:** a little more transient flight computer state (one frame in transmission, at most 8 held ACKs and one held telemetry frame), and three new output fields.
 - Some unit tests at hand-set capacities below 78 bytes change their expectations, because those capacities are now streaming ticks (section 7).
 
@@ -276,7 +332,23 @@ On acceptance, the implementation for #132 (one PR):
     - `FlightComputerOutput.sent_bytes` versus the delivered lengths.
   - **Interruptions:**
     - `transmitter_off` mid-DATA, mid-ACK and mid-telemetry (aborted, counted, nothing sent later, the chunk resent);
-    - RESET with its ACK spanning (aborted at 30 ms; delivered at 100 ms);
+    - **RESET (section 6a):**
+      - At 100 ms: a RESET in every phase of the telemetry period, with an ACK before it in the same tick, and with 9 commands so the RESET ACK is suppressed. The reboot is always in step d of the RESET tick, and the frames, sequences, boot count, uptime and controls equal `main`'s (A/B hash).
+      - At 30 ms with a DATA frame in transmission:
+        - the reboot is deferred to the tick M in which the RESET ACK's last byte goes out, and M matches the bound formula;
+        - the RESET ACK is delivered with the pre-reboot sequence number, and the next frame is numbered 0;
+        - BOOT's controls apply from M+1, and uptime counts from the end of M;
+        - the DATA frame ahead of the ACK completes, is released, and does not go down twice.
+      - The RESET ACK overtakes waiting ACKs (held and from earlier in the tick); those keep their order behind it, and are delivered if they complete in M, otherwise counted as suppressed.
+      - While pending:
+        - uplink is ignored, with no reply, and counted in `uplink_ignored_count` and in `SilTick.uplink_dropped_in_reset_count`;
+        - no telemetry and no new DATA are sent;
+        - no flag rule runs: a forced `critical_battery` does not enter SAFE before the reboot;
+        - the mode is unchanged and the controls are the previous mode's.
+      - Two RESETs in tick N: the events are kept and applied at M exactly as today's `update_mode` would apply them at a reboot.
+      - `transmitter_off` in tick N: immediate reboot, the ACK suppressed (as today). `transmitter_off` injected in a pending tick: the reboot happens in that tick, and the ACK is aborted and counted as suppressed.
+      - A `forced_reset` pulse in a pending tick, and a hold that begins in one: the pending reboot is cancelled, the ACK is aborted and counted, and exactly one reboot happens (boot count +1).
+      - At 50 ms the reboot is at most N+1, and at 30 ms at most N+2, over many random phases (seeded).
     - a `forced_reset` pulse and hold mid-frame (no bytes during the hold, aborted at the reboot);
     - ENTER_SAFE_MODE, SET_MODE, a SAFE flag and FAULT mid-DATA (aborted, the chunk resent first by the next session);
     - a transmit inhibit mid-DATA (the frame finishes);
@@ -286,17 +358,19 @@ On acceptance, the implementation for #132 (one PR):
 - **Docs:**
   - `docs/protocol.md` ("Downlink sequence and transmit capacity", "Dispatch and ACK timing", DATA "Order, release, and loss");
   - `docs/spacecraft.md` (Communications: replace the "Frames are not yet split across ticks (see #132)" note);
-  - `docs/spacecraft-modes.md` (Telemetry cadence, Downlink session: send, release, abort, rate);
+  - `docs/spacecraft-modes.md` (Telemetry cadence; Downlink session: send, release, abort, rate; "RESET and forced_reset: the reboot": the pending reboot of section 6a);
   - `docs/architecture.md` §4.1 (the latency table and the `FlightComputerOutput` sentence);
   - the edits to ADR-0004 and ADR-0007 listed in the PR for this ADR.
 - Re-measure the `[perf #78]` figures and record them in the PR.
 
 ## Open questions for the maintainer
 
+The maintainer has decided all nine: questions 1 to 3 and 5 to 9 as recommended, and question 4 changed to "the reboot waits for the RESET ACK" (section 6a). This ADR becomes Accepted in the implementation PR.
+
 1. **Two kinds of tick, or always stream?** Recommendation: two kinds now (section 2), because it is the only rule found that keeps 100 ms bit-identical and makes the long-run rate exact at short ticks. Always streaming would make the pass rate tick-independent (the cost noted under Consequences), but re-records the golden captures and digests and changes #72's pass timing. If you want it, it is a later, separate issue.
 2. **The held-ACK bound.** Recommendation: 8 (one default tick's worth), configurable in `FlightComputerConfig.outbound`. Alternatives: unbounded (the uplink rate bounds it anyway), or 1.
 3. **Telemetry held while another comes due.** Recommendation: the newer frame replaces the older, which is counted as suppressed (fresh readings win). With the default periods this never happens while the transmitter is on.
-4. **The RESET ACK at short ticks.** Recommendation: abort it if it has not completed by the end of the RESET tick, as an MCU reset cuts the UART, and document that "the RESET ACK goes out in the RESET tick" holds in whole-frame ticks only. The alternative is to drain the frame in transmission before rebooting (defer the reboot until the ACK is out). That keeps the guarantee at any tick but moves the reboot to a later tick and changes the BOOT timing at short ticks.
+4. **The RESET ACK at short ticks.** **Decided by the maintainer: the reboot waits until the RESET ACK has been transmitted** (section 6a), bounded by one frame in transmission plus the ACK's airtime. It reboots at once when the ACK cannot go out (suppressed, or the transmitter off), and a `forced_reset` cancels it. (Originally recommended: abort the ACK at the reboot.)
 5. **Counting.** Recommendation: count aborted or dropped ACK/NACK and telemetry in `outbound_suppressed_count` (its meaning widens to "never delivered"), and add `outbound_aborted_count` (every class) to `FlightComputerOutput` and `SilTick` only, not to `RadioTraffic` or comms. The alternative is a separate comms counter, which is a contract change.
 6. **Leaving DOWNLINK mid-DATA.** Recommendation: abort the frame (section 6). The alternative is to finish it (section "Alternatives considered").
 7. **A transmit inhibit mid-DATA.** Recommendation: the frame in transmission finishes, because the inhibit stops new DATA, as it stops new frames today. The alternative is to abort it.
