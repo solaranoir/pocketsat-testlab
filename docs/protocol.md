@@ -424,6 +424,12 @@ execute-commands phases (`pocketsat.flight.computer`, ADR-0004 §2 step c).
   at most that frame plus the ACK's airtime later; until then uplink is ignored (no
   execution, no reply). If the RESET ACK cannot go out (it did not fit, or the
   transmitter is off) the reboot is immediate and the ACK is counted as suppressed.
+- **Wait for the boot-complete beacon before commanding.** A command that arrives in the
+  tick BOOT completes is still NACKed `BOOT_IN_PROGRESS` (PING and RESET excepted),
+  although that tick's boot-complete beacon already reports NOMINAL: commands are
+  handled at step c and the mode changes at step d (ADR-0004 §2). Ground operators and
+  scenarios should wait for the beacon and command from the next tick. This is pinned
+  by `tests/sil/behavior/test_behavior_boot.py`.
 - **Transmitter off.** With no transmit capacity (radio `RX_ONLY` or `OFF`, or the
   `transmitter_off` fault) commands are still received and executed, but every ACK and
   NACK is suppressed and counted (below); none is sent later. An ACK partly

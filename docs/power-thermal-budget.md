@@ -152,7 +152,7 @@ Everything not listed is unchanged and was checked against the profiles above. R
 | `PowerConfig.base_load_w` | 2.0 → **1.8** W | 0.8–2.5 W (OBC, receiver, EPS quiescent, ADCS sensors) | closes the energy gap within a realistic avionics load |
 | `PayloadConfig.acquiring_power_w` | 2.0 → **1.5** W | 0.5–3 W (small imager or instrument) | closes the energy gap |
 | `PayloadConfig.idle_power_w` | 0.5 → **0.3** W | 0.1–0.5 W | consistent with the lower acquiring draw |
-| `PayloadConfig.data_rate_bytes_per_s` | 100 → **40** B/s | instrument-dependent | sized to one pass's net capacity with a 36% margin |
+| `PayloadConfig.data_rate_bytes_per_s` | 100 → **40** B/s | instrument-dependent | sized to one pass's net capacity with a 36% margin (39.9% since #98) |
 | `PayloadConfig.buffer_capacity_bytes` | 65 536 → **524 288** B (512 KiB) | MB–GB of flash | must hold an orbit's data until the pass; holds 2.4 orbits, so one missed pass loses nothing |
 | `PayloadConfig.chunk_size_bytes` | 64 (unchanged) | — | 78-byte DATA frame fits one tick with room for an ACK |
 | `ThermalConfig.heater_on_setpoint_c` | 0.0 → **1.0** °C | 0–10 °C for lithium-ion survival heaters | the battery dips just below the ON setpoint, so ON must be more than 5 °C above `battery_under_temp_c` (-5 °C) for the 5 °C margin |
@@ -163,7 +163,7 @@ Everything not listed is unchanged and was checked against the profiles above. R
 | `AttitudeConfig.control_power_w` | 0.5 (unchanged) | 0.2–1.5 W (magnetorquers, small wheel) | confirmed |
 | `PowerInitial.soc` | 0.8 → **0.5** | 0.3–1.0 at deployment (launch storage charge is often 30–60%) | puts the reference minimum SOC 20 points above `low_battery`, mid-band |
 | `ThermalInitial` battery / electronics | 20 / 20 °C (unchanged) | — | the nodes settle within about an hour, long before the first eclipse |
-| `NominalEnvironment` `eclipse_ambient_temp_c` | -20 °C (unchanged; confirmed) | -40 .. 0 °C effective internal sink | heater cycles 3 times in every nominal eclipse at about 28% duty while every margin holds |
+| `NominalEnvironment` `eclipse_ambient_temp_c` | -20 °C (unchanged; confirmed) | -40 .. 0 °C effective internal sink | heater cycles 3 times in every nominal eclipse at about 28% duty (34–35% since #98) while every margin holds |
 | Power flag thresholds | low 0.30 / 0.35, critical 0.15 / 0.20 (unchanged) | — | 5σ and band requirements met |
 | Thermal limits | battery -5 / -2, 45 / 42 °C; electronics -25 / -22, 60 / 57 °C; survival -10 °C (unchanged) | lithium-ion: no charging below 0 °C, at most about 45 °C | every temperature at least 5 °C inside |
 

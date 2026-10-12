@@ -1,7 +1,7 @@
 # PocketSat Test Lab — Roadmap
 
-Status: Phase 0 complete. Adapted from the original project roadmap, updated for the
-decisions recorded since (ADR-0002, ADR-0003). Work is tracked per phase as GitHub
+Status: Phase 0 complete; Phase 1 in progress. Adapted from the original project roadmap,
+updated for the decisions recorded since (ADR-0002 to ADR-0008). Work is tracked per phase as GitHub
 milestones and on the "PocketSat Test Lab" project board.
 
 ## Goal
@@ -20,7 +20,7 @@ hardware (HIL). See `docs/architecture.md`.
 | Phase | Name | Estimate | Status |
 |---|---|---|---|
 | 0 | Architecture & Skeleton | 1 weekend | **Done** |
-| 1 | Virtual Spacecraft | 1–2 weeks | Not started |
+| 1 | Virtual Spacecraft | 1–2 weeks | In progress |
 | 2 | Ground Station | ~1 week | Not started |
 | 3 | Simulated RF Channel | 1–2 weeks | Not started |
 | 4 | RF Fault Injection | ~1 week | Not started |
@@ -68,6 +68,26 @@ SAFE, and FAULT modes. Generate timestamped telemetry and accept commands such a
 
 Builds on: `SilTarget` must pass the contract suite (`tests/contract/`); command IDs and
 the telemetry layout are filled in in `docs/protocol.md`.
+
+Status: in progress. The Phase 1 milestone closes with #65. Derived from the epics and
+stories:
+
+- [x] Spacecraft subsystem models (epic #30): subsystem framework (#31), power (#34),
+  thermal (#37), attitude (#40), payload and comms (#42); controls, configuration,
+  portable arithmetic, snapshot contracts, and the `SnapshotBoard` (#71, #73 to #76,
+  #85, #96, ADR-0004 to ADR-0006); the power and thermal budget (#72); the close-out
+  check (#70)
+- [x] Flight computer, modes, and command/telemetry handling (epic #45): the
+  `FlightComputer` (#101), mode state machine (#46: #47, #48, #49), command handling
+  (#50: #51, #52), telemetry generation (#53: #54, #55, #56), and radio traffic to
+  comms (#104, #98, ADR-0007)
+- [x] `SilTarget` with target faults, contract and determinism tests (#58: #59, #60,
+  #61), and the performance budget (#78, #120, #121)
+- [x] Nominal scenario harness and golden telemetry (#63, #64), behavioural tests
+  through the target (#102), comms capacity as a data rate (#122), and frames that
+  span ticks (#132, ADR-0008)
+- [ ] Documentation and hygiene cleanup (#103)
+- [ ] Phase 1 documentation and milestone check (#65)
 
 ### Phase 2 — Ground Station
 

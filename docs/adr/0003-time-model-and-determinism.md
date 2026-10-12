@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Phase:** 0
 - **Amends:** ADR-0002 (`advance` signature)
+- **Amended by:** ADR-0004 (§2 step 6, `advance(dt_us)`, refined into steps a to f) and ADR-0006 (§3's list of stable random methods)
 
 ## Context
 

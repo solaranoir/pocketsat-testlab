@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Phase 0, reflects ADR-0002 (TestTarget) and ADR-0003 (time and determinism). Decisions marked **(ADR-000N)** are recorded in the named ADR.
+Status: Phase 1 (in progress), reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), and ADR-0004 to ADR-0008 (the Phase 1 spacecraft model). Decisions marked **(ADR-000N)** are recorded in the named ADR.
 
 ## 1. Purpose
 
@@ -216,7 +216,7 @@ This convention applies to every record dataclass in `pocketsat`: snapshots, con
   - existing unitless numbers: `sequence`, `version`, `schema_version`, `master_seed`
   - counts of frames, named as their ADR names them: `max_held_ack_frames` (`OutboundConfig`, ADR-0008 §5)
 - **Fractions** are named for what they are and kept in 0..1 (for example `soc`, `buffer_fill`), never percentages.
-- **Flags** are `bool` and live only on readings records. Their names are the `TelemetryFlags` member names (#54): `low_battery`, `critical_battery`, `over_temp`, `under_temp`. The contract owns the names (`READINGS_FLAGS`) and #54's enum matches them; adding a readings flag means reserving a bit in #54's flag table in the same change (in #54's issue text until #54 is implemented, then in `docs/protocol.md`). A boolean that describes equipment rather than a decision (for example `heater_on`, `receiver_on`) is a physical state, not a flag, and may sit on a truth record.
+- **Flags** are `bool` and live only on readings records. Their names are the `TelemetryFlags` member names (#54): `low_battery`, `critical_battery`, `over_temp`, `under_temp`. The contract owns the names (`READINGS_FLAGS`) and #54's enum matches them; adding a readings flag means reserving a bit in #54's flag table in the same change (in `docs/protocol.md`, "Flag bits"). A boolean that describes equipment rather than a decision (for example `heater_on`, `receiver_on`) is a physical state, not a flag, and may sit on a truth record.
 - **States** are `enum.Enum` types defined in the contract (`AttitudeState`, `PayloadState`; the radio mode reuses `RadioMode` from the controls).
 - **Power draws** that another subsystem reads are `_w` fields on the truth record.
 - **Sign conventions:** battery current is positive when charging; power draws (`_w` loads) are never negative; solar generation is never negative; net battery power is generation minus total load (`PowerTruth.net_power_w`).

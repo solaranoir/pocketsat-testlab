@@ -2,7 +2,7 @@
 
 Target-agnostic tests that every `TestTarget` implementation must pass (ADR-0002).
 The suite drives targets only through the public interface, so the same tests apply
-to `EchoTarget` (stub), `SilTarget`, and `HilTarget`.
+to `EchoTarget` (stub), `SilTarget` and, from Phase 7, `HilTarget`.
 
 Run just the contract suite:
 
