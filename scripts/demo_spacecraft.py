@@ -25,7 +25,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
-from typing import Any, TextIO
+from typing import TextIO
 
 from pocketsat.core import RngFactory, SimClock
 from pocketsat.environment import EnvironmentModel, NominalEnvironment
@@ -57,6 +57,7 @@ from pocketsat.spacecraft import (
     SpacecraftControls,
     SpacecraftInitialState,
     SpacecraftState,
+    Subsystem,
     SubsystemStack,
     Thermal,
     ThermalInitial,
@@ -79,15 +80,13 @@ def build_stack(
     """Build the five real subsystems on one shared ``SnapshotBoard``."""
     initial = SpacecraftInitialState() if initial is None else initial
     board = SnapshotBoard()
-    # Typed loosely: Thermal, Payload, and Comms declare ``name: Final``, which mypy
-    # treats as not matching the Subsystem protocol's settable ``name: str``.
-    subsystems: tuple[Any, ...] = (
+    subsystems: list[Subsystem] = [
         Power(config.power, initial.power, board),
         Thermal(config.thermal, initial.thermal, board),
         Attitude(config.attitude, initial.attitude),
         Payload(config.payload, initial.payload, board),
         Comms(config.comms),
-    )
+    ]
     return SubsystemStack(subsystems, board=board)
 
 

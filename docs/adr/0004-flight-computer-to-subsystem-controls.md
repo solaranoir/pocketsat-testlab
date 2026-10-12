@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0003 (refines step 6, `advance(dt_us)`, into steps a to f). Related: ADR-0002 (`inject()` and target faults). Issue: #71.
-- Amended by ADR-0008 (§2 latency table, §9 RESET timing at short ticks, §10).
+- Amended by ADR-0007 (§1 the controls record, §2 step a and the latency table, §10 transmit power) and ADR-0008 (§2 latency table, §9 RESET timing at short ticks, §10).
 
 ## Context
 
@@ -175,3 +175,20 @@ Revisit triggers for a message bus:
 - `docs/architecture.md` §4.1 (controls, steps a to f, latency table, where the flight computer sits relative to `STEP_ORDER`) and the §8 lifecycle diagram (step 6 expands to a to f) are updated in the same change as this ADR.
 - The affected issues (#35, #36, #38, #39, #41, #43, #44, #47, #49, #54, #59, #60, #76) already carry these decisions in their acceptance criteria.
 - Implementation of the controls themselves: payload (#43), comms (#44), attitude (#41), the flight computer's controls function (#47), and the `SilTarget` merge (#59, #60).
+
+## Implementation status
+
+_Clarification added by #103 (ADR-0001 allows clarifications to an accepted ADR); the decision above is unchanged. Status as of Phase 1._
+
+| Item | Status | Ticket |
+|---|---|---|
+| `SpacecraftControls` with per-subsystem records and fault overrides, and `Subsystem.step(dt_us, env, controls)` (§1) | Implemented | #71 |
+| Steps a to f in `SilTarget`, with BOOT's controls applied to tick 0 after `reset()` (§2) | Implemented | #59 |
+| Cross-subsystem reads through `SpacecraftState`, using the `SnapshotBoard` (§3) | Implemented | #85 |
+| Fault override merge, precedence and expiry in one `SilTarget` function, `_merge_controls()` (§5, §14); the four faults `sensor_freeze`, `battery_drain`, `transmitter_off`, `forced_reset` (§8 to §11) | Implemented | #60 |
+| Single flight computer controls function, `controls_for_mode()` (§14), called by `FlightComputer.step()` at step f | Implemented | #47, #101 |
+| Telemetry encoder typed to readings records, `encode_telemetry` (§7) | Implemented | #54 |
+| Hardwired survival heater (§12) | Implemented | #38 |
+| Downlink data ownership: payload stores, flight computer moves and releases (§13) | Implemented | #43, #56 |
+| Radio traffic record `RadioTraffic` in the controls (ADR-0007, amending §1, §2 and §10) | Implemented | #98 |
+| Outbound frames span ticks, and the RESET reboot waits for its ACK at short ticks (ADR-0008, amending §2, §9 and §10) | Implemented | #132 |

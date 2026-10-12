@@ -264,7 +264,7 @@ Subsystem physical state (battery charge, temperatures, attitude, the payload bu
 | e | The frames already queued, the ACK included, go out in this tick: the ground sees the ACK. No telemetry: the mode is BOOT, which sends none except the boot-complete beacon at the end of the boot (#55) |
 | f | BOOT's controls, which apply from the next tick |
 
-The ACK therefore always precedes the reboot's effect: it is sent in the RESET tick, and the subsystems see BOOT's controls from the tick after. If the ACK does not fit the tick (more than eight ACKs ahead of it) or the transmitter is off, it is suppressed and counted, and the reboot happens all the same.
+The ACK therefore always precedes the reboot's effect: it is sent in the RESET tick, and the subsystems see BOOT's controls from the tick after. If the ACK does not fit the tick (eight or more ACKs ahead of it) or the transmitter is off, it is suppressed and counted, and the reboot happens all the same.
 
 **The pending reboot (ADR-0008 §6a).** The reboot waits until the RESET ACK has been transmitted, so the ground learns the reset was accepted. In a streaming tick (shorter ticks, when a frame may be in transmission) the RESET ACK is committed right after the frame in transmission, ahead of the ACK/NACK still waiting (held, or from earlier in the tick, which keep their order behind it). If its last byte is not out by step d, the reboot is **pending** (`FlightComputer.reboot_pending`, `SilTick.reboot_pending`): the `RESET` and every event after it are kept, in order. While pending, in each step:
 
@@ -278,6 +278,13 @@ The reboot happens in step d of the tick in which the RESET ACK's last byte is t
 **forced_reset** (#60) calls `reboot()` from `SilTarget`, between steps; BOOT's controls then come from the next step's step f. The RESET command is always momentary. While held in reset the flight computer transmits nothing; a frame in transmission when the hold began stays frozen in its state until the reboot aborts it, and the abort counts appear in the output of the step after the reboot.
 
 **Held in reset: `SilTarget`'s `forced_reset` (#60).** ADR-0004 §9 gives `forced_reset` an optional time held in reset, during which the flight computer handles no commands, sends nothing, and produces no new controls. The hold belongs to `SilTarget`, not to the flight computer: `SilTarget` doesn't step the flight computer during the hold (dropping and counting uplink) and calls `reboot(now_us=<end of the hold>)` once, so uptime and the boot duration count from leaving reset. A RESET command has no hold.
+
+**When the boot-complete beacon arrives after a reboot.** Both reboots follow ADR-0004 §9, and BOOT's controls apply from the tick after the reboot in both, but uptime starts at a different point, so the beacon after a RESET command lands one tick later than after a `forced_reset` pulse:
+
+- **RESET command in tick N:** the reboot is in step d of tick M, at the end of that tick (M = N in every whole-frame tick, so always at the default 100 ms; at shorter ticks M is the tick the RESET ACK's last byte goes out, at most N+2 at 30 ms, ADR-0008 §6a). Uptime counts from the end of tick M, so BOOT completes, and the beacon goes out, in tick **M+50** with the default 5 s boot at 100 ms (M + ⌈boot duration / tick⌉ in general).
+- **`forced_reset` pulse injected for tick N:** the reboot is at the start of tick N, before the flight computer steps, so BOOT completes in tick **N+49** (N + ⌈boot duration / tick⌉ − 1). A held `forced_reset` does the same from the tick its hold ends.
+
+The behavioural tests (`tests/sil/behavior/test_behavior_reboot_and_latency.py`) assert only that the beacon comes at least a full boot later (`BOOT_TICKS`, 50 ticks, counting tick N), which both meet.
 
 ### SAFE or FAULT during BOOT
 
@@ -401,10 +408,10 @@ differ.
 
 | Ticket | Adds |
 |---|---|
-| #101 | The `FlightComputer` component (`pocketsat.flight.computer`) that holds a `ModeState`, calls `transition()` in step d for the events earlier phases raise, and `controls_for_mode()` in step f and at `reset()`; telemetry carries `Mode` itself |
+| #101 | The `FlightComputer` component (`pocketsat.flight.computer`) that holds a `ModeState`, calls `transition()` in step d for the events earlier phases raise, and `controls_for_mode()` in step f and at `reset()`; telemetry carries `Mode` itself: done, see [Mode to controls](#mode-to-controls) |
 | #48 | The rules that raise `SAFE_CONDITION` and `FAULT_DETECTED`, and the `safe_exit_allowed` guard (flags cleared): done, see [Safe and fault entry rules](#safe-and-fault-entry-rules) |
 | #49 | `BOOT_COMPLETE` after the boot duration, the reboot behind RESET and `forced_reset` (uptime, boot counter, transient state), and BOOT's controls applying from tick 0: done, see [Boot sequence and RESET](#boot-sequence-and-reset). The held-in-reset period belongs to `SilTarget`'s `forced_reset` (#60); a RESET command has no hold |
 | #51, #52 | Decoding commands into events, ACK/NACK frames carrying the reason codes, PING, and the decoding reason codes in 0x01 to 0x0F: done, see [docs/protocol.md](protocol.md#dispatch-and-ack-timing) |
 | #55 | Telemetry cadence per mode, the boot-complete beacon, and one `FlightComputerConfig(safety, boot, telemetry)`: done, see [Telemetry cadence](#telemetry-cadence) |
 | #56 | The downlink session: raising `DOWNLINK_COMPLETE`, setting `release_through_chunk_id`, and resuming after an early exit: done, see [Downlink session](#downlink-session) |
-| #59 | Merging fault overrides into these controls and applying BOOT's controls at `reset(seed)` |
+| #59 | Merging fault overrides into these controls and applying BOOT's controls at `reset(seed)`: done, see [docs/architecture.md](architecture.md#the-sil-target-59) |

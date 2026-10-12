@@ -13,8 +13,12 @@ scenario runs unchanged against a Python spacecraft simulation (SIL) or a
 microcontroller running flight software (HIL), because the scenario runner only ever
 talks to the `TestTarget` interface.
 
-Version 1 covers SIL and MCU HIL, a YAML scenario DSL, reusable fault injection,
+Version 1 will cover SIL and MCU HIL, a YAML scenario DSL, reusable fault injection,
 seeded test campaigns, and CI.
+
+Fault injection today: the SIL target implements target-level fault injection
+(`forced_reset`, `sensor_freeze`, `transmitter_off`, and `battery_drain`, #60); RF fault
+injection (Phase 4) and HIL faults (Phase 7) are pending.
 
 ## Architecture
 
