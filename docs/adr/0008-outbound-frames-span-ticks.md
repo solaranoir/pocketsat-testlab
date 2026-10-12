@@ -1,6 +1,6 @@
 # ADR-0008: Outbound frames span ticks
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented by #132)
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0004 (§2 the latency table, §9 the RESET command's reboot timing at short ticks, §10 outbound capacity and priority) and ADR-0007 (§1 where `sent_bytes` comes from, §3 who counts what, §4 how the flight computer keeps within the capacity). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #132. Follows #122 (PR #131).
 
@@ -365,7 +365,7 @@ On acceptance, the implementation for #132 (one PR):
 
 ## Open questions for the maintainer
 
-The maintainer has decided all nine: questions 1 to 3 and 5 to 9 as recommended, and question 4 changed to "the reboot waits for the RESET ACK" (section 6a). This ADR becomes Accepted in the implementation PR.
+The maintainer has decided all nine: questions 1 to 3 and 5 to 9 as recommended, and question 4 changed to "the reboot waits for the RESET ACK" (section 6a). Accepted with the implementation (#132).
 
 1. **Two kinds of tick, or always stream?** Recommendation: two kinds now (section 2), because it is the only rule found that keeps 100 ms bit-identical and makes the long-run rate exact at short ticks. Always streaming would make the pass rate tick-independent (the cost noted under Consequences), but re-records the golden captures and digests and changes #72's pass timing. If you want it, it is a later, separate issue.
 2. **The held-ACK bound.** Recommendation: 8 (one default tick's worth), configurable in `FlightComputerConfig.outbound`. Alternatives: unbounded (the uplink rate bounds it anyway), or 1.
@@ -376,3 +376,15 @@ The maintainer has decided all nine: questions 1 to 3 and 5 to 9 as recommended,
 7. **A transmit inhibit mid-DATA.** Recommendation: the frame in transmission finishes, because the inhibit stops new DATA, as it stops new frames today. The alternative is to abort it.
 8. **Sequence numbers at commit.** Recommendation: yes (section 3). It is identical to today at 100 ms.
 9. **Performance.** Recommendation: no new `WORST_CASE_SCENARIOS` entry, because no busier tick exists at 100 ms; short-tick runs are not budgeted. The PR re-measures both figures.
+
+## Implementation notes (#132)
+
+Points the implementation had to settle where the text above leaves room. None changes behaviour at the default 100 ms tick.
+
+- **"Transmitter off"** is a tick whose readings show capacity 0 **and** `transmitter_on` false. A transmitter that is on with a capacity of 0 (a tick shorter than one byte's airtime, below about 0.83 ms at 1200 bytes/s) is a streaming tick in which nothing moves: frames wait instead of being aborted.
+- **When held ACK/NACK are committed.** The frame in transmission continues at the start of step c (`_continue_transmission`); held ACK/NACK are committed by the execute-commands phase, just before this tick's ACK/NACK. In a tick with a RESET command the RESET ACK is queued first, so it directly follows the frame that was in transmission at the start of the tick, ahead of the held ACK/NACK and of the tick's other ACK/NACK (which keep their order behind it). That is what makes section 6a's bound `C_N + … + C_M ≥ r + 14` exact.
+- **The held-ACK bound and the RESET ACK.** The RESET ACK is held at the front even when the bound is reached, as long as the transmitter is idle with bytes left; otherwise, with the bound reached, it is suppressed like any newest ACK and the reboot happens at once (section 6a, case 2).
+- **Counting.** `outbound_aborted_count` counts the frame in transmission when it is aborted and every held frame dropped by the transmitter going off or a reboot. A held telemetry frame replaced by a newer one is counted only in `outbound_suppressed_count`. Counts from a reboot between steps (`forced_reset`) are reported in the next step's output.
+- **Telemetry replaced at a mode change.** A mode change makes a frame due at once (#55). If a periodic frame is still held behind the frame in transmission, the mode change's frame replaces it (rule of section 5) and it is counted as suppressed. With the default periods this is the only way a frame is lost while the transmitter is on, and only in streaming ticks.
+- **After a deferred reboot**, step e runs in BOOT in the reboot tick, as it does after a RESET in a whole-frame tick (no telemetry is due in BOOT), so the telemetry schedule matches the whole-frame path.
+- **`max_held_ack_frames`** keeps the name given here; it is on the naming convention's allowlist (`docs/architecture.md` §4.1).

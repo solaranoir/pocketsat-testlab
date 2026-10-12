@@ -430,19 +430,22 @@ def test_the_downlink_sequence_wraps_through_telemetry() -> None:
 @pytest.mark.parametrize(
     ("capacity", "acks_sent", "telemetry_sent", "suppressed"),
     [
-        (0, 0, False, 3),
-        (TELEMETRY_FRAME_SIZE - 1, 2, False, 1),  # 35 B: two 14-byte ACKs, then 7 B left
-        (TELEMETRY_FRAME_SIZE, 2, False, 1),  # 36 B: the ACKs come first
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE - 1, 2, False, 1),
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE, 2, True, 0),
-        (CAPACITY, 2, True, 0),
+        (0, 0, False, 7),
+        (78, 5, False, 2),  # 78 B would hold a telemetry frame, but the ACKs come first
+        (6 * ACK_FRAME_SIZE, 6, False, 1),  # 84 B: six ACKs, then nothing left
+        (6 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE - 1, 6, False, 1),  # 119 B
+        (6 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE, 6, True, 0),  # 120 B
+        (200, 6, True, 0),
     ],
 )
 def test_telemetry_fits_the_capacity_left_after_the_acks(
     capacity: int, acks_sent: int, telemetry_sent: bool, suppressed: int
 ) -> None:
+    # Whole-frame ticks (at least 78 bytes, ADR-0008 §2), with six ACKs so the
+    # boundaries sit above 78; streaming ticks hold the frames instead
+    # (test_outbound_spanning.py).
     driver = in_mode(Mode.NOMINAL)
-    pings = (command_frame(Command.ping(), 1), command_frame(Command.ping(), 2))
+    pings = tuple(command_frame(Command.ping(), n) for n in range(1, 7))
     out = driver.step(pings, readings=with_capacity(capacity))
     types = [decode_frame(f).frame_type for f in out.downlink_frames]
     assert types == [FrameType.ACK] * acks_sent + [FrameType.TELEMETRY] * telemetry_sent

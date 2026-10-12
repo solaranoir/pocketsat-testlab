@@ -194,7 +194,7 @@ MARKED = SpacecraftControls(extra_load_w=1.25)
 
 def test_controls_come_only_from_produce_controls(monkeypatch: pytest.MonkeyPatch) -> None:
     fc = FlightComputer()
-    monkeypatch.setattr(fc, "_produce_controls", lambda: MARKED)
+    monkeypatch.setattr(fc, "_produce_controls", lambda *_: MARKED)  # step passes its tick
     assert fc.reset() is MARKED
     assert fc.step((COMMAND_FRAME,), READINGS, 0).controls is MARKED
 
@@ -313,12 +313,17 @@ def test_output_traffic_counts_match_the_frames_sent() -> None:
         assert out.outbound_suppressed_count == 0  # the fake's capacity fits them all
 
 
-def test_output_sent_bytes_is_the_wire_length_of_every_frame() -> None:
-    # ADR-0007 §1: header, payload, and CRC of every outbound frame, all types.
+def test_output_sent_bytes_is_the_bytes_transmitted_not_the_frames_delivered() -> None:
+    # ADR-0007 §1 as amended by ADR-0008 §3: the wire bytes transmitted in the tick, an
+    # explicit field. In a streaming tick it differs from the delivered frames' length.
     frames = (COMMAND_FRAME, b"\x01\x02\x03")
-    out = FlightComputerOutput(frames, controls_for_mode(Mode.BOOT), outbound_suppressed_count=2)
-    assert out.sent_bytes == len(COMMAND_FRAME) + 3
+    out = FlightComputerOutput(
+        frames, controls_for_mode(Mode.BOOT), outbound_suppressed_count=2, sent_bytes=36
+    )
+    assert out.sent_bytes == 36 != sum(map(len, frames))
     assert out.outbound_suppressed_count == 2
+    assert (out.outbound_aborted_count, out.transmitting, out.reboot_pending) == (0, None, False)
+    assert out.uplink_ignored_count == 0
 
 
 @pytest.mark.parametrize(
@@ -330,6 +335,12 @@ def test_output_sent_bytes_is_the_wire_length_of_every_frame() -> None:
         ({"outbound_suppressed_count": -1}, ValueError),
         ({"outbound_suppressed_count": 1.0}, TypeError),
         ({"outbound_suppressed_count": True}, TypeError),
+        ({"sent_bytes": -1}, ValueError),
+        ({"sent_bytes": 1.0}, TypeError),
+        ({"outbound_aborted_count": -1}, ValueError),
+        ({"uplink_ignored_count": True}, TypeError),
+        ({"transmitting": (1, 2)}, TypeError),
+        ({"reboot_pending": 1}, TypeError),
     ],
 )
 def test_output_is_validated(kwargs: dict[str, Any], error: type[Exception]) -> None:
@@ -337,6 +348,7 @@ def test_output_is_validated(kwargs: dict[str, Any], error: type[Exception]) -> 
         "downlink_frames": (),
         "controls": controls_for_mode(Mode.BOOT),
         "outbound_suppressed_count": 0,
+        "sent_bytes": 0,
     }
     with pytest.raises(error):
         FlightComputerOutput(**(base | kwargs))

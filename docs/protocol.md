@@ -404,17 +404,30 @@ execute-commands phases (`pocketsat.flight.computer`, ADR-0004 §2 step c).
   SCIENCE in the same tick is NACKed `NOT_ALLOWED_IN_SAFE`; after RESET, everything but
   PING and RESET is NACKed `BOOT_IN_PROGRESS`.
 - **Timing.** A command received in tick N is ACKed in tick N's downlink (ADR-0004 §2:
-  command → ACK, same tick). The ACK means the command was accepted and the mode it
+  command → ACK, same tick) in every whole-frame tick, so always at the default 100 ms
+  tick and at any tick of at least 65 ms at the default rate (ADR-0008 §2). At shorter
+  ticks a frame may be in transmission: the ACK waits behind it and behind the ACKs
+  ahead of it, and is delivered in the first tick N + d whose capacities from tick N
+  add up to the bytes ahead of it plus its own 14 (ADR-0008 §5): at most about 76 ms of
+  airtime with nothing else ahead, N+2 at 30 ms and N+1 at 50 ms. Its content is fixed
+  in tick N either way. The ACK means the command was accepted and the mode it
   asked for is in force at the end of tick N (or already was, for a `NO_CHANGE`), so
   telemetry from tick N shows the new mode. The new mode's controls take effect in tick
   N+1 (commands act one tick later), so the physical effect follows the ACK by one tick.
   An automatic event in the same tick (`SAFE_CONDITION`, `FAULT_DETECTED`) is applied
   after the commands and can still override an ACKed mode change; the ACK reports what
-  the command did, and telemetry the final mode. The RESET ACK goes out in the tick of
-  the reset, before the reboot (#49) restarts the downlink sequence.
+  the command did, and telemetry the final mode. The RESET ACK goes out before the
+  reboot (#49) restarts the downlink sequence, numbered from before it: the reboot
+  waits until the RESET ACK's last byte has been transmitted (ADR-0008 §6a). In a
+  whole-frame tick that is the RESET tick. At shorter ticks the RESET ACK goes right
+  after the frame in transmission, ahead of other waiting ACKs, and the reboot follows
+  at most that frame plus the ACK's airtime later; until then uplink is ignored (no
+  execution, no reply). If the RESET ACK cannot go out (it did not fit, or the
+  transmitter is off) the reboot is immediate and the ACK is counted as suppressed.
 - **Transmitter off.** With no transmit capacity (radio `RX_ONLY` or `OFF`, or the
   `transmitter_off` fault) commands are still received and executed, but every ACK and
-  NACK is suppressed and counted (below); none is sent later.
+  NACK is suppressed and counted (below); none is sent later. An ACK partly
+  transmitted when the transmitter goes off is aborted and counted the same way.
 
 ### Command wire-contract rules
 
@@ -494,17 +507,23 @@ content of 1 .. 65 531 bytes, so the payload fits the frame's length field.
 
 - **In order, once each.** The downlink session sends the oldest unsent chunks first and
   stops at the first chunk whose frame does not fit the capacity left after ACK/NACK and
-  telemetry ([below](#downlink-sequence-and-transmit-capacity)), so within a session
-  chunk IDs go up by one from frame to frame, never skip, and never repeat. A session
-  cut short (SAFE, FAULT, RESET, or a command) is resumed by the next one from the oldest
-  chunk the payload still holds, which is the first chunk not sent.
-- **Released once sent (Phase 1).** The flight computer releases a chunk once its frame
-  is sent (`PayloadControls.release_through_chunk_id`, applied by the payload in the next
-  tick, ADR-0004 §13). There is no acknowledgement from the ground: a DATA frame lost on
-  the way down is lost. Releasing only once the ground acknowledges, and retransmitting,
-  is a later phase; it changes the flight computer's release rule only, not this layout.
+  telemetry ([below](#downlink-sequence-and-transmit-capacity)); in a streaming tick it
+  commits one chunk at a time, when nothing else waits. So within a session chunk IDs go
+  up by one from frame to frame, never skip, and never repeat. A session cut short
+  (SAFE, FAULT, RESET, or a command) is resumed by the next one from the oldest chunk the
+  payload still holds, which is the first chunk not delivered.
+- **Released once sent (Phase 1).** The flight computer releases a chunk once its whole
+  frame has been transmitted (`PayloadControls.release_through_chunk_id`, applied by the
+  payload in the next tick, ADR-0004 §13), from the tick its last byte goes out, even if
+  the session ends in that tick (ADR-0008 §6). There is no acknowledgement from the
+  ground: a DATA frame lost on the way down is lost. Releasing only once the ground
+  acknowledges, and retransmitting, is a later phase; it changes the flight computer's
+  release rule only, not this layout.
 - **Not suppressed.** A chunk whose frame does not fit is not counted as suppressed: it
-  stays in the payload buffer and is sent in a later tick (ADR-0007 §3).
+  stays in the payload buffer and is sent in a later tick (ADR-0007 §3). A DATA frame
+  aborted mid-transmission (the transmitter goes off, a reboot, or the session ends) is
+  not counted as suppressed either: its chunk was never released, so the next session
+  sends it first, in a new frame with a new sequence number.
 
 ### DATA wire-contract rules
 
@@ -517,28 +536,58 @@ content of 1 .. 65 531 bytes, so the payload fits the frame's length field.
 ## Downlink sequence and transmit capacity
 
 Every frame the spacecraft sends goes through one outbound queue in the flight computer
-(`FlightComputer._queue_outbound`, #51), which applies ADR-0004 §10 and ADR-0007 §4:
+(`FlightComputer._queue_outbound`, #51), which applies ADR-0004 §10, ADR-0007 §4 and
+ADR-0008. The queue models the radio driver's transmitter: at most one frame **in
+transmission**, carried from tick to tick, so a frame longer than a tick's capacity goes
+out over several ticks, as on a real serial radio. The ground still receives whole
+frames: a frame is delivered (returned by `receive()`) in the tick its last byte is
+transmitted.
 
-- **Capacity.** Each tick the frames sent fit within comms' `transmit_capacity_bytes`
-  for that tick (wire bytes: header, payload, and CRC), read from comms' readings. A
-  capacity of 0 sends nothing. The capacity is the radio's fixed data rate
-  (`CommsConfig.transmit_rate_bytes_per_s`, 1200 bytes/s) over the tick, with the
-  fraction of a byte carried to the next tick (#122): 120 bytes in every default
+- **Capacity.** Each tick the bytes transmitted fit within comms'
+  `transmit_capacity_bytes` for that tick (wire bytes: header, payload, and CRC), read
+  from comms' readings. A capacity of 0 sends nothing. The capacity is the radio's fixed
+  data rate (`CommsConfig.transmit_rate_bytes_per_s`, 1200 bytes/s) over the tick, with
+  the fraction of a byte carried to the next tick (#122): 120 bytes in every default
   100 ms tick, and a byte more or less from tick to tick when the rate does not divide
-  evenly into ticks. Frames are not yet split across ticks (see #132).
+  evenly into ticks.
+- **Two kinds of tick (ADR-0008 §2).** A **whole-frame tick** has a capacity of at least
+  the largest frame (78 bytes with 64-byte chunks: any tick of 65 ms or more at the
+  default rate) and nothing in transmission or held; every default 100 ms tick is one.
+  Any other tick is a **streaming tick**.
 - **Priority.** Frames are offered in priority order: ACK/NACK (step c), then telemetry
   (#55, at its per-mode cadence, `docs/spacecraft-modes.md`, "Telemetry cadence"), then
-  DATA (#56) (step e). Each is sent if it fits what is left; one that does
-  not is dropped, not queued for a later tick. A frame that does not fit does not block
-  a later, smaller one.
-- **Suppression.** ACK/NACK and telemetry frames that do not fit are counted in the
-  tick's `outbound_suppressed_count` (`FlightComputerOutput`, ADR-0007 §3). DATA that does
-  not fit is not counted: its chunk stays in the payload buffer for a later tick.
+  DATA (#56) (step e). The priority applies when a frame is chosen; a frame in
+  transmission is never preempted or interleaved and finishes first. In a whole-frame
+  tick each frame is sent whole if it fits what is left; one that does not is dropped,
+  not queued for a later tick, and does not block a later, smaller one. In a streaming
+  tick frames go back to back: the frame in transmission continues, then waiting frames
+  are committed one after another (held ACK/NACK oldest first, this tick's ACK/NACK,
+  held or due telemetry, then the next chunk), each continuing into the next tick if the
+  bytes run out.
+- **Holding.** In a streaming tick, ACK/NACK and telemetry that cannot be committed wait
+  behind the frame in transmission: at most 8 ACK/NACK
+  (`FlightComputerConfig.outbound.max_held_ack_frames`; one more is suppressed) and one
+  telemetry frame (a newer one replaces it). DATA is never held: the session commits its
+  next chunk when nothing else waits.
+- **Suppression.** ACK/NACK and telemetry frames that are due but never delivered are
+  counted in the tick's `outbound_suppressed_count` (`FlightComputerOutput`, ADR-0007
+  §3): no room in a whole-frame tick, the transmitter off, the held bound, a held
+  telemetry frame replaced, or aborted mid-transmission. DATA is never counted: its
+  chunk stays in the payload buffer for a later tick.
+- **Aborts (ADR-0008 §6).** The transmitter going off, a reboot, and (for DATA) the end
+  of the downlink session abort the frame in transmission; the first two also drop the
+  held frames. Its bytes were transmitted (and charged) but the frame is never
+  delivered; on a real radio the ground would see a truncated frame failing sync,
+  length or CRC. Every abort is counted in `FlightComputerOutput.outbound_aborted_count`.
+  A transmit inhibit (a power or thermal flag) only stops new DATA: a DATA frame in
+  transmission finishes.
 - **DATA stops at the first frame that does not fit** (#56): the outbound queue would let
   a later, smaller frame through, but the downlink session offers no chunk after one
   that did not fit, so chunks are never sent out of order.
 - **Sequence.** The header sequence of every downlink frame, all types, comes from one
   counter (the spacecraft → ground direction) that starts at 0 on power-on and after
-  every reboot, goes up by one per frame **sent**, and wraps `0xFFFF` → `0x0000`. A
-  suppressed frame uses no number, so a gap seen on the ground means a frame lost on the
-  way down. The ground pairs a restart at 0 with the boot counter in telemetry.
+  every reboot, goes up by one per frame **committed** (its first byte transmitted; in a
+  whole-frame tick, per frame sent), and wraps `0xFFFF` → `0x0000`, so frames are
+  numbered in transmit order. A suppressed frame uses no number, so a gap seen on the
+  ground means a frame lost on the way down, or one aborted mid-transmission. The ground
+  pairs a restart at 0 with the boot counter in telemetry.

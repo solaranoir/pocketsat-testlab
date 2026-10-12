@@ -30,20 +30,40 @@ codec. DATA and the downlink session are #56 (:mod:`pocketsat.flight.downlink`).
 **Settings.** One :class:`FlightComputerConfig` holds every setting: #48's
 :class:`~pocketsat.flight.safety.SafetyConfig`, #49's
 :class:`~pocketsat.flight.boot.BootConfig`, #55's
-:class:`~pocketsat.flight.telemetry.TelemetryConfig`, and #56's
-:class:`~pocketsat.flight.downlink.DownlinkConfig`.
+:class:`~pocketsat.flight.telemetry.TelemetryConfig`, #56's
+:class:`~pocketsat.flight.downlink.DownlinkConfig`, and #132's :class:`OutboundConfig`.
 
-**Outbound frames (ADR-0004 §10, ADR-0007 §4).** Every downlink frame goes through
-:meth:`FlightComputer._queue_outbound`, which gives it the next downlink sequence number
-and appends it to the tick's frames only if it fits what is left of comms'
-``transmit_capacity_bytes`` for this tick (read from the readings). Frames are offered
-in :class:`OutboundClass` order, ACK/NACK (step c), then telemetry and DATA (step e), so
-the order of the phases is the priority order; offering a higher class after a lower one
-is a programming error and raises. A frame that does not fit is not queued; ACK/NACK
-and telemetry that don't fit are counted in ``outbound_suppressed_count``, DATA is not
-(it stays in the payload buffer, ADR-0007 §3). Telemetry (#55) and DATA (#56) go through
-the same method, with no change to this rule; the downlink session stops at the first
-DATA frame that does not fit, so chunks never go out of order.
+**Outbound frames (ADR-0004 §10, ADR-0007 §4, ADR-0008).** Every downlink frame goes
+through :meth:`FlightComputer._queue_outbound`. Frames are offered in
+:class:`OutboundClass` order, ACK/NACK (step c), then telemetry and DATA (step e), so the
+order of the phases is the priority order; offering a higher class after a lower one is
+a programming error and raises. The flight computer models the radio driver's transmit
+queue (ADR-0008 §1): at most one frame **in transmission**, carried from tick to tick,
+and the ACK/NACK and telemetry frames **held** behind it. Each tick spends comms'
+``transmit_capacity_bytes`` (read from the readings) in one of two ways (ADR-0008 §2):
+
+- **A whole-frame tick** (the capacity is at least :attr:`FlightComputer.max_frame_size`,
+  nothing is in transmission and nothing is held; every tick at the default 100 ms):
+  each frame is sent whole if it fits what is left, gets the next downlink sequence
+  number and is delivered at once. A frame that does not fit is not queued; ACK/NACK
+  and telemetry that don't fit are counted in ``outbound_suppressed_count``, DATA is not
+  (it stays in the payload buffer, ADR-0007 §3), and the downlink session stops at the
+  first DATA frame that does not fit, so chunks never go out of order.
+- **A streaming tick** (any other tick): the frame in transmission continues first,
+  then waiting frames are **committed** one after another in priority order, each
+  numbered when its first byte goes out and spanning ticks as needed, never preempted
+  or interleaved. A frame is delivered in the tick its last byte is transmitted.
+  ACK/NACK and telemetry that cannot be committed are held (at most
+  :attr:`OutboundConfig.max_held_ack_frames` ACK/NACK, oldest first, and one telemetry
+  frame, a newer one replacing it), and DATA is committed one chunk at a time when
+  nothing else waits.
+
+``FlightComputerOutput.sent_bytes`` is the bytes transmitted in the tick, never more
+than the capacity. A tick with the transmitter off aborts the frame in transmission and
+suppresses every held and new ACK/NACK and telemetry frame; a reboot aborts and drops
+them too; leaving DOWNLINK aborts a DATA frame in transmission, whose chunk stays
+buffered (ADR-0008 §6). A RESET command reboots only once its ACK has been transmitted
+(ADR-0008 §6a): until then the reboot is **pending**.
 
 The flight computer is **not** part of ``STEP_ORDER``: it always runs after all
 subsystems, and the controls it produces in tick N apply in tick N+1 (ADR-0004 §2). It
@@ -51,6 +71,7 @@ uses no randomness and no wall-clock time; simulated time is passed in by the ca
 (integer microseconds from the run's ``SimClock``, ADR-0003).
 """
 
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -196,6 +217,35 @@ class SpacecraftReadings:
 
 
 @dataclass(frozen=True)
+class OutboundConfig:
+    """Settings of the outbound queue's transmitter (#132, ADR-0008 §5).
+
+    Attributes:
+        max_held_ack_frames: How many ACK/NACK frames may wait behind a frame in
+            transmission in a streaming tick (ADR-0008 §2). One more is suppressed and
+            counted. Default 8, what one default 100 ms tick carries
+            (⌊120 / 14⌋). 0 never holds an ACK/NACK.
+
+    Raises:
+        TypeError: ``max_held_ack_frames`` is not an int.
+        ValueError: ``max_held_ack_frames`` is negative.
+    """
+
+    max_held_ack_frames: int = 8
+
+    def __post_init__(self) -> None:
+        value = self.max_held_ack_frames
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"max_held_ack_frames must be an int, got {value!r}")
+        if value < 0:
+            raise ValueError(f"max_held_ack_frames must be non-negative, got {value}")
+
+
+DEFAULT_OUTBOUND_CONFIG: Final = OutboundConfig()
+"""The default outbound settings: at most 8 held ACK/NACK frames."""
+
+
+@dataclass(frozen=True)
 class FlightComputerConfig:
     """Every setting of the flight computer, in one record passed to
     :class:`FlightComputer` (#55).
@@ -206,6 +256,7 @@ class FlightComputerConfig:
         boot: The boot sequence (#49): how long BOOT lasts.
         telemetry: The telemetry cadence per mode (#55).
         downlink: The downlink session's settings (#56): the payload chunk size.
+        outbound: The outbound queue's transmitter (#132): the held-ACK bound.
 
     Raises:
         TypeError: A field is not its settings record.
@@ -215,6 +266,7 @@ class FlightComputerConfig:
     boot: BootConfig = DEFAULT_BOOT_CONFIG
     telemetry: TelemetryConfig = DEFAULT_TELEMETRY_CONFIG
     downlink: DownlinkConfig = DEFAULT_DOWNLINK_CONFIG
+    outbound: OutboundConfig = DEFAULT_OUTBOUND_CONFIG
 
     def __post_init__(self) -> None:
         for name, kind in (
@@ -222,6 +274,7 @@ class FlightComputerConfig:
             ("boot", BootConfig),
             ("telemetry", TelemetryConfig),
             ("downlink", DownlinkConfig),
+            ("outbound", OutboundConfig),
         ):
             value = getattr(self, name)
             if not isinstance(value, kind):
@@ -230,38 +283,89 @@ class FlightComputerConfig:
 
 DEFAULT_FLIGHT_COMPUTER_CONFIG: Final = FlightComputerConfig()
 """The default settings: 10-tick flag persistence, a 5 s boot, the default telemetry
-cadence (``docs/spacecraft-modes.md``, "Telemetry cadence"), and 64-byte chunks."""
+cadence (``docs/spacecraft-modes.md``, "Telemetry cadence"), 64-byte chunks, and at
+most 8 held ACK/NACK frames."""
 
 
 @dataclass(frozen=True)
+class OutboundProgress:
+    """The frame in transmission at the end of a tick (#132, ADR-0008 §8).
+
+    A record for tests and run records: ``FlightComputerOutput.transmitting`` and
+    ``SilTick.transmitting``.
+
+    Attributes:
+        frame_type: The frame's type.
+        sequence: Its downlink sequence number, given when it was committed.
+        size_bytes: Its size on the wire, bytes.
+        sent_bytes: The bytes of it transmitted so far, ``0 < sent_bytes < size_bytes``.
+    """
+
+    frame_type: FrameType
+    sequence: int
+    size_bytes: int
+    sent_bytes: int
+
+
+def _check_count(name: str, value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+
+
+@dataclass(frozen=True, slots=True)
 class FlightComputerOutput:
     """What one :meth:`FlightComputer.step` hands back to ``SilTarget`` (#59).
 
     Attributes:
-        downlink_frames: Encoded frames to transmit this tick, in transmit order
-            (ACK/NACK, then telemetry, then DATA; ADR-0004 §10), together no longer
-            than comms' ``transmit_capacity_bytes`` for the tick. ``SilTarget`` returns
-            them from ``receive()``. ACK/NACK frames come from #51, TELEMETRY
+        downlink_frames: Encoded frames **delivered** this tick: those whose last byte
+            was transmitted in it, in transmit order (ADR-0008 §3). In a whole-frame
+            tick that is ACK/NACK, then telemetry, then DATA (ADR-0004 §10), together no
+            longer than the tick's capacity; a frame completing in a streaming tick may
+            have started in an earlier one, so the total can exceed it. ``SilTarget``
+            returns them from ``receive()``. ACK/NACK frames come from #51, TELEMETRY
             frames from #55, and DATA frames from the downlink session (#56).
         controls: The :class:`SpacecraftControls` for the next tick (ADR-0004 §2 step
             f), from the single controls function, with the downlink session's chunk
             release (#56). ``SilTarget`` merges fault overrides
             and the radio traffic into them at step a of the next tick (#59,
             ADR-0007).
-        outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick
-            because they did not fit comms' transmit capacity (ADR-0004 §10,
-            ADR-0007 §3). Per tick, not a running total; ``SilTarget`` passes it on in
-            ``RadioTraffic.outbound_suppressed_count``. Counted for ACK/NACK
-            (#51) and telemetry (#55).
+        outbound_suppressed_count: ACK/NACK and telemetry frames that were due but
+            will never be delivered, counted this tick: no room in a whole-frame tick
+            or with the transmitter off, the held-frame bound, a held telemetry frame
+            replaced by a newer one, or aborted mid-transmission or dropped while held
+            (ADR-0004 §10, ADR-0007 §3, ADR-0008 §6). Per tick, not a running total;
+            ``SilTarget`` passes it on in ``RadioTraffic.outbound_suppressed_count``.
+        sent_bytes: Wire bytes **transmitted** this tick (ADR-0007's
+            ``RadioTraffic.sent_bytes``; header, payload, and CRC of every frame type),
+            including parts of frames delivered in other ticks (ADR-0008 §3). Never
+            more than comms' ``transmit_capacity_bytes`` for the tick. In a whole-frame
+            tick, the total length of :attr:`downlink_frames`. ``SilTarget`` passes it
+            on to comms.
+        outbound_aborted_count: Frames of any class aborted mid-transmission or dropped
+            while held this tick, by the transmitter going off or a reboot, or a DATA
+            frame aborted with its session (ADR-0008 §6). For tests and run records;
+            not passed to comms.
+        transmitting: The frame in transmission at the end of the tick, or ``None``.
+        reboot_pending: A RESET command's reboot is waiting for its ACK at the end of
+            the tick (ADR-0008 §6a).
+        uplink_ignored_count: Uplink frames given to the step while a reboot was
+            pending: not decoded, executed, or answered (ADR-0008 §6a).
 
     Raises:
         TypeError: A field has the wrong type.
-        ValueError: ``outbound_suppressed_count`` is negative.
+        ValueError: A count is negative.
     """
 
     downlink_frames: tuple[bytes, ...]
     controls: SpacecraftControls
     outbound_suppressed_count: int = 0
+    sent_bytes: int = field(kw_only=True)
+    outbound_aborted_count: int = 0
+    transmitting: OutboundProgress | None = None
+    reboot_pending: bool = False
+    uplink_ignored_count: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.downlink_frames, tuple) or not all(
@@ -274,22 +378,30 @@ class FlightComputerOutput:
             raise TypeError(
                 f"controls must be SpacecraftControls, got {type(self.controls).__name__}"
             )
-        count = self.outbound_suppressed_count
-        if isinstance(count, bool) or not isinstance(count, int):
-            raise TypeError(f"outbound_suppressed_count must be an int, got {count!r}")
-        if count < 0:
-            raise ValueError(f"outbound_suppressed_count must be non-negative, got {count}")
-
-    @property
-    def sent_bytes(self) -> int:
-        """Wire bytes sent this tick: the total length of :attr:`downlink_frames`.
-
-        This is ADR-0007's ``RadioTraffic.sent_bytes`` (header, payload, and CRC of
-        every frame type), derived from the frames so the two can never disagree.
-        ``SilTarget`` passes it on to comms. Never more than comms'
-        ``transmit_capacity_bytes`` for the tick.
-        """
-        return sum(len(frame) for frame in self.downlink_frames)
+        suppressed, sent = self.outbound_suppressed_count, self.sent_bytes
+        aborted, ignored = self.outbound_aborted_count, self.uplink_ignored_count
+        # A fast path for plain non-negative ints: this runs every tick (#78's budget).
+        if not (
+            type(suppressed) is int
+            and type(sent) is int
+            and type(aborted) is int
+            and type(ignored) is int
+            and suppressed >= 0
+            and sent >= 0
+            and aborted >= 0
+            and ignored >= 0
+        ):
+            _check_count("outbound_suppressed_count", suppressed)
+            _check_count("sent_bytes", sent)
+            _check_count("outbound_aborted_count", aborted)
+            _check_count("uplink_ignored_count", ignored)
+        transmitting = self.transmitting
+        if transmitting is not None and type(transmitting) is not OutboundProgress:
+            raise TypeError(
+                f"transmitting must be an OutboundProgress or None, got {transmitting!r}"
+            )
+        if type(self.reboot_pending) is not bool:
+            raise TypeError(f"reboot_pending must be a bool, got {self.reboot_pending!r}")
 
 
 class OutboundClass(IntEnum):
@@ -335,7 +447,7 @@ class UplinkCommand:
     command: "messages.ParsedCommand | messages.MalformedCommand"
 
 
-@dataclass
+@dataclass(slots=True)
 class TickContext:
     """Working data for one :meth:`FlightComputer.step`, passed through every phase.
 
@@ -356,13 +468,25 @@ class TickContext:
             from this tick's readings; False until then.
         safety: The safe-mode and fault rules' verdict for this tick (#48), set by the
             evaluate-flags phase.
-        downlink_frames: Encoded frames queued for transmission this tick, in transmit
-            order. Appended only by :meth:`FlightComputer._queue_outbound`.
+        downlink_frames: Encoded frames delivered this tick (their last byte was
+            transmitted in it), in transmit order. Appended only by the outbound queue
+            (:meth:`FlightComputer._queue_outbound` and the transmitter).
         outbound_suppressed_count: ACK/NACK and telemetry frames suppressed this tick.
         outbound_remaining_bytes: What is left of comms' ``transmit_capacity_bytes``
-            (from ``readings``) after the frames queued so far.
+            (from ``readings``) after the bytes transmitted so far.
         outbound_class: The class of the last frame offered for transmission; frames
             must be offered in :class:`OutboundClass` order.
+        streaming: This is a streaming tick (ADR-0008 §2); False for a whole-frame
+            tick, where :meth:`reserve_outbound`'s rule applies. Set by the flight
+            computer at the start of the tick.
+        transmitter_off: The transmitter is off this tick (capacity 0 and
+            ``transmitter_on`` false): every ACK/NACK and telemetry frame is suppressed
+            and nothing is held (ADR-0008 §6). Implies ``streaming``.
+        sent_bytes: Bytes transmitted this tick so far.
+        outbound_aborted_count: Frames aborted or dropped this tick (ADR-0008 §6).
+        completed_chunk_id: The last DATA chunk whose frame completed this tick, or
+            ``None``: released in step f even if the session ended (ADR-0008 §6).
+        uplink_ignored_count: Uplink frames ignored because a reboot is pending.
     """
 
     now_us: int
@@ -377,17 +501,38 @@ class TickContext:
     commands: list[UplinkCommand] = field(default_factory=list)
     outbound_remaining_bytes: int = field(init=False)
     outbound_class: OutboundClass = field(init=False, default=OutboundClass.ACK)
+    streaming: bool = False
+    transmitter_off: bool = False
+    sent_bytes: int = 0
+    outbound_aborted_count: int = 0
+    completed_chunk_id: int | None = None
+    uplink_ignored_count: int = 0
 
     def __post_init__(self) -> None:
         self.outbound_remaining_bytes = self.readings.comms.transmit_capacity_bytes
 
-    def reserve_outbound(self, size: int, outbound_class: OutboundClass) -> bool:
-        """Claim ``size`` bytes of this tick's transmit capacity for one frame.
+    def check_order(self, outbound_class: OutboundClass) -> None:
+        """Record that a frame of ``outbound_class`` is offered, checking the order.
 
-        The capacity rule of ADR-0004 §10 and ADR-0007 §4, in one place. Frames are
-        offered in priority order and each is taken if it fits what is left; one that
-        doesn't is not queued (and counted as suppressed unless it is DATA). A frame
-        that does not fit does not block a later, smaller one.
+        Raises:
+            RuntimeError: A frame of a higher class is offered after a lower one.
+        """
+        if outbound_class < self.outbound_class:
+            raise RuntimeError(
+                f"{outbound_class.name} frame offered after a {self.outbound_class.name} "
+                "frame; outbound frames go in OutboundClass order (ADR-0004 §10)"
+            )
+        self.outbound_class = outbound_class
+
+    def reserve_outbound(self, size: int, outbound_class: OutboundClass) -> bool:
+        """Claim ``size`` bytes of this tick's transmit capacity for one whole frame.
+
+        The capacity rule of ADR-0004 §10 and ADR-0007 §4 for a **whole-frame tick**
+        (ADR-0008 §2), in one place. Frames are offered in priority order and each is
+        taken if it fits what is left; one that doesn't is not queued (and counted as
+        suppressed unless it is DATA). A frame that does not fit does not block a
+        later, smaller one. Streaming ticks use the flight computer's transmitter
+        instead (:meth:`FlightComputer._queue_outbound`).
 
         Args:
             size: The frame's size on the wire, bytes (header, payload, and CRC).
@@ -400,18 +545,51 @@ class TickContext:
         Raises:
             RuntimeError: A frame of a higher class is offered after a lower one.
         """
-        if outbound_class < self.outbound_class:
-            raise RuntimeError(
-                f"{outbound_class.name} frame offered after a {self.outbound_class.name} "
-                "frame; outbound frames go in OutboundClass order (ADR-0004 §10)"
-            )
-        self.outbound_class = outbound_class
+        self.check_order(outbound_class)
         if size <= self.outbound_remaining_bytes:
             self.outbound_remaining_bytes -= size
+            self.sent_bytes += size
             return True
         if outbound_class.counts_suppression:
             self.outbound_suppressed_count += 1
         return False
+
+
+@dataclass(slots=True)
+class _InTransmission:
+    """The frame in transmission: transient flight computer state (ADR-0008 §1)."""
+
+    frame: bytes
+    outbound_class: OutboundClass
+    sent_bytes: int = 0
+    chunk_id: int | None = None  # DATA: the chunk it carries
+    reset_ack: bool = False  # the ACK a pending RESET reboot waits for (ADR-0008 §6a)
+
+
+@dataclass(frozen=True, slots=True)
+class _HeldAck:
+    """An ACK/NACK frame's payload, held behind the frame in transmission."""
+
+    payload: bytes
+    reset_ack: bool = False
+
+
+class _ResetAck(IntEnum):
+    """Where the RESET command's ACK is (ADR-0008 §6a)."""
+
+    NONE = 0  # no RESET command this tick, or no reboot pending
+    WAITING = 1  # in transmission or held
+    DONE = 2  # its last byte was transmitted
+    LOST = 3  # suppressed or aborted: it will never go out
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingReboot:
+    """A RESET command's reboot waiting for its ACK (ADR-0008 §6a): the ``RESET`` and
+    every mode event after it in its tick, kept in order, and that tick's guard."""
+
+    events: tuple[ModeEvent, ...]
+    safe_exit_allowed: bool
 
 
 class FlightComputer:
@@ -433,9 +611,12 @@ class FlightComputer:
     - Telemetry follows :class:`TelemetryConfig`'s per-mode cadence (#55): none in BOOT
       but the boot-complete beacon, a frame at every mode change, then one per period.
     - In DOWNLINK a downlink session (#56, :mod:`pocketsat.flight.downlink`) sends the
-      payload's chunks as DATA frames, releases them once sent, and raises
-      ``DOWNLINK_COMPLETE`` when none is left; leaving DOWNLINK any other way aborts it,
-      and the next session resumes from the oldest unreleased chunk.
+      payload's chunks as DATA frames, releases them once their frames have been
+      transmitted, and raises ``DOWNLINK_COMPLETE`` when none is left; leaving DOWNLINK
+      any other way aborts it, and the next session resumes from the oldest unreleased
+      chunk.
+    - The outbound queue's transmitter (#132, ADR-0008) carries a frame across ticks
+      when the tick is too short for it; see the module docstring.
 
     Deterministic: the same calls with the same arguments always give the same outputs.
     No randomness, no wall-clock time; simulated time comes from the caller.
@@ -446,7 +627,8 @@ class FlightComputer:
 
         Args:
             config: Every setting: the safe-mode rules (#48), the boot sequence (#49),
-                the telemetry cadence (#55), and the downlink chunk size (#56).
+                the telemetry cadence (#55), the downlink chunk size (#56), and the
+                held-ACK bound (#132).
 
         Raises:
             TypeError: ``config`` is not a :class:`FlightComputerConfig`.
@@ -454,6 +636,12 @@ class FlightComputer:
         if not isinstance(config, FlightComputerConfig):
             raise TypeError(f"config must be a FlightComputerConfig, got {type(config).__name__}")
         self._config = config
+        self._max_frame_size = max(
+            messages.ACK_FRAME_SIZE,
+            messages.TELEMETRY_FRAME_SIZE,
+            messages.data_frame_size(config.downlink.chunk_size_bytes),
+        )
+        self._max_held_acks = config.outbound.max_held_ack_frames
         self._safety_state: SafetyState = INITIAL_SAFETY_STATE
         self._telemetry_schedule: TelemetrySchedule = INITIAL_TELEMETRY_SCHEDULE
         self._mode_state: ModeState = INITIAL_STATE
@@ -462,6 +650,13 @@ class FlightComputer:
         self._now_us = 0
         self._downlink_sequence = 0
         self._downlink_session: DownlinkSession | None = None
+        self._transmitting: _InTransmission | None = None
+        self._held_acks: deque[_HeldAck] = deque()
+        self._held_telemetry: bytes | None = None
+        self._reset_ack = _ResetAck.NONE
+        self._pending_reboot: _PendingReboot | None = None
+        self._carried_suppressed_count = 0
+        self._carried_aborted_count = 0
         self.reset()
 
     # --- State ------------------------------------------------------------------------
@@ -486,6 +681,39 @@ class FlightComputer:
         """The current downlink session (#56): what it has sent so far. ``None``
         outside DOWNLINK."""
         return self._downlink_session
+
+    @property
+    def max_frame_size(self) -> int:
+        """``L_max`` (ADR-0008 §2): the largest frame this flight software sends, bytes.
+
+        The largest of an ACK/NACK, a TELEMETRY frame, and a DATA frame of
+        ``config.downlink.chunk_size_bytes``: 78 with the default 64-byte chunk. A tick
+        whose capacity is at least this, with nothing in transmission and nothing held,
+        is a whole-frame tick.
+        """
+        return self._max_frame_size
+
+    @property
+    def transmitting(self) -> OutboundProgress | None:
+        """The frame in transmission (ADR-0008 §1), or ``None`` when the transmitter is
+        idle."""
+        tx = self._transmitting
+        if tx is None:
+            return None
+        header = decode_frame(tx.frame)
+        return OutboundProgress(header.frame_type, header.sequence, len(tx.frame), tx.sent_bytes)
+
+    @property
+    def held_frame_count(self) -> int:
+        """ACK/NACK and telemetry frames held behind the frame in transmission."""
+        return len(self._held_acks) + (self._held_telemetry is not None)
+
+    @property
+    def reboot_pending(self) -> bool:
+        """A RESET command's reboot is waiting for its ACK to be transmitted
+        (ADR-0008 §6a). Never true in a whole-frame tick, so never at the default
+        100 ms tick."""
+        return self._pending_reboot is not None
 
     @property
     def boot_count(self) -> int:
@@ -538,6 +766,8 @@ class FlightComputer:
         self._boot_count = 0
         self._now_us = now_us
         self._clear_transient_state()
+        self._carried_suppressed_count = 0
+        self._carried_aborted_count = 0
         return self._produce_controls()
 
     def reboot(self, *, now_us: int) -> None:
@@ -555,6 +785,12 @@ class FlightComputer:
         computer during the hold and calls ``reboot(now_us=<end of the hold>)`` once, so
         uptime counts from leaving reset. A RESET command has no hold.
 
+        Outbound (ADR-0008 §6): the frame in transmission is aborted and held frames
+        are dropped; ACK/NACK and telemetry among them are counted as suppressed, and
+        every one as aborted, in this step's output for a RESET command and in the
+        next step's output for a call between steps. A reboot pending for a RESET
+        command's ACK is cancelled (a ``forced_reset`` reboots once, not twice).
+
         Args:
             now_us: Simulated time of the reboot, integer microseconds. Uptime counts
                 from here.
@@ -565,6 +801,7 @@ class FlightComputer:
         """
         self._advance_time(now_us)
         self._boot_count += 1
+        self._drop_outbound()
         self._clear_transient_state()
 
     def _clear_transient_state(self) -> None:
@@ -574,10 +811,11 @@ class FlightComputer:
         safe-mode persistence counters (#48), so a flag still set after a reboot must
         be sustained again from BOOT, the downlink sequence counter (#51), so the
         first frame after a reboot has sequence 0, the telemetry schedule (#55), so
-        the next frame is the boot-complete beacon, and the downlink session (#56), so
+        the next frame is the boot-complete beacon, the downlink session (#56), so
         a reboot during a pass aborts it and the next pass resumes from the payload's
-        oldest unreleased chunk. Later tickets add their own transient state here. The
-        boot counter is not transient.
+        oldest unreleased chunk, and the transmitter (#132): the frame in transmission,
+        the held frames, and a pending RESET reboot. Later tickets add their own
+        transient state here. The boot counter is not transient.
         """
         self._mode_state = INITIAL_STATE
         self._safety_state = INITIAL_SAFETY_STATE
@@ -585,6 +823,11 @@ class FlightComputer:
         self._boot_time_us = self._now_us
         self._downlink_sequence = 0
         self._downlink_session = None
+        self._transmitting = None
+        self._held_acks.clear()
+        self._held_telemetry = None
+        self._reset_ack = _ResetAck.NONE
+        self._pending_reboot = None
 
     def _advance_time(self, now_us: int) -> None:
         check_us("now_us", now_us)
@@ -617,9 +860,22 @@ class FlightComputer:
             now_us: Simulated time of this tick, integer microseconds
                 (``SimClock.now_us``). Never earlier than the last call.
 
+        Before the phases, the transmitter (#132, ADR-0008) decides the kind of tick
+        and, in a streaming tick, continues the frame in transmission
+        (:meth:`_continue_transmission`, the start of step c).
+
+        **While a RESET command's reboot is pending** (ADR-0008 §6a) the step runs the
+        shutting-down path instead: uplink is not decoded but counted in
+        ``uplink_ignored_count``, the transmitter finishes the frames ahead of and
+        behind the RESET ACK, no flag rule runs and no new frame is created. In the
+        step the RESET ACK's last byte goes out (or it is lost because the transmitter
+        is off), the kept mode events apply and the flight computer reboots, as the
+        update-mode phase does for a RESET in a whole-frame tick. Step f runs in every
+        step.
+
         Returns:
-            This tick's downlink frames, the controls for the next tick, and the
-            suppressed-frame count.
+            This tick's delivered downlink frames, the controls for the next tick, the
+            bytes transmitted, and the suppressed- and aborted-frame counts.
 
         Raises:
             TypeError: An argument has the wrong type.
@@ -634,17 +890,62 @@ class FlightComputer:
         self._advance_time(now_us)
 
         tick = TickContext(now_us=now_us, readings=readings, uplink_frames=frames)
-        self._decode_uplink(tick)
-        self._execute_commands(tick)
-        self._evaluate_flags(tick)
-        self._update_mode(tick)
-        self._emit_telemetry(tick)
-        controls = self._produce_controls()
+        if (
+            self._transmitting is not None
+            or self._held_acks
+            or self._held_telemetry is not None
+            or tick.outbound_remaining_bytes < self._max_frame_size
+        ):
+            self._continue_transmission(tick)  # else a whole-frame tick: nothing to do
+        if self._pending_reboot is None:
+            self._decode_uplink(tick)
+            self._execute_commands(tick)
+            self._evaluate_flags(tick)
+            self._update_mode(tick)
+            if self._pending_reboot is None:
+                self._emit_telemetry(tick)
+        else:
+            self._shut_down(tick)
+        controls = self._produce_controls(tick)
+        suppressed = tick.outbound_suppressed_count + self._carried_suppressed_count
+        aborted = tick.outbound_aborted_count + self._carried_aborted_count
+        self._carried_suppressed_count = self._carried_aborted_count = 0
         return FlightComputerOutput(
-            downlink_frames=tuple(tick.downlink_frames),
-            controls=controls,
-            outbound_suppressed_count=tick.outbound_suppressed_count,
+            tuple(tick.downlink_frames),
+            controls,
+            suppressed,
+            sent_bytes=tick.sent_bytes,
+            outbound_aborted_count=aborted,
+            transmitting=None if self._transmitting is None else self.transmitting,
+            reboot_pending=self._pending_reboot is not None,
+            uplink_ignored_count=tick.uplink_ignored_count,
         )
+
+    def _shut_down(self, tick: TickContext) -> None:
+        """A step while a RESET command's reboot is pending (ADR-0008 §6a).
+
+        Uplink is ignored and counted. The transmitter has already continued in
+        :meth:`_continue_transmission`; the held telemetry behind the RESET ACK may go
+        too. No flag rule runs, no mode event applies, and no telemetry or DATA is
+        created. If the RESET ACK has now been transmitted, or can never be (the
+        transmitter is off), the kept events apply and the flight computer reboots
+        here, in step d (:meth:`_reboot_now`).
+        """
+        tick.uplink_ignored_count = len(tick.uplink_frames)
+        self._pump(tick, OutboundClass.TELEMETRY)
+        if self._reset_ack is not _ResetAck.WAITING:
+            self._reboot_now(tick)
+
+    def _reboot_now(self, tick: TickContext) -> None:
+        """Apply a pending reboot's kept events (ADR-0008 §6a): the reboot in step d of
+        the tick the RESET ACK went out (or was lost), then the session follows the
+        mode and step e runs in BOOT, exactly as for a RESET in a whole-frame tick."""
+        pending = self._pending_reboot
+        assert pending is not None
+        self._pending_reboot = None
+        self._apply_mode_events(tick, pending.events, pending.safe_exit_allowed)
+        self._follow_mode_with_session(tick)
+        self._emit_telemetry(tick)
 
     # --- Phases, in PHASE_ORDER -------------------------------------------------------
 
@@ -706,12 +1007,23 @@ class FlightComputer:
         new mode's controls take effect in the next tick (ADR-0004 §2), so the physical
         effect follows one tick after the ACK. An automatic event later in the same
         tick (SAFE_CONDITION, FAULT_DETECTED) can still override an ACKed change; the
-        ACK reports the command, and telemetry the final mode. A RESET ACK goes out in
-        the tick of the reset, numbered in the downlink sequence from before the
-        reboot; commands after a RESET in the same tick are answered as in BOOT.
+        ACK reports the command, and telemetry the final mode. A RESET ACK goes out
+        before the reboot, numbered in the downlink sequence from before it; commands
+        after a RESET in the same tick are answered as in BOOT.
+
+        **Streaming ticks (ADR-0008 §5, §6a).** An ACK/NACK that cannot be committed
+        at once waits behind the frame in transmission (bounded), so "same tick" holds
+        in every whole-frame tick (always at the default 100 ms) and otherwise the ACK
+        goes out after at most one frame in transmission and the ACKs ahead of it. The
+        first RESET's ACK is committed right after the frame in transmission, ahead of
+        every waiting frame, and the reboot waits for it (:meth:`_update_mode`).
         """
+        if not tick.commands and not tick.streaming:
+            return  # nothing to answer, nothing held (a whole-frame tick)
         state = self._mode_state
         safe_exit_allowed: bool | None = None  # worked out for the first mode command
+        acks: list[bytes] = []
+        reset_index: int | None = None  # the first RESET's ACK, in acks
         for received in tick.commands:
             command = received.command
             reason: messages.NackReason | None
@@ -727,8 +1039,26 @@ class FlightComputer:
                 state = result.state
                 tick.mode_events.append(event)
                 reason = result.reason
+                if event.kind is EventKind.RESET and reset_index is None:
+                    reset_index = len(acks)
             ack = messages.CommandAck(received.sequence, command.command_id, reason)
-            self._queue_outbound(tick, FrameType.ACK, messages.encode_ack(ack), OutboundClass.ACK)
+            acks.append(messages.encode_ack(ack))
+
+        if tick.streaming and not tick.transmitter_off:
+            # ADR-0008 §6a: the RESET ACK goes right after the frame in transmission,
+            # ahead of the held ACK/NACK and of this tick's other ACK/NACK, which keep
+            # their order behind it. Otherwise held ACK/NACK go first (§4).
+            if reset_index is not None:
+                self._queue_outbound(
+                    tick, FrameType.ACK, acks[reset_index], OutboundClass.ACK, reset_ack=True
+                )
+            self._pump(tick, OutboundClass.ACK)
+        for index, payload in enumerate(acks):
+            if index == reset_index and tick.streaming and not tick.transmitter_off:
+                continue
+            self._queue_outbound(
+                tick, FrameType.ACK, payload, OutboundClass.ACK, reset_ack=index == reset_index
+            )
 
     def _evaluate_flags(self, tick: TickContext) -> None:
         """Phase 3 (ADR-0004 step d): turn readings flags and boot timing into events.
@@ -782,25 +1112,58 @@ class FlightComputer:
         later command events still go through the table (in BOOT: a NACK, or another
         RESET).
 
+        **RESET waits for its ACK (ADR-0008 §6a).** If the RESET command's ACK has
+        been transmitted in this tick (always, in a whole-frame tick where it fits) or
+        can never be (suppressed, or the transmitter is off), the RESET reboots here as
+        above. Otherwise, in a streaming tick, the reboot is **pending**: the ``RESET``
+        and every event after it are kept, in order, and applied in step d of the tick
+        its ACK's last byte goes out (see :meth:`step`). Events before it apply now.
+
         Then the downlink session follows the mode after all the events (#56): a session
         starts at the payload's oldest unreleased chunk when the mode is DOWNLINK and
         none is running, and ends when the mode is anything else (DOWNLINK_COMPLETE, or
         an abort: SET_MODE, ENTER_SAFE_MODE, SAFE_CONDITION, FAULT_DETECTED, RESET). A
-        session that leaves and re-enters DOWNLINK within one step keeps running.
+        session that leaves and re-enters DOWNLINK within one step keeps running. A DATA
+        frame still in transmission when its session ends is aborted; its chunk was
+        never released, so the next session sends it first (ADR-0008 §6).
         """
+        if tick.mode_events:
+            self._apply_mode_events(tick, tick.mode_events, tick.safe_exit_allowed)
+        self._follow_mode_with_session(tick)
+
+    def _apply_mode_events(
+        self, tick: TickContext, events: list[ModeEvent] | tuple[ModeEvent, ...], guard: bool
+    ) -> None:
+        """Apply mode events in order (step d), rebooting on RESET or, while the RESET
+        ACK is still waiting, keeping the RESET and the events after it for later."""
         rebooted = False
-        for event in tick.mode_events:
+        for index, event in enumerate(events):
             if rebooted and not event.kind.is_command:
                 tick.transitions.append(Transition(Outcome.IGNORED, self._mode_state))
                 continue
-            result = transition(self._mode_state, event, safe_exit_allowed=tick.safe_exit_allowed)
+            if (
+                event.kind is EventKind.RESET
+                and not rebooted
+                and self._reset_ack is _ResetAck.WAITING
+            ):
+                self._pending_reboot = _PendingReboot(tuple(events[index:]), guard)
+                return
+            result = transition(self._mode_state, event, safe_exit_allowed=guard)
             self._mode_state = result.state
             tick.transitions.append(result)
             if event.kind is EventKind.RESET:
                 self.reboot(now_us=tick.now_us)
                 rebooted = True
+
+    def _follow_mode_with_session(self, tick: TickContext) -> None:
+        """Start or end the downlink session to match the mode after step d (#56)."""
         if self._mode_state.mode is not Mode.DOWNLINK:
-            self._downlink_session = None
+            if self._downlink_session is not None:
+                self._downlink_session = None
+                tx = self._transmitting
+                if tx is not None and tx.outbound_class is OutboundClass.DATA:
+                    self._transmitting = None  # aborted with its session (ADR-0008 §6)
+                    tick.outbound_aborted_count += 1
         elif self._downlink_session is None:
             self._downlink_session = DownlinkSession.start(tick.readings.payload)
 
@@ -825,7 +1188,15 @@ class FlightComputer:
         than raising out of :meth:`step`.
 
         **DATA (#56)** then fills what capacity is left (:meth:`_emit_data`).
+
+        **Streaming ticks (ADR-0008 §5).** A telemetry frame held from an earlier tick
+        is offered first. A due frame that cannot be committed at once is held behind
+        the frame in transmission; if one is still held, the newer frame replaces it
+        and the older is counted as suppressed. The schedule is unchanged: a due frame
+        uses its slot either way.
         """
+        if tick.streaming:
+            self._pump(tick, OutboundClass.TELEMETRY)
         self._emit_telemetry_frame(tick)
         self._emit_data(tick)
 
@@ -863,16 +1234,27 @@ class FlightComputer:
         (:func:`~pocketsat.flight.downlink.unsent_chunk_ids`) becomes one DATA frame,
         its ID and its content (``chunk_content``, the payload's deterministic content
         function, #43), queued with ``OutboundClass.DATA`` through
-        :meth:`_queue_outbound`, after any ACK/NACK and telemetry. It stops at the first
-        chunk whose frame does not fit what is left of the capacity, so chunks are
-        never sent out of order; that chunk is not counted as suppressed and is sent in
-        a later tick. The session records the chunks sent, and step f releases them.
+        :meth:`_queue_outbound`, after any ACK/NACK and telemetry.
+
+        - **Whole-frame tick:** it stops at the first chunk whose frame does not fit
+          what is left of the capacity, so chunks are never sent out of order; that
+          chunk is not counted as suppressed and is sent in a later tick.
+        - **Streaming tick (ADR-0008 §2, §5):** one chunk at a time, committed only
+          while the transmitter is idle, nothing else waits, and bytes are left; a
+          frame that does not finish continues in the next tick. The inhibit stops
+          new DATA only: a DATA frame in transmission finishes.
+
+        The session records a chunk as sent when its frame **completes**, and step f
+        releases it.
         """
         session = self._downlink_session
         if session is None or transmit_inhibited(tick.readings):
             return
-        chunk_ids = unsent_chunk_ids(session, tick.readings.payload)
         chunk_size = self._config.downlink.chunk_size_bytes
+        if tick.streaming:
+            self._stream_data(tick, chunk_size)
+            return
+        chunk_ids = unsent_chunk_ids(session, tick.readings.payload)
         frame_size = MIN_FRAME_SIZE + messages.DATA_CHUNK_ID_SIZE + chunk_size
         last: int | None = None
         for chunk_id in chunk_ids:
@@ -887,7 +1269,32 @@ class FlightComputer:
         if last is not None:
             self._downlink_session = session.after_sending(chunk_ids.start, last)
 
-    def _produce_controls(self) -> SpacecraftControls:
+    def _stream_data(self, tick: TickContext, chunk_size: int) -> None:
+        """DATA in a streaming tick: commit the next chunk whenever the transmitter is
+        idle, nothing else waits and bytes are left (ADR-0008 §2, §5)."""
+        while (
+            tick.outbound_remaining_bytes > 0
+            and self._transmitting is None
+            and not self._held_acks
+            and self._held_telemetry is None
+        ):
+            session = self._downlink_session
+            assert session is not None
+            chunk_ids = unsent_chunk_ids(session, tick.readings.payload)
+            if not chunk_ids:
+                return
+            chunk_id = chunk_ids.start
+            chunk = messages.DataChunk(chunk_id, chunk_content(chunk_id, chunk_size))
+            if not self._queue_outbound(
+                tick,
+                FrameType.DATA,
+                messages.encode_data(chunk),
+                OutboundClass.DATA,
+                chunk_id=chunk_id,
+            ):
+                return
+
+    def _produce_controls(self, tick: TickContext | None = None) -> SpacecraftControls:
         """Phase 6 (ADR-0004 step f): the controls for the next tick.
 
         The single controls function of ADR-0004 §14: every ``SpacecraftControls`` the
@@ -895,12 +1302,21 @@ class FlightComputer:
         :meth:`reset`. It returns #47's ``controls_for_mode()`` for the mode after
         step d, with the downlink session's chunk release (#56,
         :func:`~pocketsat.flight.downlink.release_through_chunk_id`): in Phase 1 the
-        last chunk sent, so the payload releases every sent chunk in the next tick.
+        last chunk whose frame has been transmitted, so the payload releases every sent
+        chunk in the next tick.
+
+        **The completion-release corner (ADR-0008 §6).** A DATA frame carried in from
+        the previous tick can complete in this tick's step c, and the session can end
+        in the same tick's step d (``DOWNLINK_COMPLETE``, a command, a flag, or a
+        pending RESET's reboot). The chunk is then released anyway, so it never goes
+        down twice. This never happens in a whole-frame tick.
         """
-        return controls_for_mode(
-            self._mode_state.mode,
-            release_through_chunk_id=release_through_chunk_id(self._downlink_session),
-        )
+        session = self._downlink_session
+        if session is None and tick is not None and tick.completed_chunk_id is not None:
+            release: int | None = tick.completed_chunk_id
+        else:
+            release = release_through_chunk_id(session)
+        return controls_for_mode(self._mode_state.mode, release_through_chunk_id=release)
 
     # --- Outbound -----------------------------------------------------------------------
 
@@ -910,36 +1326,229 @@ class FlightComputer:
         frame_type: FrameType,
         payload: bytes,
         outbound_class: OutboundClass,
+        *,
+        reset_ack: bool = False,
+        chunk_id: int | None = None,
     ) -> bool:
-        """Send one downlink frame this tick if it fits the transmit capacity.
+        """Offer one downlink frame to the transmitter.
 
         The single way any phase sends a frame (ACK/NACK #51, telemetry #55, DATA #56).
-        The capacity and priority rule is :meth:`TickContext.reserve_outbound`. A frame
-        that fits gets the next downlink sequence number (one counter for every frame
-        type, wrapping from 0xFFFF to 0, ``docs/protocol.md``), is encoded, and is
-        appended to ``tick.downlink_frames``. A frame that does not fit is never
-        encoded and uses no sequence number, so a gap in the ground's sequence means a
-        frame lost on the way down, not one the spacecraft never sent.
+
+        **Whole-frame tick** (ADR-0008 §2): the capacity and priority rule is
+        :meth:`TickContext.reserve_outbound`. A frame that fits gets the next downlink
+        sequence number (one counter for every frame type, wrapping from 0xFFFF to 0,
+        ``docs/protocol.md``), is encoded, and is delivered at once (appended to
+        ``tick.downlink_frames``). A frame that does not fit is never encoded and uses
+        no sequence number, so a gap in the ground's sequence means a frame lost on
+        the way down, not one the spacecraft never sent.
+
+        **Streaming tick:** with the transmitter off, ACK/NACK and telemetry are
+        suppressed and counted, DATA is left. Otherwise a frame is **committed** (given
+        its sequence number and encoded, then transmitted for what is left of the
+        tick) if the transmitter is idle, bytes are left, and nothing of its class or
+        higher waits; else ACK/NACK and telemetry are **held** (ADR-0008 §5) and DATA is
+        left for later. An ACK/NACK beyond the held bound is suppressed and counted;
+        a telemetry frame replaces a held one, which is counted. The RESET ACK
+        (``reset_ack``) goes to the front of the held ACK/NACK (ADR-0008 §6a).
 
         Args:
             tick: This tick's working data.
             frame_type: The frame type.
             payload: The frame payload.
             outbound_class: Its priority class.
+            reset_ack: This is the ACK of the tick's first RESET command, which the
+                reboot waits for (ADR-0008 §6a).
+            chunk_id: For DATA from the downlink session, the chunk it carries: the
+                session records it as sent when the frame completes.
 
         Returns:
-            True if the frame was queued, False if it did not fit.
+            True if the frame was sent, committed, or held; False if it was suppressed
+            or, for DATA, left for later.
 
         Raises:
             RuntimeError: Frames were offered out of :class:`OutboundClass` order.
         """
-        if not tick.reserve_outbound(MIN_FRAME_SIZE + len(payload), outbound_class):
+        if not tick.streaming:
+            if not tick.reserve_outbound(MIN_FRAME_SIZE + len(payload), outbound_class):
+                if reset_ack:
+                    self._reset_ack = _ResetAck.LOST
+                return False
+            tick.downlink_frames.append(
+                encode_frame_fields(frame_type, self._downlink_sequence, payload)
+            )
+            self._downlink_sequence = (self._downlink_sequence + 1) & MAX_SEQUENCE
+            if reset_ack:
+                self._reset_ack = _ResetAck.DONE
+            if chunk_id is not None:
+                self._chunk_sent(tick, chunk_id)
+            return True
+
+        tick.check_order(outbound_class)
+        if tick.transmitter_off:
+            if outbound_class.counts_suppression:
+                tick.outbound_suppressed_count += 1
+            if reset_ack:
+                self._reset_ack = _ResetAck.LOST
             return False
-        tick.downlink_frames.append(
-            encode_frame_fields(frame_type, self._downlink_sequence, payload)
-        )
+        idle = self._transmitting is None and tick.outbound_remaining_bytes > 0
+        if outbound_class is OutboundClass.ACK:
+            held = self._held_acks
+            if reset_ack:
+                if idle or len(held) < self._max_held_acks:
+                    self._reset_ack = _ResetAck.WAITING
+                    held.appendleft(_HeldAck(payload, reset_ack=True))
+                    self._pump(tick, OutboundClass.ACK)
+                    return True
+                self._reset_ack = _ResetAck.LOST
+            elif idle and not held:
+                self._commit(tick, frame_type, payload, outbound_class)
+                return True
+            elif len(held) < self._max_held_acks:
+                held.append(_HeldAck(payload))
+                return True
+            tick.outbound_suppressed_count += 1
+            return False
+        if outbound_class is OutboundClass.TELEMETRY:
+            if self._held_telemetry is not None:  # replaced by the newer frame
+                self._held_telemetry = None
+                tick.outbound_suppressed_count += 1
+            if idle and not self._held_acks:
+                self._commit(tick, frame_type, payload, outbound_class)
+            else:
+                self._held_telemetry = payload
+            return True
+        if idle and not self._held_acks and self._held_telemetry is None:
+            self._commit(tick, frame_type, payload, outbound_class, chunk_id=chunk_id)
+            return True
+        return False
+
+    def _commit(
+        self,
+        tick: TickContext,
+        frame_type: FrameType,
+        payload: bytes,
+        outbound_class: OutboundClass,
+        *,
+        reset_ack: bool = False,
+        chunk_id: int | None = None,
+    ) -> None:
+        """Commit a frame (ADR-0008 §2, §3): give it the next downlink sequence number,
+        encode it, make it the frame in transmission, and transmit what the tick has
+        left for it. The transmitter must be idle with bytes left."""
+        frame = encode_frame_fields(frame_type, self._downlink_sequence, payload)
         self._downlink_sequence = (self._downlink_sequence + 1) & MAX_SEQUENCE
-        return True
+        self._transmitting = _InTransmission(
+            frame, outbound_class, chunk_id=chunk_id, reset_ack=reset_ack
+        )
+        self._transmit(tick)
+
+    def _transmit(self, tick: TickContext) -> None:
+        """Send what the tick has left of the frame in transmission; deliver it
+        (ADR-0008 §3) if its last byte went out."""
+        tx = self._transmitting
+        assert tx is not None
+        size = len(tx.frame)
+        count = min(size - tx.sent_bytes, tick.outbound_remaining_bytes)
+        tx.sent_bytes += count
+        tick.outbound_remaining_bytes -= count
+        tick.sent_bytes += count
+        if tx.sent_bytes < size:
+            return
+        self._transmitting = None
+        tick.downlink_frames.append(tx.frame)
+        if tx.reset_ack:
+            self._reset_ack = _ResetAck.DONE
+        if tx.chunk_id is not None:
+            self._chunk_sent(tick, tx.chunk_id)
+
+    def _chunk_sent(self, tick: TickContext, chunk_id: int) -> None:
+        """The session records a chunk as sent once its whole frame has been
+        transmitted (ADR-0008 §6); step f releases it."""
+        session = self._downlink_session
+        if session is not None:
+            self._downlink_session = session.after_sending(chunk_id, chunk_id)
+        tick.completed_chunk_id = chunk_id
+
+    def _pump(self, tick: TickContext, upto: OutboundClass) -> None:
+        """Stream the transmitter (ADR-0008 §2): continue the frame in transmission,
+        then commit waiting frames of class ``upto`` or higher in priority order (held
+        ACK/NACK oldest first, then the held telemetry frame), while bytes are left."""
+        while tick.outbound_remaining_bytes > 0:
+            if self._transmitting is not None:
+                self._transmit(tick)
+            elif self._held_acks:
+                held = self._held_acks.popleft()
+                self._commit(
+                    tick, FrameType.ACK, held.payload, OutboundClass.ACK, reset_ack=held.reset_ack
+                )
+            elif upto >= OutboundClass.TELEMETRY and self._held_telemetry is not None:
+                payload, self._held_telemetry = self._held_telemetry, None
+                self._commit(tick, FrameType.TELEMETRY, payload, OutboundClass.TELEMETRY)
+            else:
+                return
+
+    def _continue_transmission(self, tick: TickContext) -> None:
+        """The start of step c (ADR-0008 §2, §6): decide the kind of tick and stream.
+
+        - **Transmitter off** (capacity 0 and ``transmitter_on`` false): the frame in
+          transmission is aborted and every held frame dropped (counted), and the
+          tick's own ACK/NACK and telemetry will be suppressed. A pending RESET reboot
+          then happens in this tick, because its ACK can no longer go out.
+        - **Whole-frame tick** (capacity at least :attr:`max_frame_size`, nothing in
+          transmission, nothing held): nothing to do; today's rule applies.
+        - **Streaming tick:** the frame in transmission continues. Held ACK/NACK are
+          committed by the execute-commands phase, after a RESET command's ACK if the
+          tick has one (ADR-0008 §6a), so the RESET ACK follows this frame directly.
+
+        A transmitter that is on with a capacity of 0 (a tick shorter than one byte's
+        airtime) is a streaming tick in which nothing moves: frames wait.
+        """
+        comms = tick.readings.comms
+        capacity = comms.transmit_capacity_bytes
+        if capacity == 0 and not comms.transmitter_on:
+            tick.streaming = tick.transmitter_off = True
+            if self._transmitting is not None or self._held_acks or self._held_telemetry:
+                self._drop_outbound()
+            return
+        if (
+            capacity >= self._max_frame_size
+            and self._transmitting is None
+            and not self._held_acks
+            and self._held_telemetry is None
+        ):
+            return
+        tick.streaming = True
+        if self._transmitting is not None:
+            self._transmit(tick)
+
+    def _drop_outbound(self) -> None:
+        """Abort the frame in transmission and drop every held frame (ADR-0008 §6).
+
+        Each is counted as aborted, and ACK/NACK and telemetry also as suppressed; the
+        counts go into the output of the current step (or the next, for a reboot
+        between steps). A DATA frame's chunk was never released, so it stays buffered.
+        A RESET ACK among them is lost, so a pending reboot happens at once.
+        """
+        aborted = suppressed = 0
+        tx = self._transmitting
+        if tx is not None:
+            aborted += 1
+            suppressed += tx.outbound_class.counts_suppression
+            if tx.reset_ack:
+                self._reset_ack = _ResetAck.LOST
+            self._transmitting = None
+        for held in self._held_acks:
+            aborted += 1
+            suppressed += 1
+            if held.reset_ack:
+                self._reset_ack = _ResetAck.LOST
+        self._held_acks.clear()
+        if self._held_telemetry is not None:
+            aborted += 1
+            suppressed += 1
+            self._held_telemetry = None
+        self._carried_aborted_count += aborted
+        self._carried_suppressed_count += suppressed
 
 
 def _mode_event(command: "messages.ParsedCommand") -> ModeEvent:

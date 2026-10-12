@@ -158,7 +158,11 @@ class ProfileFlightComputer(FlightComputer):
             room = readings.comms.transmit_capacity_bytes - output.sent_bytes
             if room >= MIN_FRAME_SIZE:
                 filler = encode_frame(Frame(FrameType.DATA, 0, bytes(room - MIN_FRAME_SIZE)))
-                output = replace(output, downlink_frames=(*output.downlink_frames, filler))
+                output = replace(
+                    output,
+                    downlink_frames=(*output.downlink_frames, filler),
+                    sent_bytes=output.sent_bytes + len(filler),  # transmitted (ADR-0008 §3)
+                )
         return output
 
 

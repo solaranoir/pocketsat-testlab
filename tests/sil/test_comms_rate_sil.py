@@ -47,7 +47,9 @@ def comms(tick: SilTick) -> CommsTruth:
 
 
 def sent(tick: SilTick) -> int:
-    return sum(len(frame) for frame in tick.downlink_frames)
+    """The bytes transmitted in the tick (ADR-0008 §3): in a whole-frame tick the
+    frames delivered, in a streaming tick parts of frames delivered in other ticks."""
+    return tick.traffic.sent_bytes
 
 
 def run_pass(tick_us: int, rate: int, seed: int = 5) -> tuple[list[SilTick], list[Mode], list[int]]:
@@ -106,6 +108,7 @@ UNEVEN = [
     pytest.param(30_000, 4_321, id="30ms-129.63B"),
     pytest.param(300_000, 1_234, id="300ms-370.2B"),
     pytest.param(1_000_000, 1_200, id="1s-default-rate"),
+    pytest.param(30_000, 1_234, id="30ms-37.02B-streaming"),  # frames span ticks (#132)
 ]
 
 
@@ -158,13 +161,14 @@ def test_same_seed_same_downlink_at_an_uneven_tick(tick_us: int, rate: int) -> N
 def test_the_rate_not_the_tick_sets_how_long_a_pass_takes() -> None:
     # 60 chunks in 78-byte DATA frames are 4680 bytes: at 1200 bytes/s no pass can be
     # shorter than 3.9 s, at any tick length, and none is much longer (before #122 a
-    # 1 s tick allowed 120 bytes per second, about 40 s). Frames are not yet split across
-    # ticks, so the unused end of each tick makes the pass somewhat slower than the
-    # rate; below 65 ms the default rate gives fewer than 78 bytes per tick and a DATA
-    # frame never fits (#132).
+    # 1 s tick allowed 120 bytes per second, about 40 s). In a whole-frame tick (at
+    # least 78 bytes, ADR-0008 §2) frames are sent whole, so the unused end of each
+    # tick makes the pass somewhat slower than the rate; below 65 ms the default rate
+    # gives fewer than 78 bytes per tick and frames span ticks (#132), so the pass runs
+    # at the rate itself.
     rate = NOMINAL_CONFIG.comms.transmit_rate_bytes_per_s
     shortest_us = CHUNKS * 78 * US_PER_S // rate
-    for tick_us in (70_000, 100_000, 1_000_000):
+    for tick_us in (30_000, 50_000, 70_000, 100_000, 1_000_000):
         ticks, modes, received = run_pass(tick_us, rate)
         assert received == list(range(CHUNKS))
         downlink_ticks = sum(m is Mode.DOWNLINK for m in modes)

@@ -14,6 +14,7 @@ tick's worth (story #42's deferred criterion).
 import dataclasses
 import random
 from collections.abc import Sequence
+from typing import Any
 
 import pytest
 
@@ -368,9 +369,11 @@ def test_session_rejects_wrong_types(kwargs: dict[str, object]) -> None:
 
 @pytest.mark.parametrize(
     ("capacity", "per_tick"),
-    [(0, 0), (FRAME - 1, 0), (FRAME, 1), (2 * FRAME - 1, 1), (2 * FRAME, 2), (500, 6)],
+    [(0, 0), (FRAME, 1), (FRAME + 1, 1), (2 * FRAME - 1, 1), (2 * FRAME, 2), (500, 6)],
 )
 def test_data_fills_the_capacity_with_whole_frames(capacity: int, per_tick: int) -> None:
+    # Whole-frame ticks (ADR-0008 §2). Below one frame (77 bytes) a tick streams and a
+    # frame spans ticks instead (test_outbound_spanning.py); 0 is the transmitter off.
     config = FlightComputerConfig(
         boot=BootConfig(duration_us=TICK_US),
         telemetry=dataclasses.replace(FAST_BOOT.telemetry, downlink_period_us=10**12),
@@ -392,12 +395,20 @@ def test_data_stops_at_the_first_chunk_that_does_not_fit(monkeypatch: pytest.Mon
     offered: list[OutboundClass] = []
     original = rig.fc._queue_outbound
 
-    def spy(tick: TickContext, frame_type: FrameType, payload: bytes, cls: OutboundClass) -> bool:
+    def spy(
+        tick: TickContext,
+        frame_type: FrameType,
+        payload: bytes,
+        cls: OutboundClass,
+        **kwargs: Any,
+    ) -> bool:
         offered.append(cls)
-        return original(tick, frame_type, payload, cls)
+        return original(tick, frame_type, payload, cls, **kwargs)
 
     monkeypatch.setattr(rig.fc, "_queue_outbound", spy)
-    for capacity in (0, 77, 78, 155, 156, 240):
+    # Whole-frame ticks (at least 78 bytes, ADR-0008 §2) and the transmitter off; a
+    # streaming tick commits one chunk at a time instead (test_outbound_spanning.py).
+    for capacity in (0, 78, 155, 156, 240):
         offered.clear()
         sent = rig.step(capacity=capacity)
         assert offered.count(OutboundClass.DATA) == len(sent) == capacity // FRAME
@@ -416,32 +427,38 @@ def test_a_smaller_chunk_size_packs_more_frames() -> None:
 # --- Priority: ACK/NACK, then telemetry, then DATA ------------------------------------------
 
 
+ACKS = 6 * ACK_FRAME_SIZE
+"""Six ACK frames, 84 bytes: enough that every boundary below is a whole-frame tick."""
+
+
 @pytest.mark.parametrize(
     ("capacity", "acks", "telemetry", "data"),
     [
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE + 2 * FRAME, 2, True, 2),
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE + FRAME, 2, True, 1),
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE + FRAME - 1, 2, True, 0),
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE, 2, True, 0),
-        (2 * ACK_FRAME_SIZE + TELEMETRY_FRAME_SIZE - 1, 2, False, 0),
-        (ACK_FRAME_SIZE, 1, False, 0),
+        (ACKS + TELEMETRY_FRAME_SIZE + 2 * FRAME, 6, True, 2),
+        (ACKS + TELEMETRY_FRAME_SIZE + FRAME, 6, True, 1),
+        (ACKS + TELEMETRY_FRAME_SIZE + FRAME - 1, 6, True, 0),
+        (ACKS + TELEMETRY_FRAME_SIZE, 6, True, 0),
+        (ACKS + TELEMETRY_FRAME_SIZE - 1, 6, False, 0),
+        (FRAME, 5, False, 0),
         (0, 0, False, 0),
     ],
 )
 def test_acks_and_telemetry_go_ahead_of_data(
     capacity: int, acks: int, telemetry: bool, data: int
 ) -> None:
-    # A tick with two PINGs and a telemetry frame due, in a pass with plenty to send.
+    # A tick with six PINGs and a telemetry frame due, in a pass with plenty to send.
+    # Whole-frame ticks (at least 78 bytes, ADR-0008 §2) and the transmitter off; a
+    # streaming tick holds the ACKs and telemetry instead (test_outbound_spanning.py).
     rig = Rig(chunks=50)
     rig.step(Command.begin_downlink())
     rig.run(9)  # the next telemetry frame is due 10 steps after the entry step
-    sent = rig.step(Command.ping(), Command.ping(), capacity=capacity)
+    sent = rig.step(*[Command.ping()] * 6, capacity=capacity)
     kinds = [decode_frame(f).frame_type for f in rig.frames[-1]]
     expected = [FrameType.ACK] * acks + [FrameType.TELEMETRY] * telemetry
     assert kinds == expected + [FrameType.DATA] * data
     assert len(sent) == data
     # ACK/NACK and telemetry that don't fit are counted; DATA that doesn't fit is not.
-    assert rig.outputs[-1].outbound_suppressed_count == (2 - acks) + (not telemetry)
+    assert rig.outputs[-1].outbound_suppressed_count == (6 - acks) + (not telemetry)
     sequences = [decode_frame(f).sequence for f in rig.frames[-1]]
     assert sequences == sorted(sequences)  # one downlink counter for every frame type
 

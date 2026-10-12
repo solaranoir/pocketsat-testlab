@@ -1,6 +1,6 @@
 # ADR-0007: Radio traffic input to comms
 
-- **Status:** Accepted (implemented by #98; amended by #122, see below)
+- **Status:** Accepted (implemented by #98; amended by #122 and ADR-0008, see below)
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0004 (§1 the controls record, §2 step a and the latency table, §10 transmit power). Related: ADR-0002 (`TestTarget`, HIL), ADR-0003 (determinism), ADR-0006 (portable arithmetic). Issue: #104. Implemented by #98.
 
@@ -48,6 +48,8 @@ All three are per-tick, non-negative `int`s (validated like the other control re
 - **What does not change:** the `Subsystem` protocol, `SubsystemStack.step`, the `SnapshotBoard`, `STEP_ORDER`, and `TestTarget`. Subsystem and story-level tests that use default controls see zero traffic, exactly as today.
 
 Why this fits steps a to f: step a is already the single place where `SilTarget` puts things into the controls that the flight computer did not decide (fault overrides), and it is the first point after step e at which data can reach comms through an existing channel. `SilTarget` holds the tick N traffic between step e of tick N and step a of tick N+1, next to the tick N controls it already holds for the same hand-over. Because controls are recorded each tick alongside `SpacecraftState` (ADR-0004 §14), the traffic is recorded and replayable with no extra mechanism.
+
+**Amendment (ADR-0008, #132).** `sent_bytes` is the wire bytes **transmitted** in the tick, which the flight computer reports as `FlightComputerOutput.sent_bytes`. These include parts of frames delivered in other ticks, so it is no longer the total length of the frames `receive()` returns for that tick. The N+1 (comms) and N+2 (power) delays count from the tick each byte was transmitted. `outbound_suppressed_count` counts ACK/NACK and telemetry frames that were due but never delivered: no room, the held-frame bound, or aborted mid-transmission.
 
 ### 2. Timing: comms reports tick N's traffic in tick N+1; power sees the energy in tick N+2
 
@@ -104,7 +106,7 @@ Over a pass, the per-byte energy is conserved and only shifted in time: the per-
 
 ### 4. Capacity enforcement and violation
 
-- **The flight computer guarantees the limits.** It reads `CommsReadings.transmit_capacity_bytes` for tick N after step b and sends at most that many bytes in tick N, in priority order. A capacity of 0 (radio `OFF`, `RX_ONLY`, or `transmitter_off`) means it sends nothing. `SilTarget` does not re-arbitrate, trim, or drop outbound frames.
+- **The flight computer guarantees the limits.** It reads `CommsReadings.transmit_capacity_bytes` for tick N after step b and sends at most that many bytes in tick N, in priority order. A capacity of 0 (radio `OFF`, `RX_ONLY`, or `transmitter_off`) means it sends nothing. `SilTarget` does not re-arbitrate, trim, or drop outbound frames. A frame may span ticks (ADR-0008); the flight computer still transmits at most the tick's capacity in each tick.
 - **Comms enforces them**, as the owner of the rule, when it applies the record in tick N+1. It checks the record against its **own previous tick's** state (its tick N mode, which it remembers; this is its own history, not a read): it calls `transmit_draw_w(config, previous_transmitter_on, radio_traffic.sent_bytes)`, which already raises `ValueError` for bytes above the capacity or any bytes while the transmitter was off. It also rejects a non-zero `uplink_lost_count` when its receiver was on in the previous tick.
 - **Amendment (#122).** The capacity is no longer a config constant: comms derives each tick's `transmit_capacity_bytes` from `CommsConfig.transmit_rate_bytes_per_s` and the tick length, with an integer carry, so it can differ by a byte from tick to tick. Comms therefore also remembers its previous tick's capacity and length and calls `transmit_draw_w(config, previous_transmitter_on, sent_bytes, capacity_bytes=previous_capacity, dt_us=previous_dt_us)`. The rule is unchanged: bytes are bounded by the capacity of the tick they were sent in. The per-byte draw is scaled by `PER_BYTE_DRAW_TICK_US / dt_us` (100 ms over that tick's length) so a byte costs the same energy at any tick length. At the default 100 ms tick both are exactly as before (capacity 120 every tick, factor 1).
 - **On violation** the `ValueError` propagates out of `SilTarget.advance()` for tick N+1. A violation is a simulator bug (the flight computer or `SilTarget` broke the contract), never a scenario outcome, so it fails the run loudly. Nothing is clipped: clipping would silently hide transmit energy.
