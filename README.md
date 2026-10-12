@@ -20,6 +20,51 @@ Fault injection today: the SIL target implements target-level fault injection
 (`forced_reset`, `sensor_freeze`, `transmitter_off`, and `battery_drain`, #60); RF fault
 injection (Phase 4) and HIL faults (Phase 7) are pending.
 
+## Status
+
+**Phase 0 (architecture and skeleton) and Phase 1 (virtual spacecraft) are complete**;
+Phase 2 (ground station) is next. See [`docs/roadmap.md`](docs/roadmap.md) for every
+phase.
+
+Phase 1's milestone, "run a nominal scenario and receive deterministic spacecraft
+telemetry", was verified in #65. It delivers:
+
+- **The SIL spacecraft**: power, thermal, attitude, payload, and comms subsystem models
+  on a shared snapshot board, with calibrated defaults
+  ([`docs/spacecraft.md`](docs/spacecraft.md)).
+- **The flight computer**: six modes (BOOT, NOMINAL, SCIENCE, DOWNLINK, SAFE, FAULT),
+  automatic SAFE and FAULT entry, boot and RESET, and the controls each mode gives the
+  subsystems ([`docs/spacecraft-modes.md`](docs/spacecraft-modes.md)).
+- **Commands and telemetry on the wire**: `PING`, `SET_MODE`, `BEGIN_DOWNLINK`,
+  `ENTER_SAFE_MODE`, and `RESET` with an ACK or NACK for each; a 26-byte telemetry
+  payload at a per-mode cadence; and DATA frames that downlink the stored payload data in
+  DOWNLINK passes, within the radio's transmit rate ([`docs/protocol.md`](docs/protocol.md),
+  ADR-0009). Shared test vectors in `tests/vectors/` are the contract for the Phase 7
+  firmware.
+- **`SilTarget`** behind the `TestTarget` interface, with target faults, passing the
+  contract suite (`tests/contract/`) and the determinism tests
+  (`tests/sil/test_sil_determinism.py`).
+- **The nominal scenario and golden telemetry**: one orbit of SCIENCE with a 10-minute
+  DOWNLINK pass, checked end to end through `TestTarget`
+  (`tests/sil/test_phase1_nominal_spacecraft.py`), and every downlink frame of it kept
+  byte for byte in `tests/golden/`, identical on Linux and macOS (ADR-0006).
+- **Budgets**: the power, thermal, and data budget
+  ([`docs/power-thermal-budget.md`](docs/power-thermal-budget.md)) and the simulation
+  performance budget (100 µs per tick averaged over an orbit, 150 µs worst case, on CI
+  Linux; [`docs/spacecraft.md`](docs/spacecraft.md#performance-budget-78)).
+
+Run the nominal scenario and the golden telemetry check:
+
+```sh
+uv run pytest -m slow tests/sil/test_phase1_nominal_spacecraft.py -s   # one orbit, a few seconds
+uv run python tests/sil/_golden.py --check                             # replay the golden captures
+```
+
+The scenario is a Python test harness for now (`tests/sil/_nominal_scenario.py`); YAML
+scenarios and the orchestrator arrive with the scenario DSL in Phase 5. Regenerating a
+golden capture is deliberate and reviewed: see
+[`tests/golden/README.md`](tests/golden/README.md).
+
 ## Architecture
 
 ```mermaid

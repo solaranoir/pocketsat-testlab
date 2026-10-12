@@ -1,8 +1,87 @@
 # PocketSat Test Lab — Spacecraft model
 
-Status: Phase 1. Describes the subsystem snapshot contracts (#76). The full spacecraft model description is to be extended by #65.
+Status: Phase 1 complete (#65). Describes the SIL spacecraft model: its subsystems, modes, and telemetry, the subsystem snapshot contracts (#76), each subsystem's model, and the performance budget.
 
-The SIL spacecraft is five subsystems (power, thermal, attitude, payload, comms) stepped in `STEP_ORDER`, plus a flight computer that runs after them (ADR-0004, [architecture §4.1](architecture.md#41-spacecraft-subsystems-sil)). This page defines what each subsystem exposes to the others and to the flight computer.
+The SIL spacecraft is five subsystems (power, thermal, attitude, payload, comms) stepped in `STEP_ORDER`, plus a flight computer that runs after them (ADR-0004, [architecture §4.1](architecture.md#41-spacecraft-subsystems-sil)). This page gives an overview, then defines what each subsystem exposes to the others and to the flight computer, and how each one is modelled.
+
+## Overview
+
+| Component | What it models | Code | Details |
+|---|---|---|---|
+| Power (#35, #36) | Battery state of charge, solar generation scaled by pointing and zero in eclipse, the summed loads, bus voltage and battery current; noisy readings with an SOC estimate and the `low_battery` and `critical_battery` flags (hysteresis) | `pocketsat.spacecraft.Power` | [Power](#power-35-36) |
+| Thermal (#38, #39) | A two-node lumped model (battery and electronics) heated by the power dissipated and cooled to the ambient temperature, a hardwired battery survival heater (ADR-0004 §12); noisy readings and the `over_temp` and `under_temp` flags | `pocketsat.spacecraft.Thermal` | [Thermal](#thermal-38-39) |
+| Attitude (#41) | Scalar pointing error and angular rate with a seeded disturbance, attitude control on or off, and the state `TUMBLING`, `DETUMBLING` or `STABILIZED` | `pocketsat.spacecraft.Attitude` | [Attitude](#attitude-41) |
+| Payload (#43) | Acquisition while enabled and not inhibited (power and thermal flags, attitude not `STABILIZED`), and a store of fixed-size chunks released by ID once downlinked | `pocketsat.spacecraft.Payload` | [Payload chunk store](#snapshot-contracts) |
+| Comms (#44, #98, #122) | The full-duplex radio (`OFF`, `RX_ONLY`, `RX_TX`), each tick's transmit capacity from a fixed data rate (1200 bytes/s), and the transmit draw per byte actually sent; holds no data | `pocketsat.spacecraft.Comms` | [Communications](#communications-44) |
+| Flight computer (#101 and epic #45) | The six modes and their controls, command handling with ACK/NACK, automatic SAFE and FAULT entry, BOOT and RESET, periodic telemetry, and the DOWNLINK session that sends stored chunks as DATA frames | `pocketsat.flight.FlightComputer` | [Modes](#modes), [Telemetry](#telemetry), [spacecraft-modes.md](spacecraft-modes.md), [protocol.md](protocol.md) |
+| `SilTarget` (#59 to #61) | The five subsystems on one `SnapshotBoard` plus the flight computer, behind the `TestTarget` interface: frames in and out, the environment each tick, and target faults merged into the controls | `pocketsat.targets.sil.SilTarget` | [architecture §4.1](architecture.md#the-sil-target-59) |
+
+Each tick the subsystems step in `STEP_ORDER` under the controls the flight computer produced in the previous tick (merged with any active fault), then the flight computer reads their readings records, handles the commands received, updates the mode, sends ACK/NACK, telemetry and DATA frames, and produces the next tick's controls (ADR-0004 §2, steps a to f). The environment (`NominalEnvironment`: sunlight and eclipse, ambient temperature) reaches the subsystems through `TestTarget.apply_environment()`. Settings and starting state are `SpacecraftConfig` and `SpacecraftInitialState` (ADR-0005): `NOMINAL_CONFIG` is the calibrated default and `STRESSED_CONFIG` the stressed set.
+
+**Budgets.** The `NOMINAL_CONFIG` defaults are calibrated by the power, thermal, and data budget, [docs/power-thermal-budget.md](power-thermal-budget.md) (#72, re-checked with real radio traffic in #98): its operating profiles, margins, the profiles that must fail, and what is optimistic. The simulation speed budget is [Performance budget (#78)](#performance-budget-78) below.
+
+## Modes
+
+The flight computer's mode state machine (#47). The transition table, reason codes, controls per mode, safe and fault entry rules, boot and RESET, telemetry cadence and the downlink session are specified in [docs/spacecraft-modes.md](spacecraft-modes.md), which is the canonical record; its tables are checked against the code by `tests/unit/test_modes.py`.
+
+The diagram below is a copy of the one in [docs/spacecraft-modes.md](spacecraft-modes.md#transition-table). To keep it in step, edit it there and copy it here unchanged: `tests/unit/test_spacecraft_doc.py` fails if the two differ, and checks that the diagram's arrows are exactly the transitions in the code.
+
+<!-- mode-diagram:start -->
+```mermaid
+stateDiagram-v2
+    [*] --> BOOT: power-on
+    BOOT --> NOMINAL: BOOT_COMPLETE
+    NOMINAL --> SCIENCE: SET_MODE SCIENCE
+    SCIENCE --> NOMINAL: SET_MODE NOMINAL
+    NOMINAL --> DOWNLINK: BEGIN_DOWNLINK
+    SCIENCE --> DOWNLINK: BEGIN_DOWNLINK
+    DOWNLINK --> NOMINAL: DOWNLINK_COMPLETE (entered from NOMINAL) / SET_MODE NOMINAL
+    DOWNLINK --> SCIENCE: DOWNLINK_COMPLETE (entered from SCIENCE) / SET_MODE SCIENCE
+    BOOT --> SAFE: SAFE_CONDITION
+    NOMINAL --> SAFE: ENTER_SAFE_MODE / SAFE_CONDITION
+    SCIENCE --> SAFE: ENTER_SAFE_MODE / SAFE_CONDITION
+    DOWNLINK --> SAFE: ENTER_SAFE_MODE / SAFE_CONDITION
+    SAFE --> NOMINAL: SET_MODE NOMINAL [flags cleared]
+    BOOT --> FAULT: FAULT_DETECTED
+    NOMINAL --> FAULT: FAULT_DETECTED
+    SCIENCE --> FAULT: FAULT_DETECTED
+    DOWNLINK --> FAULT: FAULT_DETECTED
+    SAFE --> FAULT: FAULT_DETECTED
+    FAULT --> BOOT: RESET
+    note right of BOOT
+        RESET from any mode enters BOOT
+        (from BOOT, the boot restarts)
+    end note
+```
+<!-- mode-diagram:end -->
+
+In short: the spacecraft boots for 5 s, then enters NOMINAL; the ground commands SCIENCE (payload acquiring) and BEGIN_DOWNLINK for a pass, which returns to the mode it was entered from once every stored chunk has been sent. `critical_battery`, `over_temp` or `under_temp` sustained for 10 ticks (1 s at 100 ms) enters SAFE (#48), which only a SET_MODE NOMINAL command leaves, once the flags have cleared; an internal consistency failure in the readings enters FAULT, which only RESET leaves.
+
+## Telemetry
+
+The flight computer sends one TELEMETRY frame per period of the mode (1 s in NOMINAL, SCIENCE and DOWNLINK, 0.5 s in SAFE and FAULT, none in BOOT except the boot-complete beacon), plus one at every mode change ([Telemetry cadence](spacecraft-modes.md#telemetry-cadence), #55). The payload is a fixed 26 bytes of big-endian integers in fixed units (#54), so a frame is 36 bytes. Every sensor field is a reported value from a readings record, never a truth record (ADR-0004 §7).
+
+The canonical field table, with offsets, types, scale factors, ranges and saturation, is [Telemetry payload](protocol.md#telemetry-payload) in `docs/protocol.md`; with the shared vectors in `tests/vectors/telemetry.json` it is the contract the Phase 7 firmware must match. In summary, in wire order (`tests/unit/test_spacecraft_doc.py` checks the field names and order against `pocketsat.messages.TELEMETRY_FIELDS`):
+
+<!-- telemetry-fields:start -->
+| Field | Source | Unit |
+|---|---|---|
+| `uptime_ms` | flight computer: time since power-on or the last reboot (#49) | ms |
+| `boot_count` | flight computer: reboots (RESET, `forced_reset`) since power-on (#49) | count |
+| `flags` | `low_battery`, `critical_battery`, `over_temp`, `under_temp` from the power and thermal readings | bit field |
+| `mode` | flight computer: the mode after this tick's commands and rules (#47) | `Mode` value |
+| `radio_mode` | comms readings | `RadioMode` value |
+| `attitude_state` | attitude readings | `AttitudeState` value |
+| `payload_state` | payload readings | `PayloadState` value |
+| `bus_mv` | power readings: bus voltage | mV |
+| `soc_permille` | power readings: SOC estimate | 0.1 % |
+| `battery_centi_c` | thermal readings: battery temperature | 0.01 °C |
+| `electronics_centi_c` | thermal readings: electronics temperature | 0.01 °C |
+| `buffered_bytes` | payload readings: bytes stored | bytes |
+| `pointing_error_centi_deg` | attitude readings: pointing error | 0.01° |
+<!-- telemetry-fields:end -->
+
+Commands, ACK/NACK, and DATA frames are specified in [docs/protocol.md](protocol.md), and the wire contract they form is recorded in [ADR-0009](adr/0009-phase-1-wire-protocol-payloads.md).
 
 ## Snapshot contracts
 

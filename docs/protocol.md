@@ -1,8 +1,12 @@
 # PocketSat Wire Protocol
 
-Status: Phase 1. Implements ADR-0002. The [telemetry payload](#telemetry-payload) (#54),
-the [command and ACK payloads](#commands) with their NACK reason codes (#52), and the
-[DATA payload](#data-payload) (#56) are defined; the maximum payload size is **TBD**.
+Status: Phase 1 complete, protocol version 1. Implements ADR-0002; the decisions behind the
+payloads and the rules for changing them are recorded in
+[ADR-0009](adr/0009-phase-1-wire-protocol-payloads.md). The
+[telemetry payload](#telemetry-payload) (#54), the [command and ACK payloads](#commands)
+with their NACK reason codes (#52), and the [DATA payload](#data-payload) (#56) are
+defined; the maximum payload size and stream resynchronization are **TBD** (#123,
+Phase 7a).
 
 Python implementation: `pocketsat.frame` (frames) and `pocketsat.messages` (telemetry,
 command, ACK, and DATA payloads). Shared test vectors: `tests/vectors/frames.json`,

@@ -87,6 +87,7 @@ The rules are checked in a fixed order, so a rejected command gets the first rea
 6. SET_MODE to anything but NOMINAL or SCIENCE is rejected with `TARGET_NOT_COMMANDABLE`.
 7. The per-mode rules for NOMINAL, SCIENCE, DOWNLINK, and SAFE in the table.
 
+<!-- mode-diagram:start -->
 ```mermaid
 stateDiagram-v2
     [*] --> BOOT: power-on
@@ -113,6 +114,9 @@ stateDiagram-v2
         (from BOOT, the boot restarts)
     end note
 ```
+<!-- mode-diagram:end -->
+
+The diagram is copied unchanged into [docs/spacecraft.md](spacecraft.md#modes). `tests/unit/test_spacecraft_doc.py` fails if the copies differ or if an arrow does not match a transition in the code, so change both copies together.
 
 ## Reason codes
 
