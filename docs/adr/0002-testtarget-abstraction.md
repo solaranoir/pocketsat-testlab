@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Phase:** 0
 - **Amends:** `docs/architecture.md` sections 5 and 6
-- **Amended by:** ADR-0003 (`advance(dt: float)` becomes `advance(dt_us: int)`); ADR-0009, Proposed (frame type `0x04` DATA and the Phase 1 payloads, §2)
+- **Amended by:** ADR-0003 (`advance(dt: float)` becomes `advance(dt_us: int)`); ADR-0009 (frame type `0x04` DATA and the Phase 1 payloads, §2)
 
 ## Context
 

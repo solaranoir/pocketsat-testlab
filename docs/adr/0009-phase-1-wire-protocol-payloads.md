@@ -1,6 +1,6 @@
 # ADR-0009: Phase 1 wire protocol payloads (protocol version 1)
 
-- **Status:** Proposed
+- **Status:** Accepted (reviewed in the #65 milestone check, 2026-10-12)
 - **Phase:** 1
 - **Amends / Supersedes:** Amends ADR-0002 §2 (adds frame type `0x04` DATA to the frame-type list, and records the field-level payloads ADR-0002 left to `docs/protocol.md`). Related: ADR-0004 (§7 readings only on the wire, §10 outbound priority, §13 downlink data ownership), ADR-0006 (portable arithmetic), ADR-0007 and ADR-0008 (outbound capacity, sequence numbering). Issues: #52, #54, #56 (PRs #109, #106, #119), with the mode values and reason codes of #47 (PR #107). Recorded by #65.
 
