@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Phase 1 (in progress), reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), and ADR-0004 to ADR-0008 (the Phase 1 spacecraft model). Decisions marked **(ADR-000N)** are recorded in the named ADR.
+Status: Phase 1 complete (#65), reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), ADR-0004 to ADR-0008 (the Phase 1 spacecraft model), and ADR-0009 (the Phase 1 wire payloads, Proposed). Decisions marked **(ADR-000N)** are recorded in the named ADR.
 
 ## 1. Purpose
 
@@ -369,6 +369,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | How target-side faults are delivered | Decided in ADR-0002: `inject()` with declared capabilities; HIL uses a test-control channel and a reset line |
 | Tick size and scheduling model for the run loop | Decided in ADR-0003: fixed 100 ms default tick, integer microsecond time, fixed ten-step order |
 | Run ID and seed record format | Decided in ADR-0003: `run.json` with named, derived seed streams |
+| Field-level payloads on the wire (commands, ACK/NACK, telemetry, DATA) | Recorded in ADR-0009 (Proposed, #65): protocol version 1 as implemented in Phase 1; details in [protocol.md](protocol.md) |
 
 ## 13. Out of scope for v1
 

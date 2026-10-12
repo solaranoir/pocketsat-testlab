@@ -1,7 +1,7 @@
 # PocketSat Test Lab — Roadmap
 
-Status: Phase 0 complete; Phase 1 in progress. Adapted from the original project roadmap,
-updated for the decisions recorded since (ADR-0002 to ADR-0008). Work is tracked per phase as GitHub
+Status: Phases 0 and 1 complete; Phase 2 is next. Adapted from the original project roadmap,
+updated for the decisions recorded since (ADR-0002 to ADR-0009). Work is tracked per phase as GitHub
 milestones and on the "PocketSat Test Lab" project board.
 
 ## Goal
@@ -20,7 +20,7 @@ hardware (HIL). See `docs/architecture.md`.
 | Phase | Name | Estimate | Status |
 |---|---|---|---|
 | 0 | Architecture & Skeleton | 1 weekend | **Done** |
-| 1 | Virtual Spacecraft | 1–2 weeks | In progress |
+| 1 | Virtual Spacecraft | 1–2 weeks | **Done** |
 | 2 | Ground Station | ~1 week | Not started |
 | 3 | Simulated RF Channel | 1–2 weeks | Not started |
 | 4 | RF Fault Injection | ~1 week | Not started |
@@ -57,7 +57,7 @@ Delivered:
 Phase 0 grew beyond its original weekend estimate: the determinism foundations
 (ADR-0003) were pulled forward from later phases so every subsystem is built on them.
 
-### Phase 1 — Virtual Spacecraft
+### Phase 1 — Virtual Spacecraft (done)
 
 Create a Python spacecraft simulator with Power, Thermal, Attitude, Payload,
 Communications, and Flight Computer subsystems. Model BOOT, NOMINAL, SCIENCE, DOWNLINK,
@@ -69,8 +69,15 @@ SAFE, and FAULT modes. Generate timestamped telemetry and accept commands such a
 Builds on: `SilTarget` must pass the contract suite (`tests/contract/`); command IDs and
 the telemetry layout are filled in in `docs/protocol.md`.
 
-Status: in progress. The Phase 1 milestone closes with #65. Derived from the epics and
-stories:
+Status: done. The milestone was verified in #65: the nominal scenario
+(`tests/sil/test_phase1_nominal_spacecraft.py`, one orbit of #72's reference profile
+through `TestTarget` on `SilTarget`, seed 42) runs with the expected mode sequence, no SAFE
+or FAULT, the SOC margin and the telemetry cadence; two runs with the same seed give
+byte-identical downlink, and the golden captures (`tests/golden/`) replay byte for byte
+on Linux and macOS. Both "Builds on" conditions hold: `SilTarget` is registered in and
+passes the contract suite, and `docs/protocol.md` defines the command IDs and the
+telemetry layout (the frame-level maximum payload size and stream resynchronisation stay
+open for Phase 7a, #123). Delivered, by epic and story:
 
 - [x] Spacecraft subsystem models (epic #30): subsystem framework (#31), power (#34),
   thermal (#37), attitude (#40), payload and comms (#42); controls, configuration,
@@ -86,8 +93,13 @@ stories:
 - [x] Nominal scenario harness and golden telemetry (#63, #64), behavioural tests
   through the target (#102), comms capacity as a data rate (#122), and frames that
   span ticks (#132, ADR-0008)
-- [ ] Documentation and hygiene cleanup (#103)
-- [ ] Phase 1 documentation and milestone check (#65)
+- [x] Documentation and hygiene cleanup (#103)
+- [x] Phase 1 documentation and milestone check (#65): `docs/spacecraft.md` overview,
+  modes and telemetry, the README status, and ADR-0009 (the Phase 1 wire payloads,
+  Proposed)
+
+The nominal scenario is a Python harness (`tests/sil/_nominal_scenario.py`), a stand-in
+until the Phase 5 scenario DSL, as #63 planned.
 
 ### Phase 2 — Ground Station
 
@@ -176,8 +188,10 @@ estimate no longer holds and Phase 7 is split:
 If the 10-week plan slips, 7b is the first item cut; HIL then runs nominal scenarios
 only. Both phases still need a revised estimate.
 
-Open point: the firmware's telemetry encoder must decide how a non-finite sensor value
-is sent. The SIL encoder raises on NaN because the simulation validates its inputs; the
+Open points: ADR-0009 lists the wire-protocol questions left for the firmware (the
+maximum payload size and stream resynchronisation, #123; what a receiver does with an
+unknown Version byte; how telemetry is extended). The firmware's telemetry encoder must
+also decide how a non-finite sensor value is sent. The SIL encoder raises on NaN because the simulation validates its inputs; the
 options are a per-field sentinel or a "sensor invalid" flag bit from a reserved group
 (`docs/protocol.md`, #54).
 
@@ -191,7 +205,9 @@ hardware, flash firmware, execute scenarios, capture telemetry, and publish arti
 infrastructure.
 
 Status: lint, type checks, and tests run on every pull request and on `main` since
-Phase 0.
+Phase 0. Since Phase 1 the tests run on Linux and macOS (ADR-0006), the multi-orbit
+`slow` tests run in two shards per OS, and the performance budget is gated on CI
+(`docs/spacecraft.md`, "Performance budget (#78)").
 
 ## 10-week build plan (Version 1)
 
