@@ -12,11 +12,11 @@ packet, in arrival order:
    (ADR-0009 §7). See :class:`SequenceTracker` for the gap, wrap and restart rules.
 3. **Content**, routed by frame type: TELEMETRY is decoded into a
    :class:`TelemetryReceived` event, and a :class:`SpacecraftRebooted` event follows it
-   when the boot count went up; ACK and DATA payloads are decoded and handed to hooks
-   that #155 (ACK/NACK correlation) and #158 (DATA reassembly and content checks) fill
-   in. A payload that does not decode for its type becomes ``FrameRejected`` with
-   reason ``PAYLOAD``; its sequence was already tracked, because the CRC vouched for
-   the header.
+   when the boot count went up; an ACK/NACK is correlated with its command by the
+   station's command tracker (#155), whose event follows; DATA payloads are decoded and
+   handed to a hook that #158 (DATA reassembly and content checks) fills in. A payload
+   that does not decode for its type becomes ``FrameRejected`` with reason ``PAYLOAD``;
+   its sequence was already tracked, because the CRC vouched for the header.
 
 So per packet the events are frame-level first (``SequenceGap`` or ``FrameRejected``),
 then content. Nothing raises for any received bytes.
@@ -26,7 +26,7 @@ Pass boundaries come from the pass state machine (#161), which calls
 :meth:`DownlinkDecoder.start_pass`; until then the whole run is one pass.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
@@ -192,10 +192,20 @@ def _frame_error_reason(error: FrameError) -> RejectionReason:
     return RejectionReason.TYPE
 
 
-class DownlinkDecoder:
-    """Decodes downlink packets into events and keeps the link statistics (#156)."""
+AckHandler = Callable[[int, CommandAck], StationEvent]
+"""Correlates one decoded ACK or NACK at a simulated time and returns its event (#155)."""
 
-    def __init__(self) -> None:
+
+class DownlinkDecoder:
+    """Decodes downlink packets into events and keeps the link statistics (#156).
+
+    Args:
+        ack_handler: Receives every decoded ACK/NACK (#155); the station passes its
+            command tracker's ``answer``. ``None`` decodes ACKs and emits nothing for them.
+    """
+
+    def __init__(self, ack_handler: AckHandler | None = None) -> None:
+        self._ack_handler = ack_handler
         self._sequence = SequenceTracker()
         self._total = _Counts()
         self._pass = _Counts()
@@ -257,8 +267,7 @@ class DownlinkDecoder:
             if frame.frame_type is FrameType.TELEMETRY:
                 return self._telemetry(now_us, frame.sequence, decode_telemetry(frame.payload))
             if frame.frame_type is FrameType.ACK:
-                self.on_ack(now_us, frame.sequence, decode_ack(frame.payload))
-                return []
+                return self.on_ack(now_us, frame.sequence, decode_ack(frame.payload))
             self.on_data(now_us, frame.sequence, decode_data(frame.payload))
             return []
         except (TelemetryDecodeError, AckDecodeError, DataDecodeError):
@@ -279,13 +288,16 @@ class DownlinkDecoder:
         A no-op until #157.
         """
 
-    def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> None:
-        """Hook for a decoded ACK or NACK: correlation with commands is #155.
+    def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> list[StationEvent]:
+        """A decoded ACK or NACK, correlated with its command by the ACK handler (#155).
 
-        A no-op until #155, which emits ``CommandAcked``, ``CommandNacked`` or
-        ``UnmatchedAck``. ``sequence`` is the ACK frame's own downlink sequence;
-        ``ack.sequence`` names the uplink frame it answers.
+        Returns its ``CommandAcked``, ``CommandNacked`` or ``UnmatchedAck`` event, or
+        nothing without a handler. ``sequence`` is the ACK frame's own downlink
+        sequence; ``ack.sequence`` names the uplink frame it answers.
         """
+        if self._ack_handler is None:
+            return []
+        return [self._ack_handler(now_us, ack)]
 
     def on_data(self, now_us: int, sequence: int, chunk: DataChunk) -> None:
         """Hook for a decoded DATA chunk: reassembly and content checks are #158.
