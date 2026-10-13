@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Phase 1 complete (#65), Phase 2 in progress; reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), ADR-0004 to ADR-0008 (the Phase 1 spacecraft model), ADR-0009 (the Phase 1 wire payloads), and ADR-0010 (the ground station, Proposed). Decisions marked **(ADR-000N)** are recorded in the named ADR.
+Status: Phase 1 complete (#65), Phase 2 in progress; reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), ADR-0004 to ADR-0008 (the Phase 1 spacecraft model), ADR-0009 (the Phase 1 wire payloads), and ADR-0010 (the ground station). Decisions marked **(ADR-000N)** are recorded in the named ADR.
 
 ## 1. Purpose
 
@@ -386,7 +386,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Tick size and scheduling model for the run loop | Decided in ADR-0003: fixed 100 ms default tick, integer microsecond time, fixed ten-step order |
 | Run ID and seed record format | Decided in ADR-0003: `run.json` with named, derived seed streams |
 | Field-level payloads on the wire (commands, ACK/NACK, telemetry, DATA) | Recorded in ADR-0009 (Accepted, #65): protocol version 1 as implemented in Phase 1; details in [protocol.md](protocol.md) |
-| Ground station structure, link, pass geometry placement, Phase 2 run loop, `Packet` time unit, station identity | Proposed in [ADR-0010](adr/0010-ground-station-architecture.md) (#151): a pure station called twice per tick, a `Link` protocol, `PassGeometry` off the target boundary, `latency_us`, callsign off the wire |
+| Ground station structure, link, pass geometry placement, Phase 2 run loop, `Packet` time unit, station identity | Decided in [ADR-0010](adr/0010-ground-station-architecture.md) (Accepted, #151): a pure station called twice per tick, a `Link` protocol, `PassGeometry` off the target boundary, `latency_us`, callsign off the wire |
 
 ## 13. Out of scope for v1
 

@@ -3,7 +3,7 @@
 Status: Phase 2 in progress. The framework is in place (#152): the package, the station
 configuration, the event types and the per-tick API. Behaviour lands ticket by ticket;
 the table at the end lists what each one adds. The design is
-[ADR-0010](adr/0010-ground-station-architecture.md) (Proposed).
+[ADR-0010](adr/0010-ground-station-architecture.md) (Accepted).
 
 The ground station is shared infrastructure above the `TestTarget` boundary
 (`docs/architecture.md` §3, §4.2). It runs the same against SIL and HIL targets, and

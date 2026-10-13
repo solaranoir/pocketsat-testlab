@@ -1,6 +1,6 @@
 # ADR-0010: Ground station architecture and interfaces
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer, 2026-10-13)
 - **Phase:** 2
 - **Amends / Supersedes:** Amends ADR-0003 (the `Packet` time field, §7). Related: ADR-0002 (TestTarget boundary), ADR-0005 (configuration by constructor injection), ADR-0006 (portable arithmetic), ADR-0009 (protocol version 1). ADR-0011 (#159) decides the pass geometry model; this ADR decides only where geometry lives and who consumes it. Issue: #151.
 
@@ -187,15 +187,17 @@ In amateur practice a station identifies by transmitting its callsign at set int
 
 ## Open questions for the maintainer
 
+All resolved at acceptance (2026-10-13): questions 3 to 5 take the recommendation.
+
 1. **Decision A (§8):** decided 2026-10-13, A1 (`latency_us`).
 2. **Decision B (§9):** decided 2026-10-13, B1 (off the wire). Revisit only if a scenario needs identification as a real transmission; B3 is then the route, before Phase 7a starts.
-3. **The orchestrator brought forward (§7).** Recommended: accept. The alternative is a loop in the tests plus a CLI-only copy, both rewritten in Phase 5.
-4. **RESET retries (§2).** Recommended: never automatic. The alternative is to retry RESET only after a downlink sequence restart and `boot_count` show the first attempt did not reboot. That is more automation, but it adds state for an edge case.
-5. **Link visibility at elevation 0° (§5).** Recommended: the geometric horizon, with no refraction and no terrain. ADR-0011 may revise this if its model needs to.
+3. **The orchestrator brought forward (§7).** Accepted with this ADR. The alternative is a loop in the tests plus a CLI-only copy, both rewritten in Phase 5.
+4. **RESET retries (§2).** Never automatic, as recommended. The alternative is to retry RESET only after a downlink sequence restart and `boot_count` show the first attempt did not reboot. That is more automation, but it adds state for an edge case.
+5. **Link visibility at elevation 0° (§5).** The geometric horizon, as recommended, with no refraction and no terrain. ADR-0011 may revise this if its model needs to.
 
 ## Follow-ups
 
-- On acceptance: the maintainer sets the status to Accepted, and `docs/architecture.md` adds `pocketsat/link.py` and `PassGeometry` to §3, §5 and §11 and this ADR to §12 (#152).
+- On acceptance: the maintainer sets the status to Accepted, and `docs/architecture.md` adds `pocketsat/link.py` and `PassGeometry` to §3, §5 and §11 and this ADR to §12 (#152). **Done**: the architecture updates in #152 (PR #174), the status on 2026-10-13.
 - #152 implements §2 to §4 and, under A1, the `Packet` rename; #153 implements §5; #160 and #161 consume §6; #164 implements §9; #167 implements §7.
 - #153's acceptance criterion "a visibility gate as an injected function" is superseded by §5 (geometry passed per call); update the issue on acceptance.
 - #155: record the per-command retry policy and the timeout bound (§2, §3).
