@@ -187,6 +187,42 @@ since the last reset and `pass_link_statistics` since the current pass began. Un
 pass state machine (#161) calls `DownlinkDecoder.start_pass()` at each AOS, the whole
 run is one pass.
 
+## Pass state
+
+`begin_tick` first updates the pass state from `geometry` against
+`StationConfig.elevation_mask_deg` (`pocketsat.groundstation.passes`, #161), so this
+tick's AOS or LOS comes before the tick's uplink events.
+
+- **AOS** is the first tick whose geometry is at or above the mask: `Aos` with the pass
+  number (from 1 after each reset), azimuth and elevation. The decoder's per-pass link
+  statistics restart (`DownlinkDecoder.start_pass()`), so `pass_link_statistics` counts
+  from AOS to the next AOS.
+- **LOS** is the first tick below the mask: `Los` with the pass number, azimuth,
+  elevation, and the pass's maximum elevation (the highest sample of the pass).
+- **`pass_state`** (`PassState`): `in_pass`, `pass_id` (the current pass, or the last
+  one; 0 before the first AOS) and the maximum elevation so far in the current pass.
+- **Sampling.** The geometry is sampled at each tick's start, so AOS and LOS are within
+  one tick of the true crossing, and the maximum elevation is at most the true peak and
+  within the elevation change of half a tick of it (2.2e-5° measured over a day at
+  100 ms; 0.031° at a 10 s tick).
+- **No hysteresis and no minimum pass duration.** Neither ADR-0010 nor ADR-0011 calls
+  for one: the geometry is deterministic and noise-free, so it crosses the mask once
+  each way, and a pass that grazes the mask for one tick is a real pass. If Phase 4's
+  tracking-error faults make the station's elevation chatter around the mask,
+  hysteresis belongs with them.
+- **No geometry** (`None`) leaves the state unchanged and emits nothing: a station
+  never given geometry is never in a pass, and the whole run is one pass for the link
+  statistics.
+- **The mask is policy, not physics** (ADR-0010 §5). The link delivers frames above the
+  geometric horizon (0°), so between the horizon and the mask frames still arrive while
+  the station is not in a pass; radio control (#164) stops transmission below the mask.
+
+Story #147's test (`tests/sil/test_pass_state_story.py`) checks one day of the default
+orbit and station (#160): AOS and LOS within one tick of the predicted crossings
+(`OrbitGeometry.next_pass`), maximum elevations matching, and, with the mask at 0° so
+that passes and link visibility coincide, frames delivered only during passes. The fast
+suite runs the day at a 10 s tick; a slow test repeats the AOS/LOS check at 100 ms.
+
 ## Determinism
 
 The package is scanned by the determinism guard (`tests/unit/test_determinism_guard.py`,

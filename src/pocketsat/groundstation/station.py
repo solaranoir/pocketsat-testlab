@@ -9,8 +9,8 @@ after it (steps 8 and 9: decoding). Commands are queued with
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
 stub below names its ticket: uplink encoding (#154), ACK/NACK correlation, timeouts and
-retries (#155), the telemetry store (#157), DATA (#158), pass
-state (#161) and radio control (#164).
+retries (#155), the telemetry store (#157), DATA (#158) and radio control (#164). Pass
+state (#161) is :mod:`pocketsat.groundstation.passes`.
 """
 
 from collections.abc import Sequence
@@ -21,7 +21,8 @@ from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
 from pocketsat.groundstation.downlink import DownlinkDecoder, LinkStatistics
-from pocketsat.groundstation.events import CommandRef, StationEvent
+from pocketsat.groundstation.events import Aos, CommandRef, StationEvent
+from pocketsat.groundstation.passes import PassState, PassTracker
 from pocketsat.groundstation.telemetry import TelemetryStore
 from pocketsat.groundstation.uplink import CommandQueue, TransmitGate, always_open
 from pocketsat.messages import Command, Packet
@@ -79,6 +80,7 @@ class GroundStation:
         self._now_us = 0
         self._telemetry = TelemetryStore()
         self._downlink = DownlinkDecoder()
+        self._passes = PassTracker(self._config.elevation_mask_deg)
 
     @property
     def config(self) -> StationConfig:
@@ -97,9 +99,14 @@ class GroundStation:
 
     @property
     def pass_link_statistics(self) -> LinkStatistics:
-        """Downlink statistics for the current pass (#156). The whole run is one pass
-        until the pass state machine (#161) starts a new one at each AOS."""
+        """Downlink statistics for the current pass (#156). They restart at each AOS
+        (#161); with no geometry the whole run is one pass."""
         return self._downlink.pass_statistics
+
+    @property
+    def pass_state(self) -> PassState:
+        """Whether the station is in a pass, its number and maximum elevation (#161)."""
+        return self._passes.state
 
     def reset(self, rngs: RngFactory) -> None:
         """Return to the configured initial state at simulated time 0.
@@ -148,9 +155,11 @@ class GroundStation:
 
         Queued commands that are due are encoded into COMMAND frames while the transmit
         gate is open, at most ``config.max_uplink_command_count`` per tick, and stale
-        ones expire (#154, :mod:`pocketsat.groundstation.uplink`). Stubs until their
-        tickets land: pass state from ``geometry`` (#161), timeouts and retries (#155),
-        and the radio's gate (#164).
+        ones expire (#154, :mod:`pocketsat.groundstation.uplink`). First, the pass state
+        follows ``geometry`` against the elevation mask: AOS and LOS events, and the
+        per-pass link statistics restart at AOS (#161,
+        :mod:`pocketsat.groundstation.passes`). Stubs until their tickets land: timeouts
+        and retries (#155), and the radio's gate (#164).
 
         Args:
             now_us: Simulated time at the start of the tick.
@@ -168,8 +177,12 @@ class GroundStation:
         self._advance_to(now_us)
         if geometry is not None and not isinstance(geometry, PassGeometry):
             raise TypeError(f"geometry must be a PassGeometry or None, got {geometry!r}")
+        # Pass state (#161): AOS/LOS first, so later steps see this tick's pass.
+        pass_events = self._passes.update(now_us, geometry)
+        if any(isinstance(event, Aos) for event in pass_events):
+            self._downlink.start_pass()
         packets, events = self._uplink.transmit(now_us, self._transmit_gate(now_us))
-        return Uplink(packets, events)
+        return Uplink(packets, pass_events + events)
 
     def end_tick(self, now_us: int, downlink: Sequence[Packet]) -> tuple[StationEvent, ...]:
         """End a tick (steps 8 and 9): decode the downlink, in arrival order.
