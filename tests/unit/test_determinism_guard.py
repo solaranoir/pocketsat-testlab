@@ -177,6 +177,7 @@ def test_scan_covers_simulation_code() -> None:
         "flight/computer.py",
         "flight/modes.py",
         "flight/safety.py",
+        "link.py",
         "targets/base.py",
         "targets/echo.py",
         "targets/sil.py",
