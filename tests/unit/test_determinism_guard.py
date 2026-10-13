@@ -159,6 +159,7 @@ GROUNDSTATION_MODULES = frozenset(
         "groundstation/events.py",
         "groundstation/station.py",
         "groundstation/telemetry.py",
+        "groundstation/uplink.py",
     }
 )
 """Every ground station module, listed by name (#152, ADR-0010). The station runs in

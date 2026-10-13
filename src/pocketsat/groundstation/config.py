@@ -27,6 +27,9 @@ MAX_ALTITUDE_KM: Final = 9.0
 MAX_COMMAND_RETRY_COUNT: Final = 10
 """Most retries a configuration may ask for. More only delays a command's failure."""
 
+DEFAULT_MAX_UPLINK_COMMAND_COUNT: Final = 4
+"""Default for :attr:`StationConfig.max_uplink_command_count`; see its documentation."""
+
 
 def _number(name: str, value: float) -> float:
     """Return ``value`` as a float, rejecting bools, non-numbers, NaN, and infinities."""
@@ -86,6 +89,18 @@ class StationConfig:
         identification_interval_us: Station identification interval while
             transmitting (#164). Default 600_000_000 (10 minutes), the interval amateur
             rules commonly require (for example FCC §97.119(a)).
+        max_uplink_command_count: Most COMMAND frames sent in one tick (#154); the rest
+            wait for the next tick. Positive. Default
+            :data:`DEFAULT_MAX_UPLINK_COMMAND_COUNT` (4): every command is answered by a
+            14-byte ACK frame in the same tick, and the default downlink carries 120
+            bytes per 100 ms tick (``OutboundConfig.max_held_ack_frames``), so four ACKs
+            (56 bytes) still leave room for a 36-byte TELEMETRY frame in the tick.
+            Sending more would push telemetry or ACKs into the next tick.
+        command_expiry_us: How long after its due time a command that could not be
+            sent (the transmit gate stayed closed) is dropped and reported as failed
+            (#154), simulated µs, or ``None`` to keep it queued until it is sent.
+            Default ``None``: a command waits for the next pass, as an operator's queue
+            does, unless a scenario asks for an expiry.
 
     Raises:
         TypeError: A field has the wrong type.
@@ -102,6 +117,8 @@ class StationConfig:
     command_timeout_us: int = 2_000_000
     command_retry_count: int = 2
     identification_interval_us: int = 600_000_000
+    max_uplink_command_count: int = DEFAULT_MAX_UPLINK_COMMAND_COUNT
+    command_expiry_us: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.callsign, str):
@@ -139,6 +156,9 @@ class StationConfig:
         check_us("identification_interval_us", self.identification_interval_us)
         if self.identification_interval_us == 0:
             raise ValueError("identification_interval_us must be positive, got 0")
+        _positive_int("max_uplink_command_count", self.max_uplink_command_count)
+        if self.command_expiry_us is not None:
+            check_us("command_expiry_us", self.command_expiry_us)
 
     def check_tick(self, tick_us: int) -> None:
         """Check that this configuration can run at a tick of ``tick_us``.

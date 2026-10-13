@@ -1,6 +1,6 @@
 # ADR-0011: Pass geometry under portable arithmetic
 
-- **Status:** Proposed
+- **Status:** Accepted (maintainer, 2026-10-13)
 - **Phase:** 2
 - **Amends / Supersedes:** Amends ADR-0006 §1 and §2 (adds `math.frexp` to the allowed operations and four helpers to `pocketsat.core.portable`), under Decision C1 (§6). Related: ADR-0003 (integer-microsecond time), ADR-0010 §5 and §6 (who consumes `PassGeometry`, and where it is computed). Issue: #159.
 
@@ -143,6 +143,8 @@ Doppler (#162) needs no new function: Δf = −f · ṙ / c, arithmetic only, wi
 - No perturbations: passes repeat exactly, with no drag decay or nodal precession over a campaign. A Version 2 orbit model replaces the provider behind the same `geometry_at` shape.
 
 ## Open questions for the maintainer
+
+All resolved at acceptance (2026-10-13): decisions A to D as recorded below; question 5 is left to #160, which chooses and documents the defaults.
 
 1. **Decision A (§1):** decided 2026-10-13, A3 (circular orbit with a pass-anchor solver).
 2. **Decision B (§1):** decided 2026-10-13, B1 (`duration_s` is asserted, not an input).

@@ -43,13 +43,17 @@ class CommandRef:
 
 
 class FailureReason(Enum):
-    """Why a command failed without an ACK or NACK (#155)."""
+    """Why a command failed without an ACK or NACK (#154, #155)."""
 
     RETRIES_EXHAUSTED = "retries_exhausted"
     """Every allowed attempt timed out."""
 
     NOT_RETRYABLE = "not_retryable"
     """The only attempt timed out and the command's policy forbids a retry (RESET)."""
+
+    EXPIRED = "expired"
+    """The command was never sent: it was still queued ``command_expiry_us`` after it
+    became due (#154)."""
 
 
 class RejectionReason(Enum):
