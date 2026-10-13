@@ -152,6 +152,18 @@ SPACECRAFT_MODULES = frozenset(
 """Every spacecraft module, listed by name (epic #30 close-out, #70): the five subsystems
 (power, thermal, attitude, payload, comms) and the framework they share."""
 
+GROUNDSTATION_MODULES = frozenset(
+    {
+        "groundstation/__init__.py",
+        "groundstation/config.py",
+        "groundstation/events.py",
+        "groundstation/station.py",
+        "groundstation/telemetry.py",
+    }
+)
+"""Every ground station module, listed by name (#152, ADR-0010). The station runs in
+simulated time, so it is held to the same rules as the spacecraft."""
+
 
 def test_scan_covers_simulation_code() -> None:
     names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
@@ -180,6 +192,16 @@ def test_scan_covers_every_spacecraft_module() -> None:
     assert scanned == SPACECRAFT_MODULES, (
         f"missing from the scan: {sorted(SPACECRAFT_MODULES - scanned)};"
         f" not listed in SPACECRAFT_MODULES: {sorted(scanned - SPACECRAFT_MODULES)}"
+    )
+
+
+def test_scan_covers_every_groundstation_module() -> None:
+    # A new ground station module must be added to the list, as for the spacecraft.
+    names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
+    scanned = {name for name in names if name.startswith("groundstation/")}
+    assert scanned == GROUNDSTATION_MODULES, (
+        f"missing from the scan: {sorted(GROUNDSTATION_MODULES - scanned)};"
+        f" not listed in GROUNDSTATION_MODULES: {sorted(scanned - GROUNDSTATION_MODULES)}"
     )
 
 

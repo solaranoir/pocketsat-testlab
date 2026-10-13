@@ -1,0 +1,139 @@
+# PocketSat Ground Station
+
+Status: Phase 2 in progress. The framework is in place (#152): the package, the station
+configuration, the event types and the per-tick API. Behaviour lands ticket by ticket;
+the table at the end lists what each one adds. The design is
+[ADR-0010](adr/0010-ground-station-architecture.md) (Proposed).
+
+The ground station is shared infrastructure above the `TestTarget` boundary
+(`docs/architecture.md` §3, §4.2). It runs the same against SIL and HIL targets, and
+over the Phase 2 ideal link or the Phase 3 RF channel, because it never calls any of
+them.
+
+## The station is a pure component
+
+`pocketsat.groundstation.GroundStation` takes simulated time, pass geometry and downlink
+packets, and returns uplink packets and events. It never calls the target, the link or a
+clock, and it draws no random numbers in Phase 2. The run loop (#167) moves packets
+between the station, the link (#153) and the target:
+
+```mermaid
+sequenceDiagram
+    participant L as Run loop
+    participant G as GroundStation
+    participant K as Link
+    participant T as TestTarget
+
+    L->>G: 3. submit(command) for each due command
+    L->>G: 3. begin_tick(now_us, geometry)
+    G-->>L: Uplink(packets, events)
+    L->>K: 4. carry_uplink(packets) → frames
+    L->>T: 4. send(frame)
+    L->>T: 5-6. apply_environment, advance(dt_us)
+    L->>T: 7. receive() → frames
+    L->>K: 8. carry_downlink(frames) → packets
+    L->>G: 8-9. end_tick(now_us, packets)
+    G-->>L: events
+```
+
+## API
+
+| Call | When | Does |
+|---|---|---|
+| `GroundStation(config)` | once | Builds a station ready to run, in the state `reset` returns to |
+| `reset(rngs)` | start of a run | Returns to the configured initial state at time 0. Phase 4's ground-station faults will request `groundstation.*` streams from `rngs` |
+| `submit(command)` | step 3 | Queues a `Command`; returns the `CommandRef` that names it in every later event. Nothing is encoded yet |
+| `begin_tick(now_us, geometry)` | steps 3-4, tick start | Pass state (#161), timeouts and retries (#155), then encoding queued commands while the radio may transmit (#154, #164). Returns `Uplink(packets, events)` |
+| `end_tick(now_us, downlink)` | steps 8-9, tick end | Decodes each packet in arrival order (#156, #155, #158) and returns the events: per packet, frame-level events first, then the content |
+| `telemetry` | any time | Read-only `TelemetryStore` of decoded telemetry (#157) |
+
+`now_us` is integer simulated microseconds (ADR-0003) and never goes back:
+`begin_tick` gets the tick's start, `end_tick` its end (the time `SilTarget` gives the
+flight computer), and the next `begin_tick` starts where the last tick ended. `geometry`
+is a `PassGeometry` (`pocketsat.environment.geometry`) or `None` when no geometry model
+runs; the station treats it as its pass prediction (ADR-0010 §6).
+
+## Configuration
+
+`StationConfig` is a frozen, validated record, injected at construction like the
+spacecraft settings (ADR-0005). Change single values with `dataclasses.replace()`.
+
+| Field | Default | Why |
+|---|---|---|
+| `callsign` | `N0CALL` | The placeholder callsign amateur software uses, so no real station is named. Never on the wire (ADR-0010 §9) |
+| `latitude_deg`, `longitude_deg` | 40.0, -105.0 | A mid-latitude station that sees several passes a day |
+| `altitude_km` | 1.6 | Matches that location; validated in -0.5 to 9.0 km |
+| `elevation_mask_deg` | 10.0 | Below about 10° passes are long-range and often blocked by terrain. The station's operating limit (AOS/LOS, transmit permission); the link applies the geometric horizon separately (ADR-0010 §5) |
+| `uplink_frequency_hz` | 145 850 000 | 2 m amateur-satellite sub-band |
+| `downlink_frequency_hz` | 435 500 000 | 70 cm amateur-satellite sub-band |
+| `command_timeout_us` | 2 000 000 | 20 ticks at 100 ms. Command to ACK is the same tick at the default tick, a few ticks late for a RESET at short ticks (ADR-0008 §6a) |
+| `command_retry_count` | 2 | Retries after the first attempt, 0 to 10. RESET is never retried (below) |
+| `identification_interval_us` | 600 000 000 | 10 minutes, the interval amateur rules commonly require |
+
+`StationConfig.check_tick(tick_us)` rejects a timeout shorter than two ticks, so an
+answer in the next tick is never a timeout. This is a provisional bound; #155 states the
+full one.
+
+## Commands, references and retries
+
+Each submitted command gets a `CommandRef`, numbered from 0 after each reset and never
+sent. Each attempt is a new COMMAND frame with its own uplink sequence number (the
+station's uplink counter starts at 0 on reset and wraps `0xFFFF` → `0x0000`), linked to
+the command by its `CommandRef` (ADR-0010 §2).
+
+Retries follow a policy per command (#155). `PING`, `SET_MODE`, `ENTER_SAFE_MODE` and
+`BEGIN_DOWNLINK` are safe to repeat (ADR-0009 §4). `RESET` is not: the spacecraft
+accepts it in every mode, BOOT included, so a retry after a lost ACK reboots it a second
+time. A RESET that times out is reported as `CommandFailed` (`NOT_RETRYABLE`) and the
+scenario decides.
+
+## Events
+
+Every event is a frozen record whose first field is `time_us`. `StationEvent` is their
+union and `EVENT_TYPES` lists them. The station keeps no event history; the run loop
+collects the events. The console (#165) and assertions read only events and the
+telemetry store, so a new observable is a new event type.
+
+| Event | Emitted by | Fields besides `time_us` |
+|---|---|---|
+| `Aos` | pass state (#161) | `pass_id`, `azimuth_deg`, `elevation_deg` |
+| `Los` | pass state (#161) | `pass_id`, `azimuth_deg`, `elevation_deg`, `max_elevation_deg` |
+| `CommandSent` | uplink (#154) | `command_ref`, `command_id`, `sequence`, `retry_count` (0 on the first attempt) |
+| `CommandAcked` | ACK correlation (#155) | `command_ref`, `sequence` |
+| `CommandNacked` | ACK correlation (#155) | `command_ref`, `sequence`, `reason` (`DecodeReason` or `RejectReason`) |
+| `CommandTimedOut` | ACK correlation (#155) | `command_ref`, `retry_count`, `will_retry` |
+| `CommandFailed` | ACK correlation (#155) | `command_ref`, `reason` (`FailureReason`: `RETRIES_EXHAUSTED`, `NOT_RETRYABLE`) |
+| `UnmatchedAck` | ACK correlation (#155) | `sequence`, `command_id` |
+| `TelemetryReceived` | decoding (#156) | `sequence`, `telemetry` |
+| `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok` |
+| `FrameRejected` | decoding (#156) | `reason` (`RejectionReason`: sync, length, CRC, type, payload, wrong direction), `frame` |
+| `SequenceGap` | decoding (#156) | `sequence` (received), `missing_count`; the expected sequence is `(sequence - missing_count) mod 65536` |
+| `SpacecraftRebooted` | decoding (#156) | `sequence`, `boot_count` |
+| `RadioStateChanged` | radio control (#164) | `state` (`RadioState`) |
+| `StationIdentified` | radio control (#164) | `callsign` |
+
+A COMMAND frame received on the downlink, as `EchoTarget` produces, is a
+`FrameRejected` with reason `WRONG_DIRECTION` and its bytes. Frames the link drops are
+counted by the link, not the station, which never sees them.
+
+## Determinism
+
+The package is scanned by the determinism guard (`tests/unit/test_determinism_guard.py`,
+`GROUNDSTATION_MODULES`): no wall-clock time, no global random, portable arithmetic only
+(ADR-0003, ADR-0006).
+
+## What each ticket adds
+
+| Ticket | Adds |
+|---|---|
+| #152 | This framework: package, `StationConfig`, events, per-tick API (stubs below) |
+| #153 | `Link` and `IdealLink` (`pocketsat.link`) |
+| #154 | Command queue, uplink sequencing and encoding in `begin_tick` |
+| #155 | ACK/NACK correlation, timeouts and the retry policy |
+| #156 | Downlink frame decoding, sequence gaps, reboot detection in `end_tick` |
+| #157 | The telemetry store and its history |
+| #158 | DATA reception and chunk reassembly |
+| #161 | AOS/LOS pass state from `geometry` |
+| #162, #163 | Doppler tuning and the SNR indicator |
+| #164 | Radio control: transmit permission and station identification |
+| #165, #166 | Mission console and the `pocketsat` CLI command |

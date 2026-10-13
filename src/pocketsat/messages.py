@@ -43,6 +43,7 @@ from enum import IntEnum, IntFlag
 from types import MappingProxyType
 from typing import Final, Self
 
+from pocketsat.core.clock import check_us
 from pocketsat.flight.modes import Mode, RejectReason
 from pocketsat.frame import MAX_SEQUENCE, MIN_FRAME_SIZE
 from pocketsat.spacecraft.config import MAX_CHUNK_SIZE_BYTES
@@ -72,7 +73,12 @@ class Packet:
         doppler_hz: Doppler shift applied to the carrier.
         snr_db: Signal-to-noise ratio.
         loss_probability: Probability, ``0..1``, that this packet is dropped.
-        latency_s: One-way link latency in simulated seconds.
+        latency_us: One-way link latency in simulated microseconds, an integer like
+            every simulated time (ADR-0003; ADR-0010 §8).
+
+    Raises:
+        TypeError: ``latency_us`` is not an ``int`` or ``None``.
+        ValueError: ``latency_us`` is negative.
     """
 
     frame: bytes
@@ -81,7 +87,11 @@ class Packet:
     doppler_hz: float | None = None
     snr_db: float | None = None
     loss_probability: float | None = None
-    latency_s: float | None = None
+    latency_us: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.latency_us is not None:
+            check_us("latency_us", self.latency_us)
 
 
 # --- Commands and ACK/NACK (#52) -------------------------------------------------------
