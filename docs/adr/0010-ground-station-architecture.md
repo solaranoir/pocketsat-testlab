@@ -128,13 +128,13 @@ The run loop (#167) is placed in `pocketsat/orchestrator/loop.py`, as the first 
 
 This brings a small part of Phase 5 forward, as Phase 0 brought ADR-0003 forward, so that Phase 2 is not built on a throwaway loop.
 
-### 8. Decision A: replace `Packet.latency_s` with integer microseconds
+### 8. Decision A: replace `Packet.latency_s` with integer microseconds (maintainer decision)
 
-**Decision (recommended):** rename the field to `latency_us: int | None` (Option A1 below) in #152, before anything reads it. This amends ADR-0003, whose integer-microsecond rule covers every simulated time.
+**Decision (maintainer, 2026-10-13): Option A1.** Rename the field to `latency_us: int | None` in #152, before anything reads it. This amends ADR-0003, whose integer-microsecond rule covers every simulated time.
 
 `Packet.latency_s: float | None` was written in Phase 0, before ADR-0003. It has no callers today; the only reference is its own declaration. Phase 3's RF channel is the first component to set it, and it must schedule delivery on integer tick boundaries.
 
-| | A1: `latency_us: int` (recommended) | A2: keep `latency_s: float`, convert at use | A3: remove latency, add `sent_us` and `delivered_us` timestamps |
+| | A1: `latency_us: int` (chosen) | A2: keep `latency_s: float`, convert at use | A3: remove latency, add `sent_us` and `delivered_us` timestamps |
 |---|---|---|---|
 | Fits ADR-0003 | Yes: one time type throughout | No: a float time in the model, converted wherever it is used | Yes |
 | Determinism risk | None: integer arithmetic | Rounding at each conversion. Two code paths that round differently give different delivery ticks | None |
@@ -145,13 +145,13 @@ This brings a small part of Phase 5 forward, as Phase 0 brought ADR-0003 forward
 
 **Trade-off.** A1 is cheapest now and keeps one rule for time. Its only cost is Phase 0 history: the field name changes once, while nothing reads it. A2 is free today but is the kind of float time ADR-0003 was written to exclude, and every Phase 3 and Phase 4 use pays for the conversion. A3 is the most informative (a report can show both times), but it designs Phase 3's packet timestamps before Phase 3 has a model; it can still be added on top of A1 then. The wire protocol is unaffected under every option: `Packet` exists only above the target boundary.
 
-### 9. Decision B: station identity stays off the wire
+### 9. Decision B: station identity stays off the wire (maintainer decision)
 
-**Decision (recommended):** the callsign lives in `StationConfig`, the console, the run record and a `StationIdentified` event emitted at `identification_interval_us` while transmitting (Option B1 below). Protocol version 1 is unchanged.
+**Decision (maintainer, 2026-10-13): Option B1.** The callsign lives in `StationConfig`, the console, the run record and a `StationIdentified` event emitted at `identification_interval_us` while transmitting. Protocol version 1 is unchanged.
 
 In amateur practice a station identifies by transmitting its callsign at set intervals; AX.25-based amateur satellites also put callsigns in every frame header. PocketSat's frames carry no addresses (ADR-0002, ADR-0009), and the protocol is the Phase 7a firmware contract.
 
-| | B1: configuration, console and run record (recommended) | B2: callsign in every COMMAND payload | B3: a new IDENT frame type, sent at the interval | B4: callsign in the frame header for all frames |
+| | B1: configuration, console and run record (chosen) | B2: callsign in every COMMAND payload | B3: a new IDENT frame type, sent at the interval | B4: callsign in the frame header for all frames |
 |---|---|---|---|---|
 | Wire change | None | COMMAND layout changes, so protocol version 2 (ADR-0009 §8) | A fifth frame type (ground → spacecraft); a version-1 receiver rejects it as an unknown type | Frame layout changes, so protocol version 2, and ADR-0002 is superseded |
 | Firmware (Phase 7a) | Nothing new | Parse and validate a callsign field; new vectors | Accept and count IDENT frames; new vectors | Every frame encoder and decoder changes; every vector regenerates |
@@ -182,13 +182,13 @@ In amateur practice a station identifies by transmitting its callsign at set int
 - The event stream is the single source for the console, the story tests and the Phase 5 assertions, so a new observable is a new event type, not a new accessor.
 - `pocketsat.orchestrator` exists from Phase 2. AGENTS.md says not to scaffold future phases; this is a deliberate exception, because Phase 2's milestone needs a run loop and a throwaway one would be rewritten in Phase 5.
 - RESET is never retried automatically, so a lost RESET ACK surfaces as a failed command that the scenario must handle.
-- Under decision A1, `Packet` changes shape once in Phase 2. Under decision B1, the wire protocol and the Phase 7a contract are unchanged.
+- `Packet` changes shape once in Phase 2 (A1). Under B1, the wire protocol and the Phase 7a contract are unchanged.
 - The cost: two station calls per tick instead of one, and one more module (`pocketsat/link.py`) above the boundary.
 
 ## Open questions for the maintainer
 
-1. **Decision A (§8):** A1 rename to `latency_us` (recommended), A2 keep float seconds, or A3 send and delivery timestamps.
-2. **Decision B (§9):** B1 off the wire (recommended), B2 callsign in COMMAND, B3 IDENT frame type, or B4 header addressing. If anything other than B1, it must be decided before Phase 7a starts.
+1. **Decision A (§8):** decided 2026-10-13, A1 (`latency_us`).
+2. **Decision B (§9):** decided 2026-10-13, B1 (off the wire). Revisit only if a scenario needs identification as a real transmission; B3 is then the route, before Phase 7a starts.
 3. **The orchestrator brought forward (§7).** Recommended: accept. The alternative is a loop in the tests plus a CLI-only copy, both rewritten in Phase 5.
 4. **RESET retries (§2).** Recommended: never automatic. The alternative is to retry RESET only after a downlink sequence restart and `boot_count` show the first attempt did not reboot. That is more automation, but it adds state for an edge case.
 5. **Link visibility at elevation 0° (§5).** Recommended: the geometric horizon, with no refraction and no terrain. ADR-0011 may revise this if its model needs to.
