@@ -387,6 +387,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Run ID and seed record format | Decided in ADR-0003: `run.json` with named, derived seed streams |
 | Field-level payloads on the wire (commands, ACK/NACK, telemetry, DATA) | Recorded in ADR-0009 (Accepted, #65): protocol version 1 as implemented in Phase 1; details in [protocol.md](protocol.md) |
 | Ground station structure, link, pass geometry placement, Phase 2 run loop, `Packet` time unit, station identity | Decided in [ADR-0010](adr/0010-ground-station-architecture.md) (Accepted, #151): a pure station called twice per tick, a `Link` protocol, `PassGeometry` off the target boundary, `latency_us`, callsign off the wire |
+| Pass geometry model, portable trigonometry, decibels without `log10`, eclipse | Decided in [ADR-0011](adr/0011-pass-geometry.md) (Accepted, #159): a circular orbit over a rotating Earth, placeable by a pass anchor; scenarios assert pass duration rather than set it; `math.frexp` plus a series for decibels (amends ADR-0006); eclipse stays time-based with a shared orbit period |
 
 ## 13. Out of scope for v1
 
