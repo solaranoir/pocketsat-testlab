@@ -156,6 +156,7 @@ GROUNDSTATION_MODULES = frozenset(
     {
         "groundstation/__init__.py",
         "groundstation/config.py",
+        "groundstation/downlink.py",
         "groundstation/events.py",
         "groundstation/station.py",
         "groundstation/telemetry.py",
