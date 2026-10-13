@@ -9,7 +9,7 @@ after it (steps 8 and 9: decoding). Commands are queued with
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
 stub below names its ticket: uplink encoding (#154), ACK/NACK correlation, timeouts and
-retries (#155), the telemetry store (#157), DATA (#158), pass
+retries (#155), DATA (#158), pass
 state (#161) and radio control (#164).
 """
 
@@ -77,8 +77,8 @@ class GroundStation:
             self._config.max_uplink_command_count, self._config.command_expiry_us
         )
         self._now_us = 0
-        self._telemetry = TelemetryStore()
-        self._downlink = DownlinkDecoder()
+        self._telemetry = TelemetryStore(self._config.telemetry_retention_count)
+        self._downlink = DownlinkDecoder(self._telemetry)
 
     @property
     def config(self) -> StationConfig:
@@ -87,7 +87,10 @@ class GroundStation:
 
     @property
     def telemetry(self) -> TelemetryStore:
-        """The decoded telemetry (#157). Empty until #157."""
+        """The decoded telemetry, bounded by ``config.telemetry_retention_count`` (#157).
+
+        Read-only to callers: the downlink decoder fills it in :meth:`end_tick`, and
+        :meth:`reset` empties it."""
         return self._telemetry
 
     @property
@@ -177,8 +180,8 @@ class GroundStation:
         Each packet is decoded by :class:`~pocketsat.groundstation.downlink.DownlinkDecoder`
         (#156): frame-level events first (rejection, sequence gap), then the content
         (telemetry, and a reboot when the boot count went up). Nothing raises for any
-        frame bytes. ACK correlation (#155), the telemetry store (#157) and DATA (#158)
-        are hooks in the decoder until their tickets.
+        frame bytes. Decoded telemetry is stored in :attr:`telemetry` (#157). ACK
+        correlation (#155) and DATA (#158) are hooks in the decoder until their tickets.
 
         Args:
             now_us: Simulated time at the end of the tick.
