@@ -24,7 +24,7 @@ injection (Phase 4) and HIL faults (Phase 7) are pending.
 
 **Phase 0 (architecture and skeleton) and Phase 1 (virtual spacecraft) are complete**;
 Phase 2 (ground station) is next. See [`docs/roadmap.md`](docs/roadmap.md) for every
-phase.
+phase and [`CHANGELOG.md`](CHANGELOG.md) for releases (latest: 0.1.0).
 
 Phase 1's milestone, "run a nominal scenario and receive deterministic spacecraft
 telemetry", was verified in #65. It delivers:

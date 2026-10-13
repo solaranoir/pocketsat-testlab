@@ -84,6 +84,21 @@ Performance budgets (#78 and #120, details in `docs/spacecraft.md`, "Performance
 - Keep PRs small and reviewable. A human reviews and merges; agents do not merge their own PRs.
 - Commit style: imperative, concise subject line (`Add TestTarget protocol`).
 
+## Releasing
+
+Releases mark completed roadmap phases. Before 1.0.0, each minor version is one phase
+(0.1.0 = Phases 0 and 1, 0.2.0 = Phase 2, …); 1.0.0 is the end of the Version 1 plan.
+Releases are git tags and GitHub releases only; nothing is published to PyPI.
+
+1. In a PR: set `version` in `pyproject.toml`, and move the changes under a new
+   version heading in `CHANGELOG.md` (with the release date and the comparison link).
+2. A human reviews and merges it; CI on `main` must be green.
+3. Tag the merge commit with an annotated tag `vX.Y.Z` and push the tag.
+4. Create the GitHub release from the tag, with the changelog entry as its notes. Mark
+   it a pre-release while the version is below 1.0.0.
+
+Agents prepare steps 1, 3 and 4 but create a tag or release only when a human says so.
+
 ## Definition of done
 
 - Acceptance criteria in the issue are met
