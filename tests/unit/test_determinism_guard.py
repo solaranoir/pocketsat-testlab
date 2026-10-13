@@ -269,6 +269,8 @@ def test_guard_flags_forbidden_uses(source: str) -> None:
         "import math\nmath.floor(x) + math.ceil(x)",
         "import math\nmath.isfinite(x)",
         "from math import sqrt, isfinite",
+        "import math\nmath.frexp(x)",  # exact: allowed by ADR-0011 §6
+        "from math import frexp",
         "abs(x) + min(x, y) + max(x, y)",
         "x ** 2",
         "2 ** 64",
@@ -276,6 +278,7 @@ def test_guard_flags_forbidden_uses(source: str) -> None:
         "rng.uniform(0.0, 1.0)",
         "portable_normal(rng, 0.0, 1.0)",
         "portable_cos_deg(angle)",
+        "portable_sincos_turns(turns) + portable_atan2(y, x) + portable_db(r)",
         "def f(**kwargs: int) -> None: ...",
         "x * x / y - z",
     ],

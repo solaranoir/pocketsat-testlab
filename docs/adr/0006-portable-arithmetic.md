@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Phase:** 1
-- **Amends / Supersedes:** Amends ADR-0003 §3, which names `gauss` as a stable method. Issue: #75.
+- **Amends / Supersedes:** Amends ADR-0003 §3, which names `gauss` as a stable method. Issue: #75. Amended by ADR-0011 §6 (`math.frexp` allowed; full-circle trigonometry and logarithm helpers, #160).
 
 ## Context
 
@@ -20,7 +20,7 @@ A last-bit difference rarely stays small. Near a flag threshold it can flip a fl
 
 Simulation code is everything under `src/pocketsat` except `pocketsat.reporting`.
 
-**Allowed:** `+ - * /`, `math.sqrt`, `abs`, `min`, `max`, `math.floor`, `math.ceil`, `math.isfinite`, comparisons, `**` with a non-negative integer-literal exponent, `random.Random.random()`, and `uniform()`.
+**Allowed:** `+ - * /`, `math.sqrt`, `abs`, `min`, `max`, `math.floor`, `math.ceil`, `math.isfinite`, `math.frexp` (added by ADR-0011 §6: it splits a float into mantissa and exponent by reading its bits, so it is exact on every platform, like `floor`), comparisons, `**` with a non-negative integer-literal exponent, `random.Random.random()`, and `uniform()`.
 
 **Not allowed:**
 
@@ -34,6 +34,7 @@ One caveat about `**`: for a *float* base, CPython evaluates even `x ** 2` throu
 
 - **Noise:** `pocketsat.core.rng.portable_normal(rng, mu, sigma)` sums 12 `rng.random()` draws and subtracts 6 (the Irwin-Hall approximation): mean 0 and variance exactly 1 before scaling, using only arithmetic. Samples are bounded at ±6σ, so the extreme tails of a true normal distribution never occur, which is acceptable for sensor noise.
 - **Cosine:** `pocketsat.core.portable.portable_cos_deg(angle_deg)` uses Bhaskara's approximation, cos x ≈ (π² - 4x²) / (π² + x²) for |x| ≤ 90°, with π as a literal constant. It is clamped to 0 beyond ±90°, because its use is a projected-area factor (solar generation against pointing error, #35). The maximum absolute error over ±90° is about 0.0016.
+- **Full-circle trigonometry and logarithms** (ADR-0011 §5, §6, #160): `portable_sincos_turns(turns)` (sine and cosine of an angle in turns, by range reduction and Taylor polynomials), `portable_atan2(y, x)` (radians, by argument reduction, one `sqrt` halving and a Taylor series), `portable_log2(x)` (by `frexp` and an atanh series) and `portable_db(ratio)` (10 log₁₀). Each is accurate to 1e-12 (1e-11 dB) against `math`, with pinned values in `tests/unit/test_portable.py`. They are what the pass geometry (`pocketsat.environment.orbit`) and the link budget use.
 - `RngFactory.stream()` documents that consumers use `random()`, `uniform()`, and `portable_normal()`.
 
 ### 3. Modelling consequences

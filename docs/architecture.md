@@ -243,7 +243,7 @@ Typed, immutable messages cross every boundary except the target boundary, which
 - **Packet** — a frame plus link-state attributes (elevation, range, Doppler, SNR, loss probability, latency) attached by the link (the ideal link in Phase 2, the RF channel from Phase 3). The latency is `latency_us`, integer microseconds like every simulated time (ADR-0010 §8). Corruption faults mutate the frame bytes, and the CRC catches them in real code paths.
 - **EnvironmentState** — per-tick inputs produced by the orchestrator-side environment model (`pocketsat.environment`): `sunlit` (bool, default `True`), `ambient_temp_c` (default 20.0), `sensor_noise_scale` (multiplier on each subsystem's nominal sensor noise, default 1.0), and `battery_soc_override` (0..1, default `None`). The defaults describe a nominal environment. `NominalEnvironment` produces a repeatable sunlit/eclipse cycle from simulated time, with orbit period and eclipse fraction as parameters. Its ambient temperature is `ambient_temp_c` in sunlight (default 20 °C) and `eclipse_ambient_temp_c` in eclipse (default -20 °C, set by the power and thermal budget, #72), switching exactly at the sunlit/eclipse boundaries. The step change is deliberate: the thermal model's time constant smooths it, and the battery survival heater (#38) cycles during each eclipse.
 - **TargetFault** — a fault delivered to the target (type, parameters, duration).
-- **PassGeometry** — the spacecraft's azimuth, elevation, range and range rate as seen from the station (`pocketsat.environment.geometry`). Orchestrator-side world truth, one record per tick, given to the link (visibility, link attributes) and the station (its pass prediction). It is not part of `EnvironmentState`, so it never crosses the `TestTarget` boundary (ADR-0010 §6). Its model is ADR-0011's (#159, #160).
+- **PassGeometry** — the spacecraft's azimuth, elevation, range and range rate as seen from the station (`pocketsat.environment.geometry`). Orchestrator-side world truth, one record per tick, given to the link (visibility, link attributes) and the station (its pass prediction). It is not part of `EnvironmentState`, so it never crosses the `TestTarget` boundary (ADR-0010 §6). Its model is ADR-0011's (#159): `OrbitGeometry` (`pocketsat.environment.orbit`, #160), a circular orbit over a rotating spherical Earth sharing `NominalEnvironment`'s orbit period, placed by orbital elements or by a pass anchor (`OrbitGeometry.with_pass(max_elevation_deg, at_us)`), with pass prediction by stepping (`next_pass`). It uses the full-circle portable helpers of ADR-0006 as amended by ADR-0011 (`portable_sincos_turns`, `portable_atan2`, `portable_db`).
 - **Station events** — the ground station's output (`StationEvent`, section 4.2).
 
 ## 6. The TestTarget interface
@@ -370,6 +370,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Ground station (`GroundStation`, `StationConfig`, events) | `pocketsat.groundstation` |
 | Link protocol, ideal link (`Link`, `IdealLink`, #153) | `pocketsat.link` |
 | Pass geometry record (`PassGeometry`) | `pocketsat.environment.geometry` |
+| Pass geometry provider (`OrbitGeometry`) | `pocketsat.environment.orbit` |
 | RF channel | `pocketsat.rf` |
 | Fault injection | `pocketsat.faults` |
 | Scenario DSL | `pocketsat.scenarios` |
