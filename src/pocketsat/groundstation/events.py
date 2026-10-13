@@ -239,12 +239,16 @@ class DataChunkReceived(_Event):
     Attributes:
         sequence: The frame's downlink header sequence.
         chunk_id: The chunk's ID.
-        content_ok: Whether the content matches ``chunk_content(chunk_id)``.
+        content_ok: Whether the content matches ``chunk_content(chunk_id)`` at the
+            configured chunk size. A chunk that does not is corrupted and not stored.
+        duplicate: Whether a chunk with this ID was already stored; the stored copy is
+            kept.
     """
 
     sequence: int
     chunk_id: int
     content_ok: bool
+    duplicate: bool = False
 
 
 @dataclass(frozen=True)

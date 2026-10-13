@@ -9,8 +9,8 @@ after it (steps 8 and 9: decoding). Commands are queued with
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
 stub below names its ticket: uplink encoding (#154), ACK/NACK correlation, timeouts and
-retries (#155), the telemetry store (#157), DATA (#158), pass
-state (#161) and radio control (#164).
+retries (#155), the telemetry store (#157), pass state (#161) and radio control
+(#164). DATA reassembly (#158) is the :attr:`~GroundStation.data` store.
 """
 
 from collections.abc import Sequence
@@ -20,6 +20,7 @@ from pocketsat.core.clock import check_us
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.data import DataStore
 from pocketsat.groundstation.downlink import DownlinkDecoder, LinkStatistics
 from pocketsat.groundstation.events import CommandRef, StationEvent
 from pocketsat.groundstation.telemetry import TelemetryStore
@@ -78,7 +79,8 @@ class GroundStation:
         )
         self._now_us = 0
         self._telemetry = TelemetryStore()
-        self._downlink = DownlinkDecoder()
+        self._data = DataStore(self._config.data_chunk_size_bytes)
+        self._downlink = DownlinkDecoder(data=self._data)
 
     @property
     def config(self) -> StationConfig:
@@ -100,6 +102,12 @@ class GroundStation:
         """Downlink statistics for the current pass (#156). The whole run is one pass
         until the pass state machine (#161) starts a new one at each AOS."""
         return self._downlink.pass_statistics
+
+    @property
+    def data(self) -> DataStore:
+        """The payload data received, reassembled by chunk ID, with its statistics
+        (#158). Read it, never write it: only the station's decoder adds chunks."""
+        return self._data
 
     def reset(self, rngs: RngFactory) -> None:
         """Return to the configured initial state at simulated time 0.
@@ -177,8 +185,9 @@ class GroundStation:
         Each packet is decoded by :class:`~pocketsat.groundstation.downlink.DownlinkDecoder`
         (#156): frame-level events first (rejection, sequence gap), then the content
         (telemetry, and a reboot when the boot count went up). Nothing raises for any
-        frame bytes. ACK correlation (#155), the telemetry store (#157) and DATA (#158)
-        are hooks in the decoder until their tickets.
+        frame bytes. DATA chunks are checked and stored in :attr:`data` (#158). ACK
+        correlation (#155) and the telemetry store (#157) are hooks in the decoder
+        until their tickets.
 
         Args:
             now_us: Simulated time at the end of the tick.

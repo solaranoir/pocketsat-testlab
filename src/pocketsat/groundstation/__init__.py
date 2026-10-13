@@ -7,6 +7,7 @@ target. See ``docs/groundstation.md``.
 """
 
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.data import ChunkRange, DataStatistics, DataStore
 from pocketsat.groundstation.downlink import LinkStatistics
 from pocketsat.groundstation.events import (
     EVENT_TYPES,
@@ -38,6 +39,7 @@ __all__ = [
     "DEFAULT_STATION_CONFIG",
     "EVENT_TYPES",
     "Aos",
+    "ChunkRange",
     "CommandAcked",
     "CommandFailed",
     "CommandNacked",
@@ -45,6 +47,8 @@ __all__ = [
     "CommandSent",
     "CommandTimedOut",
     "DataChunkReceived",
+    "DataStatistics",
+    "DataStore",
     "FailureReason",
     "FrameRejected",
     "GroundStation",

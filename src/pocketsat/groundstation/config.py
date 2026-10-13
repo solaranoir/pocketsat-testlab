@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Final
 
 from pocketsat.core.clock import check_us
+from pocketsat.spacecraft.config import MAX_CHUNK_SIZE_BYTES
 
 CALLSIGN_PATTERN: Final = re.compile(r"[A-Z0-9/]{3,16}")
 """A callsign: 3 to 16 uppercase letters, digits and ``/`` (portable suffixes such as
@@ -29,6 +30,10 @@ MAX_COMMAND_RETRY_COUNT: Final = 10
 
 DEFAULT_MAX_UPLINK_COMMAND_COUNT: Final = 4
 """Default for :attr:`StationConfig.max_uplink_command_count`; see its documentation."""
+
+DEFAULT_DATA_CHUNK_SIZE_BYTES: Final = 64
+"""Default for :attr:`StationConfig.data_chunk_size_bytes`: the spacecraft's default
+``PayloadConfig.chunk_size_bytes``."""
 
 
 def _number(name: str, value: float) -> float:
@@ -101,6 +106,12 @@ class StationConfig:
             (#154), simulated µs, or ``None`` to keep it queued until it is sent.
             Default ``None``: a command waits for the next pass, as an operator's queue
             does, unless a scenario asks for an expiry.
+        data_chunk_size_bytes: Size of every payload data chunk, bytes,
+            ``1..MAX_CHUNK_SIZE_BYTES`` (#158). The chunk size is not on the wire: both
+            ends are configured with it (ADR-0009 §6), so it must equal the spacecraft's
+            ``PayloadConfig.chunk_size_bytes``, and the station checks every DATA
+            chunk's content against ``chunk_content`` at this size. Default
+            :data:`DEFAULT_DATA_CHUNK_SIZE_BYTES` (64), the spacecraft's default.
 
     Raises:
         TypeError: A field has the wrong type.
@@ -119,6 +130,7 @@ class StationConfig:
     identification_interval_us: int = 600_000_000
     max_uplink_command_count: int = DEFAULT_MAX_UPLINK_COMMAND_COUNT
     command_expiry_us: int | None = None
+    data_chunk_size_bytes: int = DEFAULT_DATA_CHUNK_SIZE_BYTES
 
     def __post_init__(self) -> None:
         if not isinstance(self.callsign, str):
@@ -159,6 +171,12 @@ class StationConfig:
         _positive_int("max_uplink_command_count", self.max_uplink_command_count)
         if self.command_expiry_us is not None:
             check_us("command_expiry_us", self.command_expiry_us)
+        _positive_int("data_chunk_size_bytes", self.data_chunk_size_bytes)
+        if self.data_chunk_size_bytes > MAX_CHUNK_SIZE_BYTES:
+            raise ValueError(
+                f"data_chunk_size_bytes must be at most {MAX_CHUNK_SIZE_BYTES}, "
+                f"got {self.data_chunk_size_bytes}"
+            )
 
     def check_tick(self, tick_us: int) -> None:
         """Check that this configuration can run at a tick of ``tick_us``.

@@ -47,6 +47,7 @@ sequenceDiagram
 | `end_tick(now_us, downlink)` | steps 8-9, tick end | Decodes each packet in arrival order (#156, #155, #158) and returns the events: per packet, frame-level events first, then the content |
 | `telemetry` | any time | Read-only `TelemetryStore` of decoded telemetry (#157) |
 | `link_statistics`, `pass_link_statistics` | any time | Downlink `LinkStatistics` since the last reset and for the current pass (#156) |
+| `data` | any time | The `DataStore` of payload data received, reassembled by chunk ID, with its `DataStatistics` (#158). Read only |
 
 `now_us` is integer simulated microseconds (ADR-0003) and never goes back:
 `begin_tick` gets the tick's start, `end_tick` its end (the time `SilTarget` gives the
@@ -72,6 +73,7 @@ spacecraft settings (ADR-0005). Change single values with `dataclasses.replace()
 | `identification_interval_us` | 600 000 000 | 10 minutes, the interval amateur rules commonly require |
 | `max_uplink_command_count` | 4 | Most COMMAND frames per tick (#154). Each command's 14-byte ACK comes down in the same tick, and the default downlink carries 120 bytes per 100 ms tick, so four ACKs (56 bytes) still leave room for a 36-byte TELEMETRY frame |
 | `command_expiry_us` | `None` | How long after its due time an unsent command is dropped as `CommandFailed` (`EXPIRED`) (#154). `None` keeps it queued for the next pass |
+| `data_chunk_size_bytes` | 64 | Payload chunk size (#158). Not on the wire: both ends are configured with it (ADR-0009 §6), so it must equal the spacecraft's `PayloadConfig.chunk_size_bytes`, whose default it matches |
 
 `StationConfig.check_tick(tick_us)` rejects a timeout shorter than two ticks, so an
 answer in the next tick is never a timeout. This is a provisional bound; #155 states the
@@ -137,7 +139,7 @@ telemetry store, so a new observable is a new event type.
 | `CommandFailed` | ACK correlation (#155), uplink expiry (#154) | `command_ref`, `reason` (`FailureReason`: `RETRIES_EXHAUSTED`, `NOT_RETRYABLE`, `EXPIRED`) |
 | `UnmatchedAck` | ACK correlation (#155) | `sequence`, `command_id` |
 | `TelemetryReceived` | decoding (#156) | `sequence`, `telemetry` |
-| `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok` |
+| `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok`, `duplicate` |
 | `FrameRejected` | decoding (#156) | `reason` (`RejectionReason`: sync, length, CRC, type, payload, wrong direction), `frame` |
 | `SequenceGap` | decoding (#156) | `sequence` (received), `missing_count`; the expected sequence is `(sequence - missing_count) mod 65536` |
 | `SpacecraftRebooted` | decoding (#156) | `sequence`, `boot_count` |
@@ -174,10 +176,10 @@ counted by the link, not the station, which never sees them.
 3. **Content**, by frame type. TELEMETRY decodes into `TelemetryReceived`, followed by
    `SpacecraftRebooted` when its `boot_count` is higher than the previous telemetry's.
    The reboot is confirmed by the boot count, not the header, so it is reported even if
-   the restart itself was hidden by a gap. ACK and DATA payloads are decoded and passed
-   to hooks that are no-ops until #155 (ACK/NACK correlation) and #158 (DATA
-   reassembly and content checks; `DataChunkReceived` needs the configured chunk size).
-   Decoded telemetry likewise goes to a hook that #157 fills with the telemetry store.
+   the restart itself was hidden by a gap. DATA decodes into a chunk that the
+   `DataStore` checks, stores and answers with `DataChunkReceived` (#158, below). ACK
+   payloads are decoded and passed to a hook that is a no-op until #155 (ACK/NACK
+   correlation). Decoded telemetry likewise goes to a hook that #157 fills with the telemetry store.
    A payload that does not decode for its type is `FrameRejected` with reason
    `PAYLOAD`; its sequence was already tracked, because the CRC vouched for the header.
 
@@ -186,6 +188,40 @@ reason), frames missing, and sequence restarts. `GroundStation.link_statistics` 
 since the last reset and `pass_link_statistics` since the current pass began. Until the
 pass state machine (#161) calls `DownlinkDecoder.start_pass()` at each AOS, the whole
 run is one pass.
+
+## DATA
+
+DATA chunks go to the station's `DataStore` (`pocketsat.groundstation.data`, #158),
+`GroundStation.data`. Every DATA frame gives one `DataChunkReceived`.
+
+- **Content check.** A chunk's content is `chunk_content(chunk_id, chunk_size)` (#43),
+  at the station's `data_chunk_size_bytes`. A chunk that does not match, including one
+  of another length, is **corrupted** (`content_ok` false): counted and never stored, so
+  a later good copy of that ID is still stored.
+- **Stored once.** A good chunk is stored by ID. A chunk whose ID is already stored is a
+  **duplicate** (`duplicate` true): counted, and the stored copy kept. A corrupted copy
+  of a stored ID is counted as corrupted and also flagged `duplicate`.
+- **Order.** Chunks are stored by ID whatever order they arrive in; `chunk_ids()` lists
+  them in ID order and `chunk(chunk_id)` returns one.
+- **Missing IDs.** Within a downlink session chunk IDs go up by one and are released once
+  sent (ADR-0009 §6), so an ID never stored between the lowest and highest stored is
+  lost. Missing IDs are reported as `ChunkRange`s (`first_id`..`last_id`), so a loss of
+  any size is one entry: for the run, and for the current pass between the lowest and
+  highest ID stored in that pass.
+
+**DATA statistics** (`DataStatistics`, `data.statistics` since the last reset and
+`data.pass_statistics` for the current pass): chunks received, stored, duplicate and
+corrupted; content bytes received and stored; the missing ranges and their count; the
+times of the first and last chunk; and the rate, `data_rate_bytes_per_s`: the content
+bytes received after the first chunk divided by the time from the first chunk to the
+last (`None` until two chunks arrived at different times). The DATA pass begins with the
+link statistics' pass (`DownlinkDecoder.start_pass()`, #161); stored chunks are kept
+across passes.
+
+Story #146's test (`tests/sil/test_station_story_146.py`) runs ten minutes of SCIENCE
+and a DOWNLINK pass against `SilTarget` through the ideal link, with the station sending
+the commands, and checks every telemetry frame decoded, every chunk stored once, in
+order, verified and none missing, and no frame errors or gaps.
 
 ## Determinism
 
