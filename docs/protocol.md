@@ -89,7 +89,7 @@ use typed, immutable messages (`pocketsat.messages`, `pocketsat.targets.base`).
 | `Telemetry` | `pocketsat.messages` | Decoded TELEMETRY payload: reported values at wire resolution (`decode_telemetry`). |
 | `DataChunk` | `pocketsat.messages` | A DATA frame payload: one payload chunk's `chunk_id` and `content` (`encode_data`, `decode_data`, #56). |
 | `FlightComputerTelemetryState` | `pocketsat.messages` | The flight computer's input to `encode_telemetry`: `uptime_ms`, `mode` (a `pocketsat.flight.Mode`), `boot_count` (#49, #47), assembled by the telemetry scheduler (#55). |
-| `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. |
+| `Packet` | `pocketsat.messages` | A frame in transit plus optional link state (elevation, range, Doppler, SNR, loss probability, latency in integer µs, `latency_us`) attached by the link (ADR-0010). |
 | `EnvironmentState` | `pocketsat.targets.base` | Per-tick environment inputs; delivered by `apply_environment()`. |
 | `TargetFault` | `pocketsat.targets.base` | Fault type, parameters, duration; delivered by `inject()`. |
 

@@ -40,6 +40,18 @@ def test_packet_link_state_defaults_to_none() -> None:
     assert all(getattr(packet, name) is None for name in link_fields)
 
 
+def test_packet_latency_is_integer_microseconds() -> None:
+    # ADR-0010 §8 (decision A1): simulated time is never a float (ADR-0003).
+    assert Packet(frame=b"\x01", latency_us=0).latency_us == 0
+    assert Packet(frame=b"\x01", latency_us=250_000).latency_us == 250_000
+    with pytest.raises(TypeError):
+        Packet(frame=b"\x01", latency_us=0.25)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        Packet(frame=b"\x01", latency_us=True)
+    with pytest.raises(ValueError):
+        Packet(frame=b"\x01", latency_us=-1)
+
+
 def test_target_fault_params_are_read_only_copy() -> None:
     params: dict[str, base.FaultParam] = {"sensor": "battery"}
     fault = base.TargetFault(fault_type="sensor_freeze", params=params, duration_us=10_000_000)

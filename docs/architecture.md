@@ -1,6 +1,6 @@
 # PocketSat Test Lab — Architecture
 
-Status: Phase 1 complete (#65), reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), ADR-0004 to ADR-0008 (the Phase 1 spacecraft model), and ADR-0009 (the Phase 1 wire payloads). Decisions marked **(ADR-000N)** are recorded in the named ADR.
+Status: Phase 1 complete (#65), Phase 2 in progress; reflects ADR-0002 (TestTarget), ADR-0003 (time and determinism), ADR-0004 to ADR-0008 (the Phase 1 spacecraft model), ADR-0009 (the Phase 1 wire payloads), and ADR-0010 (the ground station, Proposed). Decisions marked **(ADR-000N)** are recorded in the named ADR.
 
 ## 1. Purpose
 
@@ -88,7 +88,7 @@ flowchart LR
 | **HIL target (bridge)** | Bridge to an MCU over serial/USB: carries RF-path frames, serializes `EnvironmentState` onto the sensor-input channel, delivers faults on the test-control channel or the physical reset line, paces `advance()` in real time, flashing hooks, watchdog observation | Mission logic (that lives in firmware) |
 | **MCU flight software (HIL spacecraft)** | Mission logic on real hardware: modes, command handling, telemetry, framing and CRC, watchdog, safe mode, reset recovery; reads sensor inputs and test-control messages from the bridge | Physics and environment (supplied by the bridge), link effects, knowing it is under test beyond the test-control channel |
 | **RF Channel Model** | Attach link state to each packet (elevation, range, Doppler, SNR, loss probability, latency); drop, delay, or corrupt packets accordingly | Decoding, spacecraft state |
-| **Ground Station** | Pass state (AOS/LOS), radio control, command uplink, packet decoding, station identity, console output | Orbital truth, fault scheduling |
+| **Ground Station** | Pass state (AOS/LOS), radio control, command uplink, packet decoding, station identity, console output. A pure component: simulated time, pass geometry and downlink packets in; uplink packets and events out (ADR-0010, section 4.2) | Orbital truth, fault scheduling, calling the link or the target |
 | **Fault Injector** | Apply reusable faults at defined hook points on schedule | Deciding expected behavior (scenarios assert that) |
 | **Reporting** | Persist telemetry, logs, per-run results, campaign summaries | Execution |
 
@@ -221,6 +221,18 @@ This convention applies to every record dataclass in `pocketsat`: snapshots, con
 - **Power draws** that another subsystem reads are `_w` fields on the truth record.
 - **Sign conventions:** battery current is positive when charging; power draws (`_w` loads) are never negative; solar generation is never negative; net battery power is generation minus total load (`PowerTruth.net_power_w`).
 
+### 4.2 Ground station (ADR-0010)
+
+`pocketsat.groundstation` (#152) is shared infrastructure above the `TestTarget` boundary. `GroundStation` never calls the target, the link or a clock; the run loop moves packets between them. It is built with a frozen, validated `StationConfig` (callsign, location, elevation mask, nominal uplink and downlink frequencies in integer Hz, command timeout and retry count, identification interval; `DEFAULT_STATION_CONFIG`), and `reset(rngs)` returns to it, as for the spacecraft (ADR-0005).
+
+The station is called twice per tick, so it fits the step order of section 8 without adding a tick of latency either way:
+
+- `submit(command)` at step 3 queues a `Command` and returns a `CommandRef`, which names the command across all its attempts;
+- `begin_tick(now_us, geometry)` at steps 3 and 4 (tick start) updates pass state, handles timeouts and retries, and returns `Uplink(packets, events)`;
+- `end_tick(now_us, downlink)` at steps 8 and 9 (tick end) decodes the downlink in arrival order and returns the events.
+
+Everything the station observes is an event (`StationEvent`: AOS/LOS, commands sent, ACKed, NACKed, timed out and failed, unmatched ACKs, telemetry and DATA received, rejected frames, sequence gaps, spacecraft reboots, radio state, identification), a frozen record with `time_us`. The console and assertions read only events and the telemetry store. The callsign never goes on the wire (ADR-0010 §9). RESET is never retried automatically, because a retry after a lost ACK would reboot the spacecraft twice (ADR-0010 §2). Behaviour arrives ticket by ticket (#154 to #164); see [groundstation.md](groundstation.md).
+
 ## 5. Message types
 
 Typed, immutable messages cross every boundary except the target boundary, which carries raw bytes (see section 6).
@@ -228,9 +240,11 @@ Typed, immutable messages cross every boundary except the target boundary, which
 - **Command** — ground-originated request (`PING`, `SET_MODE`, `BEGIN_DOWNLINK`, `ENTER_SAFE_MODE`, `RESET`) with ID and payload. Encoded into a frame by the ground station.
 - **Telemetry** — timestamped spacecraft state: mode, power, thermal, attitude, payload status, counters. Decoded from a frame by the ground station.
 - **Frame** — the encoded wire unit (`bytes`): sync, version, type, sequence, length, payload, CRC-16. The same format is implemented in Python and in MCU firmware. See ADR-0002 and `docs/protocol.md`.
-- **Packet** — a frame plus link-state attributes (elevation, range, Doppler, SNR, loss probability, latency) attached by the RF channel. Corruption faults mutate the frame bytes, and the CRC catches them in real code paths.
+- **Packet** — a frame plus link-state attributes (elevation, range, Doppler, SNR, loss probability, latency) attached by the link (the ideal link in Phase 2, the RF channel from Phase 3). The latency is `latency_us`, integer microseconds like every simulated time (ADR-0010 §8). Corruption faults mutate the frame bytes, and the CRC catches them in real code paths.
 - **EnvironmentState** — per-tick inputs produced by the orchestrator-side environment model (`pocketsat.environment`): `sunlit` (bool, default `True`), `ambient_temp_c` (default 20.0), `sensor_noise_scale` (multiplier on each subsystem's nominal sensor noise, default 1.0), and `battery_soc_override` (0..1, default `None`). The defaults describe a nominal environment. `NominalEnvironment` produces a repeatable sunlit/eclipse cycle from simulated time, with orbit period and eclipse fraction as parameters. Its ambient temperature is `ambient_temp_c` in sunlight (default 20 °C) and `eclipse_ambient_temp_c` in eclipse (default -20 °C, set by the power and thermal budget, #72), switching exactly at the sunlit/eclipse boundaries. The step change is deliberate: the thermal model's time constant smooths it, and the battery survival heater (#38) cycles during each eclipse.
 - **TargetFault** — a fault delivered to the target (type, parameters, duration).
+- **PassGeometry** — the spacecraft's azimuth, elevation, range and range rate as seen from the station (`pocketsat.environment.geometry`). Orchestrator-side world truth, one record per tick, given to the link (visibility, link attributes) and the station (its pass prediction). It is not part of `EnvironmentState`, so it never crosses the `TestTarget` boundary (ADR-0010 §6). Its model is ADR-0011's (#159, #160).
+- **Station events** — the ground station's output (`StationEvent`, section 4.2).
 
 ## 6. The TestTarget interface
 
@@ -353,7 +367,9 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Environment model (`NominalEnvironment`) | `pocketsat.environment` |
 | Spacecraft model | `pocketsat.spacecraft` |
 | Flight computer (modes: [spacecraft-modes.md](spacecraft-modes.md)) | `pocketsat.flight` |
-| Ground station | `pocketsat.groundstation` |
+| Ground station (`GroundStation`, `StationConfig`, events) | `pocketsat.groundstation` |
+| Link protocol, ideal link (`Link`, `IdealLink`, #153) | `pocketsat.link` |
+| Pass geometry record (`PassGeometry`) | `pocketsat.environment.geometry` |
 | RF channel | `pocketsat.rf` |
 | Fault injection | `pocketsat.faults` |
 | Scenario DSL | `pocketsat.scenarios` |
@@ -370,6 +386,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Tick size and scheduling model for the run loop | Decided in ADR-0003: fixed 100 ms default tick, integer microsecond time, fixed ten-step order |
 | Run ID and seed record format | Decided in ADR-0003: `run.json` with named, derived seed streams |
 | Field-level payloads on the wire (commands, ACK/NACK, telemetry, DATA) | Recorded in ADR-0009 (Accepted, #65): protocol version 1 as implemented in Phase 1; details in [protocol.md](protocol.md) |
+| Ground station structure, link, pass geometry placement, Phase 2 run loop, `Packet` time unit, station identity | Proposed in [ADR-0010](adr/0010-ground-station-architecture.md) (#151): a pure station called twice per tick, a `Link` protocol, `PassGeometry` off the target boundary, `latency_us`, callsign off the wire |
 
 ## 13. Out of scope for v1
 
