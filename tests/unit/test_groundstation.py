@@ -181,8 +181,9 @@ def test_stubs_are_no_ops_until_their_tickets() -> None:
     station = GroundStation()
     assert station.begin_tick(0, GEOMETRY) == Uplink()
     assert station.begin_tick(0, None) == Uplink(packets=(), events=())
+    # Decoding is #156 (test_station_downlink.py); the telemetry store stays empty until #157.
     downlink = [Packet(frame=b"\xa5\x5a\x01\x02\x00\x00\x00\x00\x00\x00")]
-    assert station.end_tick(100_000, downlink) == ()
+    assert [type(e) for e in station.end_tick(100_000, downlink)] == [FrameRejected]
     assert station.end_tick(100_000, []) == ()
     assert len(station.telemetry) == 0
     assert station.telemetry.latest is None

@@ -46,6 +46,7 @@ sequenceDiagram
 | `begin_tick(now_us, geometry)` | steps 3-4, tick start | Pass state (#161), timeouts and retries (#155), then encoding queued commands while the radio may transmit (#154, #164). Returns `Uplink(packets, events)` |
 | `end_tick(now_us, downlink)` | steps 8-9, tick end | Decodes each packet in arrival order (#156, #155, #158) and returns the events: per packet, frame-level events first, then the content |
 | `telemetry` | any time | Read-only `TelemetryStore` of decoded telemetry (#157) |
+| `link_statistics`, `pass_link_statistics` | any time | Downlink `LinkStatistics` since the last reset and for the current pass (#156) |
 
 `now_us` is integer simulated microseconds (ADR-0003) and never goes back:
 `begin_tick` gets the tick's start, `end_tick` its end (the time `SilTarget` gives the
@@ -146,6 +147,45 @@ telemetry store, so a new observable is a new event type.
 A COMMAND frame received on the downlink, as `EchoTarget` produces, is a
 `FrameRejected` with reason `WRONG_DIRECTION` and its bytes. Frames the link drops are
 counted by the link, not the station, which never sees them.
+
+## Downlink
+
+`end_tick` hands each packet, in arrival order, to the `DownlinkDecoder`
+(`pocketsat.groundstation.downlink`, #156). Nothing raises for any received bytes.
+
+1. **Frame decoding.** A frame that fails `decode_frame` is `FrameRejected` with reason
+   `SYNC`, `LENGTH`, `CRC` or `TYPE`. A valid COMMAND frame is `WRONG_DIRECTION`. Neither
+   takes part in sequence tracking: a failed frame's header cannot be trusted, and a
+   COMMAND frame is not downlink.
+2. **Sequence tracking.** Every valid downlink frame, of any type, is checked against
+   the one downlink counter (ADR-0009 §7). With `s` received, `e` expected and
+   `d = (s - e) mod 65536`:
+
+   | Case | Read as | Missing |
+   |---|---|---|
+   | First frame after a station reset | in order | 0 |
+   | `d == 0` (includes `0xFFFF` → `0`) | in order | 0 |
+   | `s == 0`, `d != 0` | restart (reboot) | 0: the old count's lost frames are unknowable |
+   | `0 < d < 32768` | gap (wrap included) | `d` |
+   | `d >= 32768` | restart whose first frames were lost | `s` (frames `0 .. s - 1`) |
+
+   A gap emits `SequenceGap` before the frame's content. A wrap that lost exactly the
+   frames up to `0xFFFF` is indistinguishable from a reboot and is read as a restart.
+3. **Content**, by frame type. TELEMETRY decodes into `TelemetryReceived`, followed by
+   `SpacecraftRebooted` when its `boot_count` is higher than the previous telemetry's.
+   The reboot is confirmed by the boot count, not the header, so it is reported even if
+   the restart itself was hidden by a gap. ACK and DATA payloads are decoded and passed
+   to hooks that are no-ops until #155 (ACK/NACK correlation) and #158 (DATA
+   reassembly and content checks; `DataChunkReceived` needs the configured chunk size).
+   Decoded telemetry likewise goes to a hook that #157 fills with the telemetry store.
+   A payload that does not decode for its type is `FrameRejected` with reason
+   `PAYLOAD`; its sequence was already tracked, because the CRC vouched for the header.
+
+**Link statistics** (`LinkStatistics`): packets received, rejected (in total and per
+reason), frames missing, and sequence restarts. `GroundStation.link_statistics` counts
+since the last reset and `pass_link_statistics` since the current pass began. Until the
+pass state machine (#161) calls `DownlinkDecoder.start_pass()` at each AOS, the whole
+run is one pass.
 
 ## Determinism
 

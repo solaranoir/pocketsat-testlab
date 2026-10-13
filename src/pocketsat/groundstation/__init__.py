@@ -7,6 +7,7 @@ target. See ``docs/groundstation.md``.
 """
 
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.downlink import LinkStatistics
 from pocketsat.groundstation.events import (
     EVENT_TYPES,
     Aos,
@@ -47,6 +48,7 @@ __all__ = [
     "FailureReason",
     "FrameRejected",
     "GroundStation",
+    "LinkStatistics",
     "Los",
     "RadioState",
     "RadioStateChanged",

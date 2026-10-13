@@ -9,7 +9,7 @@ after it (steps 8 and 9: decoding). Commands are queued with
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
 stub below names its ticket: uplink encoding (#154), ACK/NACK correlation, timeouts and
-retries (#155), downlink decoding (#156), the telemetry store (#157), DATA (#158), pass
+retries (#155), the telemetry store (#157), DATA (#158), pass
 state (#161) and radio control (#164).
 """
 
@@ -20,6 +20,7 @@ from pocketsat.core.clock import check_us
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.downlink import DownlinkDecoder, LinkStatistics
 from pocketsat.groundstation.events import CommandRef, StationEvent
 from pocketsat.groundstation.telemetry import TelemetryStore
 from pocketsat.groundstation.uplink import CommandQueue, TransmitGate, always_open
@@ -77,6 +78,7 @@ class GroundStation:
         )
         self._now_us = 0
         self._telemetry = TelemetryStore()
+        self._downlink = DownlinkDecoder()
 
     @property
     def config(self) -> StationConfig:
@@ -87,6 +89,17 @@ class GroundStation:
     def telemetry(self) -> TelemetryStore:
         """The decoded telemetry (#157). Empty until #157."""
         return self._telemetry
+
+    @property
+    def link_statistics(self) -> LinkStatistics:
+        """Downlink statistics since the last reset (#156)."""
+        return self._downlink.statistics
+
+    @property
+    def pass_link_statistics(self) -> LinkStatistics:
+        """Downlink statistics for the current pass (#156). The whole run is one pass
+        until the pass state machine (#161) starts a new one at each AOS."""
+        return self._downlink.pass_statistics
 
     def reset(self, rngs: RngFactory) -> None:
         """Return to the configured initial state at simulated time 0.
@@ -161,8 +174,11 @@ class GroundStation:
     def end_tick(self, now_us: int, downlink: Sequence[Packet]) -> tuple[StationEvent, ...]:
         """End a tick (steps 8 and 9): decode the downlink, in arrival order.
 
-        A stub until #156 (decoding), #155 (ACK correlation), #157 (telemetry store)
-        and #158 (DATA): packets are accepted and nothing is decoded.
+        Each packet is decoded by :class:`~pocketsat.groundstation.downlink.DownlinkDecoder`
+        (#156): frame-level events first (rejection, sequence gap), then the content
+        (telemetry, and a reboot when the boot count went up). Nothing raises for any
+        frame bytes. ACK correlation (#155), the telemetry store (#157) and DATA (#158)
+        are hooks in the decoder until their tickets.
 
         Args:
             now_us: Simulated time at the end of the tick.
@@ -180,7 +196,10 @@ class GroundStation:
         for packet in downlink:
             if not isinstance(packet, Packet):
                 raise TypeError(f"downlink items must be Packets, got {packet!r}")
-        return ()
+        events: list[StationEvent] = []
+        for packet in downlink:
+            events.extend(self._downlink.decode(now_us, packet))
+        return tuple(events)
 
     def _advance_to(self, now_us: int) -> None:
         """Validate and record the simulated time of a call. Time never goes back."""
