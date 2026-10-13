@@ -69,6 +69,8 @@ spacecraft settings (ADR-0005). Change single values with `dataclasses.replace()
 | `command_timeout_us` | 2 000 000 | 20 ticks at 100 ms. Command to ACK is the same tick at the default tick, a few ticks late for a RESET at short ticks (ADR-0008 §6a) |
 | `command_retry_count` | 2 | Retries after the first attempt, 0 to 10. RESET is never retried (below) |
 | `identification_interval_us` | 600 000 000 | 10 minutes, the interval amateur rules commonly require |
+| `max_uplink_command_count` | 4 | Most COMMAND frames per tick (#154). Each command's 14-byte ACK comes down in the same tick, and the default downlink carries 120 bytes per 100 ms tick, so four ACKs (56 bytes) still leave room for a 36-byte TELEMETRY frame |
+| `command_expiry_us` | `None` | How long after its due time an unsent command is dropped as `CommandFailed` (`EXPIRED`) (#154). `None` keeps it queued for the next pass |
 
 `StationConfig.check_tick(tick_us)` rejects a timeout shorter than two ticks, so an
 answer in the next tick is never a timeout. This is a provisional bound; #155 states the
@@ -87,6 +89,35 @@ accepts it in every mode, BOOT included, so a retry after a lost ACK reboots it 
 time. A RESET that times out is reported as `CommandFailed` (`NOT_RETRYABLE`) and the
 scenario decides.
 
+## Uplink
+
+`submit(command, *, due_us=None)` queues a command; `begin_tick` sends it
+(`pocketsat.groundstation.uplink`, #154). In `begin_tick`, after pass state and timeouts:
+
+1. **Expiry.** With `command_expiry_us` set, every queued command still waiting
+   `command_expiry_us` after its due time is dropped and reported as `CommandFailed`
+   with reason `EXPIRED`. This is checked whether or not the gate is open, so a command
+   queued through a whole outage still expires on time.
+2. **Gate.** If the transmit gate is closed, nothing is sent and the commands stay
+   queued. The gate is a function of simulated time, `transmit_gate(now_us) -> bool`,
+   given to the constructor (`GroundStation(config, transmit_gate=...)`). It defaults to
+   `always_open` until radio control (#164) supplies the real one, and it must be
+   deterministic.
+3. **Send.** Due commands (`due_us <= now_us`) are encoded into COMMAND frames
+   (`encode_command`, ADR-0009 §3) in order of due time, then submission order, at most
+   `max_uplink_command_count` per tick. A command that is not yet due never holds back
+   one that is. Each frame takes the next uplink sequence number and gets a
+   `CommandSent` event (`retry_count` 0).
+
+`due_us` defaults to the station's current time, the time of its latest `begin_tick` or
+`end_tick`, so a command submitted at step 3 goes out in the same tick's `begin_tick`. A
+due time in the past is due at once. The uplink sequence starts at 0 on `reset` and
+wraps `0xFFFF` → `0x0000`. `Uplink.events` lists expiries first, then one
+`CommandSent` per packet in transmission order. Uplink packets carry only the frame;
+the link fills any link attributes.
+
+Retries and timeouts are #155: until then a sent command is never sent again.
+
 ## Events
 
 Every event is a frozen record whose first field is `time_us`. `StationEvent` is their
@@ -102,7 +133,7 @@ telemetry store, so a new observable is a new event type.
 | `CommandAcked` | ACK correlation (#155) | `command_ref`, `sequence` |
 | `CommandNacked` | ACK correlation (#155) | `command_ref`, `sequence`, `reason` (`DecodeReason` or `RejectReason`) |
 | `CommandTimedOut` | ACK correlation (#155) | `command_ref`, `retry_count`, `will_retry` |
-| `CommandFailed` | ACK correlation (#155) | `command_ref`, `reason` (`FailureReason`: `RETRIES_EXHAUSTED`, `NOT_RETRYABLE`) |
+| `CommandFailed` | ACK correlation (#155), uplink expiry (#154) | `command_ref`, `reason` (`FailureReason`: `RETRIES_EXHAUSTED`, `NOT_RETRYABLE`, `EXPIRED`) |
 | `UnmatchedAck` | ACK correlation (#155) | `sequence`, `command_id` |
 | `TelemetryReceived` | decoding (#156) | `sequence`, `telemetry` |
 | `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok` |

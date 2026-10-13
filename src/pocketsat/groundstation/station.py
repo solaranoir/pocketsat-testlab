@@ -22,6 +22,7 @@ from pocketsat.environment.geometry import PassGeometry
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
 from pocketsat.groundstation.events import CommandRef, StationEvent
 from pocketsat.groundstation.telemetry import TelemetryStore
+from pocketsat.groundstation.uplink import CommandQueue, TransmitGate, always_open
 from pocketsat.messages import Command, Packet
 
 
@@ -45,21 +46,35 @@ class GroundStation:
 
     Args:
         config: The station's configuration (ADR-0010 §3).
+        transmit_gate: Whether the station may transmit at a simulated time (#154).
+            Defaults to :func:`~pocketsat.groundstation.uplink.always_open` until radio
+            control (#164) supplies one. Must be deterministic (ADR-0003).
 
     Raises:
-        TypeError: ``config`` is not a :class:`StationConfig`.
+        TypeError: ``config`` is not a :class:`StationConfig`, or ``transmit_gate`` is
+            not callable.
     """
 
-    def __init__(self, config: StationConfig = DEFAULT_STATION_CONFIG) -> None:
+    def __init__(
+        self,
+        config: StationConfig = DEFAULT_STATION_CONFIG,
+        *,
+        transmit_gate: TransmitGate = always_open,
+    ) -> None:
         if not isinstance(config, StationConfig):
             raise TypeError(f"config must be a StationConfig, got {config!r}")
+        if not callable(transmit_gate):
+            raise TypeError(f"transmit_gate must be callable, got {transmit_gate!r}")
         self._config = config
+        self._transmit_gate = transmit_gate
         self._clear()
 
     def _clear(self) -> None:
         """Set every piece of run state to its initial value."""
         self._next_ref_id = 0
-        self._queue: list[tuple[CommandRef, Command]] = []
+        self._uplink = CommandQueue(
+            self._config.max_uplink_command_count, self._config.command_expiry_us
+        )
         self._now_us = 0
         self._telemetry = TelemetryStore()
 
@@ -87,32 +102,42 @@ class GroundStation:
             raise TypeError(f"rngs must be an RngFactory, got {rngs!r}")
         self._clear()
 
-    def submit(self, command: Command) -> CommandRef:
+    def submit(self, command: Command, *, due_us: int | None = None) -> CommandRef:
         """Queue a command for uplink (step 3). Nothing is encoded until :meth:`begin_tick`.
 
         Args:
             command: The command to send.
+            due_us: Simulated time from which it may be sent (#154). ``None`` (the
+                default) means now: the time of the station's latest
+                :meth:`begin_tick` or :meth:`end_tick`, so a command submitted at step 3
+                goes out in this tick's :meth:`begin_tick` if the gate is open. A time in
+                the past is due immediately.
 
         Returns:
             The reference that identifies the command in every later event.
 
         Raises:
-            TypeError: ``command`` is not a :class:`Command`.
+            TypeError: ``command`` is not a :class:`Command`, or ``due_us`` is not an
+                int or ``None``.
+            ValueError: ``due_us`` is negative.
         """
         if not isinstance(command, Command):
             raise TypeError(f"command must be a Command, got {command!r}")
+        due = self._now_us if due_us is None else due_us
+        check_us("due_us", due)
         ref = CommandRef(self._next_ref_id)
         self._next_ref_id += 1
-        self._queue.append((ref, command))
+        self._uplink.add(ref, command, due)
         return ref
 
     def begin_tick(self, now_us: int, geometry: PassGeometry | None) -> Uplink:
         """Start a tick (steps 3 and 4): pass state, timeouts and retries, then uplink.
 
-        Stubs until their tickets land: pass state from ``geometry`` (#161), timeouts
-        and retries (#155), and encoding queued commands into COMMAND frames while the
-        radio may transmit (#154, #164). Until then queued commands stay queued and the
-        result is empty.
+        Queued commands that are due are encoded into COMMAND frames while the transmit
+        gate is open, at most ``config.max_uplink_command_count`` per tick, and stale
+        ones expire (#154, :mod:`pocketsat.groundstation.uplink`). Stubs until their
+        tickets land: pass state from ``geometry`` (#161), timeouts and retries (#155),
+        and the radio's gate (#164).
 
         Args:
             now_us: Simulated time at the start of the tick.
@@ -130,7 +155,8 @@ class GroundStation:
         self._advance_to(now_us)
         if geometry is not None and not isinstance(geometry, PassGeometry):
             raise TypeError(f"geometry must be a PassGeometry or None, got {geometry!r}")
-        return Uplink()
+        packets, events = self._uplink.transmit(now_us, self._transmit_gate(now_us))
+        return Uplink(packets, events)
 
     def end_tick(self, now_us: int, downlink: Sequence[Packet]) -> tuple[StationEvent, ...]:
         """End a tick (steps 8 and 9): decode the downlink, in arrival order.

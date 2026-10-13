@@ -175,10 +175,10 @@ def test_reset_restarts_references_and_time() -> None:
 
 
 def test_stubs_are_no_ops_until_their_tickets() -> None:
-    # Uplink encoding (#154), pass state (#161) and decoding (#156) are documented
-    # no-ops: queued commands stay queued, nothing is decoded, the store stays empty.
+    # Pass state (#161) and decoding (#156) are documented no-ops: with nothing
+    # queued (uplink is #154, tests/unit/test_groundstation_uplink.py) the uplink is
+    # empty, nothing is decoded, the store stays empty.
     station = GroundStation()
-    station.submit(Command.ping())
     assert station.begin_tick(0, GEOMETRY) == Uplink()
     assert station.begin_tick(0, None) == Uplink(packets=(), events=())
     downlink = [Packet(frame=b"\xa5\x5a\x01\x02\x00\x00\x00\x00\x00\x00")]
