@@ -6,6 +6,7 @@ uplink packets and events. The run loop moves packets between it, the link and t
 target. See ``docs/groundstation.md``.
 """
 
+from pocketsat.groundstation.commands import max_answer_latency_us
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
 from pocketsat.groundstation.downlink import LinkStatistics
 from pocketsat.groundstation.events import (
@@ -70,4 +71,5 @@ __all__ = [
     "TelemetryStore",
     "UnmatchedAck",
     "Uplink",
+    "max_answer_latency_us",
 ]
