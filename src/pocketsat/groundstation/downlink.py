@@ -12,7 +12,8 @@ packet, in arrival order:
    (ADR-0009 §7). See :class:`SequenceTracker` for the gap, wrap and restart rules.
 3. **Content**, routed by frame type: TELEMETRY is decoded into a
    :class:`TelemetryReceived` event, and a :class:`SpacecraftRebooted` event follows it
-   when the boot count went up; an ACK/NACK is correlated with its command by the
+   when the boot count went up, and the telemetry is stored in the telemetry store
+   (#157) when the decoder has one; an ACK/NACK is correlated with its command by the
    station's command tracker (#155), whose event follows; DATA payloads are decoded and
    handed to a hook that #158 (DATA reassembly and content checks) fills in. A payload
    that does not decode for its type becomes ``FrameRejected`` with reason ``PAYLOAD``;
@@ -49,6 +50,7 @@ from pocketsat.groundstation.events import (
     StationEvent,
     TelemetryReceived,
 )
+from pocketsat.groundstation.telemetry import TelemetryRecord, TelemetryStore
 from pocketsat.messages import (
     AckDecodeError,
     CommandAck,
@@ -200,12 +202,18 @@ class DownlinkDecoder:
     """Decodes downlink packets into events and keeps the link statistics (#156).
 
     Args:
+        telemetry: The telemetry store decoded telemetry is kept in (#157); ``None``
+            keeps none.
         ack_handler: Receives every decoded ACK/NACK (#155); the station passes its
             command tracker's ``answer``. ``None`` decodes ACKs and emits nothing for them.
     """
 
-    def __init__(self, ack_handler: AckHandler | None = None) -> None:
+    def __init__(
+        self, telemetry: TelemetryStore | None = None, ack_handler: AckHandler | None = None
+    ) -> None:
+        self._telemetry_store = telemetry
         self._ack_handler = ack_handler
+        self._pass_id = 0
         self._sequence = SequenceTracker()
         self._total = _Counts()
         self._pass = _Counts()
@@ -228,6 +236,13 @@ class DownlinkDecoder:
         the whole run is one pass and :attr:`pass_statistics` equals :attr:`statistics`.
         """
         self._pass = _Counts()
+        self._pass_id += 1
+
+    @property
+    def pass_id(self) -> int:
+        """The current pass: 0 until the first :meth:`start_pass`, then one more at each.
+        Recorded with each telemetry record (#157)."""
+        return self._pass_id
 
     def decode(self, now_us: int, packet: Packet) -> list[StationEvent]:
         """Decode one packet and return its events, frame-level first.
@@ -276,6 +291,10 @@ class DownlinkDecoder:
     def _telemetry(self, now_us: int, sequence: int, telemetry: Telemetry) -> list[StationEvent]:
         """A TELEMETRY event, then a reboot event if the boot count went up."""
         events: list[StationEvent] = [TelemetryReceived(now_us, sequence, telemetry)]
+        if self._telemetry_store is not None:
+            self._telemetry_store.append(
+                TelemetryRecord(now_us, sequence, self._pass_id, telemetry)
+            )
         self.on_telemetry(now_us, telemetry)
         previous, self._boot_count = self._boot_count, telemetry.boot_count
         if previous is not None and telemetry.boot_count > previous:
@@ -283,9 +302,9 @@ class DownlinkDecoder:
         return events
 
     def on_telemetry(self, now_us: int, telemetry: Telemetry) -> None:
-        """Hook for decoded telemetry: storing it in the telemetry store is #157.
+        """Hook for decoded telemetry, after it is stored in the telemetry store (#157).
 
-        A no-op until #157.
+        A no-op: an extension point for tests and later tickets.
         """
 
     def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> list[StationEvent]:

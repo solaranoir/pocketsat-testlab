@@ -182,7 +182,7 @@ def test_acks_go_to_the_ack_handler_and_its_event_follows() -> None:
         answered.append((now_us, ack))
         return UnmatchedAck(now_us, ack.sequence, ack.command_id)
 
-    decoder = DownlinkDecoder(handler)
+    decoder = DownlinkDecoder(ack_handler=handler)
     assert decoder.decode(NOW_US, _ack(4)) == [UnmatchedAck(NOW_US, 9, CommandId.PING)]
     assert answered == [(NOW_US, CommandAck(sequence=9, command_id=CommandId.PING, reason=None))]
 

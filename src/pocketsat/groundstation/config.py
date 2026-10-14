@@ -34,6 +34,9 @@ MAX_COMMAND_RETRY_COUNT: Final = 10
 DEFAULT_MAX_UPLINK_COMMAND_COUNT: Final = 4
 """Default for :attr:`StationConfig.max_uplink_command_count`; see its documentation."""
 
+DEFAULT_TELEMETRY_RETENTION_COUNT: Final = 20_000
+"""Default for :attr:`StationConfig.telemetry_retention_count`; see its documentation."""
+
 
 def _number(name: str, value: float) -> float:
     """Return ``value`` as a float, rejecting bools, non-numbers, NaN, and infinities."""
@@ -105,6 +108,13 @@ class StationConfig:
             (#154), simulated µs, or ``None`` to keep it queued until it is sent.
             Default ``None``: a command waits for the next pass, as an operator's queue
             does, unless a scenario asks for an expiry.
+        telemetry_retention_count: Most telemetry records the telemetry store keeps
+            (#157); when full, the oldest is dropped and counted. Positive. Default
+            :data:`DEFAULT_TELEMETRY_RETENTION_COUNT` (20 000): at the default 1 s
+            telemetry cadence that is about 5.5 hours of continuous reception, or
+            several days of passes, which covers any Phase 2 scenario, in about 10 MB
+            (about 520 bytes per record, measured), so a campaign of many runs stays
+            bounded.
 
     Raises:
         TypeError: A field has the wrong type.
@@ -123,6 +133,7 @@ class StationConfig:
     identification_interval_us: int = 600_000_000
     max_uplink_command_count: int = DEFAULT_MAX_UPLINK_COMMAND_COUNT
     command_expiry_us: int | None = None
+    telemetry_retention_count: int = DEFAULT_TELEMETRY_RETENTION_COUNT
 
     def __post_init__(self) -> None:
         if not isinstance(self.callsign, str):
@@ -163,6 +174,7 @@ class StationConfig:
         _positive_int("max_uplink_command_count", self.max_uplink_command_count)
         if self.command_expiry_us is not None:
             check_us("command_expiry_us", self.command_expiry_us)
+        _positive_int("telemetry_retention_count", self.telemetry_retention_count)
 
     def check_tick(
         self, tick_us: int, downlink_rate_bytes_per_s: int = DEFAULT_DOWNLINK_RATE_BYTES_PER_S

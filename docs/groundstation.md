@@ -231,10 +231,11 @@ counted by the link, not the station, which never sees them.
 3. **Content**, by frame type. TELEMETRY decodes into `TelemetryReceived`, followed by
    `SpacecraftRebooted` when its `boot_count` is higher than the previous telemetry's.
    The reboot is confirmed by the boot count, not the header, so it is reported even if
-   the restart itself was hidden by a gap. ACK and DATA payloads are decoded and passed
-   to hooks that are no-ops until #155 (ACK/NACK correlation) and #158 (DATA
-   reassembly and content checks; `DataChunkReceived` needs the configured chunk size).
-   Decoded telemetry likewise goes to a hook that #157 fills with the telemetry store.
+   the restart itself was hidden by a gap. Each ACK/NACK is correlated with its
+   command, and its outcome event follows (#155, "Command outcomes"). DATA payloads are
+   decoded and passed to a hook that is a no-op until #158 (DATA reassembly and content
+   checks; `DataChunkReceived` needs the configured chunk size). Decoded telemetry is
+   also stored in the telemetry store (#157, below).
    A payload that does not decode for its type is `FrameRejected` with reason
    `PAYLOAD`; its sequence was already tracked, because the CRC vouched for the header.
 
@@ -243,6 +244,30 @@ reason), frames missing, and sequence restarts. `GroundStation.link_statistics` 
 since the last reset and `pass_link_statistics` since the current pass began. Until the
 pass state machine (#161) calls `DownlinkDecoder.start_pass()` at each AOS, the whole
 run is one pass.
+
+## Telemetry store
+
+`GroundStation.telemetry` is a `TelemetryStore` (`pocketsat.groundstation.telemetry`,
+#157). The downlink decoder appends one `TelemetryRecord` per decoded TELEMETRY frame;
+everyone else only reads it, and `reset` empties it.
+
+- **Record:** the decoded `Telemetry`, `time_us` (receive time: the end of the tick,
+  integer µs), `sequence` (the frame's downlink sequence) and `pass_id` (0 until the
+  pass state machine, #161, starts the first pass with `DownlinkDecoder.start_pass()`;
+  one more at each pass).
+- **Queries:** `latest`, `latest_value(name)`, `window(start_us, end_us)` (half-open,
+  receive time), `pass_ids` and `by_pass(pass_id)`, `history`, iteration and `len`.
+- **Engineering units:** `Telemetry` already holds each value in its unit at wire
+  resolution. `TELEMETRY_QUANTITIES` is the one table of units and resolutions, one row
+  per wire field in payload order, and a test checks it against `docs/protocol.md`
+  ("Layout and mapping"): `bus_v` in V (0.001), `soc` as a fraction (0.001),
+  temperatures in °C (0.01), `pointing_error_deg` in ° (0.01), counters as is.
+  `record.value(name)` returns a value, `record.state_name(name)` the name of a mode or
+  state (for example `"NOMINAL"`), and `record.flag_names` the flags set, in bit order.
+- **Retention:** at most `StationConfig.telemetry_retention_count` records (default
+  20 000: about 5.5 hours of continuous reception at the default 1 s telemetry cadence,
+  or several days of passes, in about 10 MB). When full, the oldest record is dropped and counted in
+  `dropped_count`; queries see only retained records.
 
 ## Determinism
 
