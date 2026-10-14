@@ -32,11 +32,17 @@ from pocketsat.groundstation.events import (
     UnmatchedAck,
 )
 from pocketsat.groundstation.station import GroundStation, Uplink
-from pocketsat.groundstation.telemetry import TelemetryStore
+from pocketsat.groundstation.telemetry import (
+    TELEMETRY_QUANTITIES,
+    TelemetryQuantity,
+    TelemetryRecord,
+    TelemetryStore,
+)
 
 __all__ = [
     "DEFAULT_STATION_CONFIG",
     "EVENT_TYPES",
+    "TELEMETRY_QUANTITIES",
     "Aos",
     "CommandAcked",
     "CommandFailed",
@@ -58,7 +64,9 @@ __all__ = [
     "StationConfig",
     "StationEvent",
     "StationIdentified",
+    "TelemetryQuantity",
     "TelemetryReceived",
+    "TelemetryRecord",
     "TelemetryStore",
     "UnmatchedAck",
     "Uplink",
