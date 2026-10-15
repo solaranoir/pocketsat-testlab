@@ -12,7 +12,8 @@ The test compares what the station decoded with the raw downlink the target prod
   stored in the telemetry store (#157);
 - every DATA chunk was reassembled once, in ID order, with no ID missing, and its
   content verified against ``chunk_content`` (#158);
-- no frame was rejected and no downlink sequence gap was seen.
+- no frame was rejected and no downlink sequence gap was seen;
+- a second run with the same seed decodes and stores exactly the same records.
 """
 
 import pytest
@@ -149,3 +150,11 @@ def test_no_frame_errors_and_no_gaps(run: Run) -> None:
     assert stats.rejected_count == 0
     assert stats.missing_count == 0
     assert stats.restart_count == 0
+
+
+def test_the_same_seed_decodes_the_same_records(run: Run) -> None:
+    again = _run()
+    assert again.events == run.events
+    assert again.station.telemetry.history == run.station.telemetry.history
+    assert again.station.data.chunk_ids() == run.station.data.chunk_ids()
+    assert again.station.data.statistics == run.station.data.statistics
