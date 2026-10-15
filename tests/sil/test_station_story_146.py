@@ -8,13 +8,11 @@ until telemetry shows the spacecraft back in SCIENCE (``DOWNLINK_COMPLETE``, #47
 
 The test compares what the station decoded with the raw downlink the target produced:
 
-- every TELEMETRY frame produced a ``TelemetryReceived`` event, in order;
+- every TELEMETRY frame produced a ``TelemetryReceived`` event, in order, and was
+  stored in the telemetry store (#157);
 - every DATA chunk was reassembled once, in ID order, with no ID missing, and its
   content verified against ``chunk_content`` (#158);
 - no frame was rejected and no downlink sequence gap was seen.
-
-The telemetry store (#157) is built in parallel; once it lands, this test also checks
-that every decoded record is stored.
 """
 
 import pytest
@@ -110,6 +108,15 @@ def test_every_telemetry_frame_is_decoded(run: Run) -> None:
     decoded = [e.sequence for e in run.events if isinstance(e, TelemetryReceived)]
     assert sent, "no telemetry was produced"
     assert decoded == sent
+
+
+def test_every_decoded_telemetry_frame_is_stored(run: Run) -> None:
+    decoded = [e for e in run.events if isinstance(e, TelemetryReceived)]
+    store = run.station.telemetry
+    assert store.dropped_count == 0
+    assert [(r.time_us, r.sequence, r.telemetry) for r in store.history] == [
+        (e.time_us, e.sequence, e.telemetry) for e in decoded
+    ]
 
 
 def test_every_chunk_is_reassembled_once_in_order_and_verified(run: Run) -> None:
