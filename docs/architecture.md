@@ -223,7 +223,7 @@ This convention applies to every record dataclass in `pocketsat`: snapshots, con
 
 ### 4.2 Ground station (ADR-0010)
 
-`pocketsat.groundstation` (#152) is shared infrastructure above the `TestTarget` boundary. `GroundStation` never calls the target, the link or a clock; the run loop moves packets between them. It is built with a frozen, validated `StationConfig` (callsign, location, elevation mask, nominal uplink and downlink frequencies in integer Hz, command timeout and retry count, identification interval; `DEFAULT_STATION_CONFIG`), and `reset(rngs)` returns to it, as for the spacecraft (ADR-0005).
+`pocketsat.groundstation` (#152) is shared infrastructure above the `TestTarget` boundary. `GroundStation` never calls the target, the link or a clock; the run loop (`pocketsat.orchestrator.RunLoop`, #167, section 8) moves packets between them. It is built with a frozen, validated `StationConfig` (callsign, location, elevation mask, nominal uplink and downlink frequencies in integer Hz, command timeout and retry count, identification interval; `DEFAULT_STATION_CONFIG`), and `reset(rngs)` returns to it, as for the spacecraft (ADR-0005).
 
 The station is called twice per tick, so it fits the step order of section 8 without adding a tick of latency either way:
 
@@ -319,6 +319,8 @@ sequenceDiagram
     O->>T: close()
 ```
 
+**The run loop today (#167, ADR-0010 §7).** `pocketsat.orchestrator.RunLoop` runs the per-tick steps above with its own `SimClock` and one master seed: the target gets the seed in `reset(seed)`, the station and the link an `RngFactory` built from it. Step 2 samples the environment model (default `NominalEnvironment`) and, when one is given, the pass geometry model; the one `PassGeometry` of the tick goes to both the link and the station (ADR-0010 §6). Step 3 issues the commands the caller scheduled (`RunLoop.schedule(at_us, command)`, issued at the first tick starting at or after `at_us`) and calls `begin_tick`; step 4 calls the link every tick, packets or not, and `send()`s the frames it delivers; steps 7 and 8 pass `receive()` through the link to `end_tick`; step 9 collects the events, and the station's telemetry and data stores hold what was decoded. Step 1 (faults) and step 10 (assertions) are no-ops until Phases 4 and 5, which add scenario loading, the fault schedule, assertions and the run record to this loop rather than replacing it. It imports no concrete target (a unit test checks the imports). Its API is in [groundstation.md](groundstation.md#the-run-loop).
+
 ## 9. Fault injection hook points
 
 | Hook point | Example faults |
@@ -359,7 +361,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 
 | Component | Package |
 |---|---|
-| Orchestrator | `pocketsat.orchestrator` |
+| Orchestrator (the run loop `RunLoop`, #167) | `pocketsat.orchestrator` |
 | TestTarget, SIL, HIL | `pocketsat.targets` |
 | Message types (`Command`, `Telemetry`, `Packet`) | `pocketsat.messages` |
 | Frame encode/decode, CRC | `pocketsat.frame` |

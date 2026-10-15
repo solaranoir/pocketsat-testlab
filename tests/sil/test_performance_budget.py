@@ -18,6 +18,13 @@ in ``docs/spacecraft.md`` ("Performance budget (#78)").
   (:func:`_time_worst_case`). Each tick is timed on its own and grouped by the frames it
   sent; the worst case is the costliest group. **A feature that makes a busier tick adds
   a scenario there.**
+- **Whole loop (#167):** the same reference profile and worst case through the run
+  loop (``pocketsat.orchestrator.RunLoop``): environment and pass geometry, the ground
+  station, the ideal link and the stack. The station must not push the orbit average
+  over budget, so the whole loop's orbit average is held to :data:`ORBIT_AVERAGE_BUDGET_US`
+  (and the same CI gate); its worst-case tick is printed as guidance, since that budget
+  is the flight software's. Printed beside the stack-alone figure, so the line gives the
+  station's, link's and geometry's share.
 - **Per subsystem:** ``step()`` plus ``snapshot()`` within about
   :data:`SUBSYSTEM_GUIDANCE_US`. Guidance only: printed, never a failure.
 
@@ -29,26 +36,29 @@ times slower (one run at load average ~15 measured 392 us per tick, against 57 t
 unloaded).
 
 Each measurement is the median of :data:`REPEATS` runs, each a fresh ``reset(seed)``.
-The loop is the orchestrator's: send any command, sample ``NominalEnvironment``,
-``apply_environment``, ``advance`` one tick, drain ``receive()``. The simulation is
+The stack loop is the target's share of the orchestrator's: send any command, sample
+``NominalEnvironment``, ``apply_environment``, ``advance`` one tick, drain
+``receive()``; the whole-loop figures time ``RunLoop.step()``. The simulation is
 deterministic, so every run sends the same frames, and the tests check that the timed
 ticks are the scenario they claim to be. Wall-clock timing is allowed here: the
 determinism guard covers only simulation code in ``src/pocketsat`` (ADR-0003).
 """
 
+import functools
 import os
 import statistics
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 import pytest
 
 from pocketsat.core.clock import DEFAULT_TICK_US
 from pocketsat.core.rng import RngFactory
-from pocketsat.environment import NominalEnvironment
+from pocketsat.environment import NominalEnvironment, OrbitGeometry
+from pocketsat.environment.geometry import PassGeometry
 from pocketsat.flight import FlightComputer, Mode, controls_for_mode
 from pocketsat.frame import MIN_FRAME_SIZE, Frame, FrameType, decode_frame, encode_frame
 from pocketsat.messages import (
@@ -58,6 +68,7 @@ from pocketsat.messages import (
     decode_telemetry,
     encode_command,
 )
+from pocketsat.orchestrator import RunLoop
 from pocketsat.spacecraft import (
     DEFAULT_INITIAL_STATE,
     NOMINAL_CONFIG,
@@ -274,6 +285,13 @@ def _time_scaled_orbit() -> TimedRun:
     return _time_orbit(SCALED_ORBIT)
 
 
+@functools.cache
+def _scaled_orbit_median() -> TimedRun:
+    """The median scaled-orbit run of the full stack, measured once per test session so
+    the whole-loop benchmark (#167) can print the station's share beside it."""
+    return _median_run(_time_scaled_orbit)
+
+
 STEADY_DATA_TICK_SHARE: Final = (
     NOMINAL_CONFIG.payload.data_rate_bytes_per_s
     * TICK_US
@@ -334,7 +352,7 @@ def _median_run(run: Callable[[], TimedRun]) -> TimedRun:
 def test_orbit_average_us_per_tick_is_within_twice_the_budget(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    run = _median_run(_time_scaled_orbit)
+    run = _scaled_orbit_median()
     data_ticks = _check_orbit_mix(run, SCALED_ORBIT)
     label = f"reference profile, 1/{ORBIT_SCALE}-scale orbit"
     _report([_orbit_line(label, run, SCALED_ORBIT, data_ticks)], capsys)
@@ -350,7 +368,7 @@ def test_a_full_reference_orbit_matches_the_scaled_orbit(
     # figure, so every CI run shows how well the shortened mix tracks a real orbit.
     full = _time_orbit(FULL_ORBIT)
     data_ticks = _check_orbit_mix(full, FULL_ORBIT)
-    scaled = _median_run(_time_scaled_orbit)
+    scaled = _scaled_orbit_median()
     ratio = full.us_per_tick() / scaled.us_per_tick()
     _report(
         [
@@ -505,6 +523,174 @@ def test_gate_mode_is_reported_and_active_on_github_actions(
     assert gate_enforced({"CI": "TRUE"})
     assert not gate_enforced({})
     assert not gate_enforced({"CI": "false"})
+
+
+# --- Whole loop (#167) ----------------------------------------------------------------
+
+LOOP_PASS_ELEVATION_DEG: Final = 60.0
+"""The pass the whole-loop runs fly through: a 60° pass of the default orbit, above the
+horizon for about 10 minutes (``OrbitGeometry.with_pass``)."""
+
+
+class _ScaledEnvironment:
+    """``NominalEnvironment`` run ``scale`` times faster from ``start_us`` (before it,
+    the state at 0), as :func:`_time_orbit` drives the target directly."""
+
+    def __init__(self, start_us: int, scale: int) -> None:
+        self._environment = NominalEnvironment()
+        self._start_us = start_us
+        self._scale = scale
+
+    def state_at(self, now_us: int) -> EnvironmentState:
+        return self._environment.state_at(self._scale * max(0, now_us - self._start_us))
+
+
+def _time_loop(loop: RunLoop, ticks: int) -> TimedRun:
+    """Run :data:`BOOT_TICKS` untimed ticks of ``loop``, then time ``ticks`` ticks, each
+    on its own: every step of ``docs/architecture.md`` §8, environment and geometry,
+    station, link and target. The frames are the raw downlink of each timed tick."""
+    clock = time.perf_counter
+    step = loop.step
+    with loop:
+        for _ in range(BOOT_TICKS):
+            step()
+        tick_s: list[float] = []
+        raw: list[tuple[bytes, ...]] = []
+        for _ in range(ticks):
+            started = clock()
+            result = step()
+            tick_s.append(clock() - started)
+            raw.append(result.downlink)
+    return TimedRun(tick_s, [[decode_frame(f) for f in tick] for tick in raw])
+
+
+class _InSight:
+    """The default orbit's pass geometry, computed every tick, placed so the station
+    sees a :data:`LOOP_PASS_ELEVATION_DEG` pass peaking at ``peak_tick``, and held at or
+    above the horizon, so the link carries every frame as the stack benchmark's ground
+    does (the station decodes everything the stack sends). Outside the pass the station
+    is not in a pass (the elevation is below its 10° mask)."""
+
+    def __init__(self, peak_tick: int) -> None:
+        self._geometry = OrbitGeometry.with_pass(LOOP_PASS_ELEVATION_DEG, peak_tick * TICK_US)
+
+    def geometry_at(self, now_us: int) -> PassGeometry:
+        geometry = self._geometry.geometry_at(now_us)
+        if geometry.elevation_deg < 0.0:
+            return replace(geometry, elevation_deg=0.0)
+        return geometry
+
+
+def _time_loop_orbit(profile: OrbitProfile) -> TimedRun:
+    """:func:`_time_orbit`'s reference profile through the whole run loop.
+
+    The same target, starting state, commands (SET_MODE SCIENCE in the last boot tick,
+    a PING every 10 s, BEGIN_DOWNLINK at the pass window) and scaled environment, now
+    scheduled on the loop, issued by the ground station and carried by the ideal link,
+    with the pass geometry computed every tick (:class:`_InSight`). In the 1/20-scale
+    orbit the whole run is inside one pass (about 10 minutes, against a 4.7-minute run);
+    in the full orbit the pass is over the 10-minute pass window, as a real pass would
+    be, and the rest of the orbit is held at the horizon so the commands get through.
+    """
+    target = SilTarget(initial=STEADY_STATE, flight_computer_factory=FlightComputer)
+    pass_start = BOOT_TICKS + profile.pass_start
+    if profile.scale == 1:
+        # AOS about 6 s before the window, LOS about 6 s after it.
+        peak_tick = pass_start + PASS_TICKS // 2
+    else:
+        peak_tick = BOOT_TICKS + profile.ticks // 2
+    loop = RunLoop(
+        target,
+        seed=SEED,
+        environment=_ScaledEnvironment(BOOT_TICKS * TICK_US, profile.scale),
+        geometry=_InSight(peak_tick),
+    )
+    loop.schedule((BOOT_TICKS - 1) * TICK_US, Command.set_mode(Mode.SCIENCE))
+    for k in range(PING_PERIOD_TICKS // 2, profile.ticks, PING_PERIOD_TICKS):
+        loop.schedule((BOOT_TICKS + k) * TICK_US, Command.ping())
+    loop.schedule(pass_start * TICK_US, Command.begin_downlink())
+    return _time_loop(loop, profile.ticks)
+
+
+def _time_loop_scaled_orbit() -> TimedRun:
+    return _time_loop_orbit(SCALED_ORBIT)
+
+
+def _loop_line(label: str, run: TimedRun, stack: TimedRun) -> str:
+    us, stack_us = run.us_per_tick(), stack.us_per_tick()
+    return (
+        f"whole loop (#167: environment, geometry, station, ideal link, stack), {label}: "
+        f"{us:.1f} us/tick, {us * ORBIT_TICKS / 1e6:.1f} s/orbit; full stack alone "
+        f"{stack_us:.1f}, so station, link and geometry {us - stack_us:.1f} us/tick "
+        f"(budget {ORBIT_AVERAGE_BUDGET_US:.0f} us on CI Linux; {_mode()})"
+    )
+
+
+def test_whole_loop_orbit_average_us_per_tick_is_within_twice_the_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The station must not push the orbit average over budget (#167): the whole loop is
+    # held to the full stack's budget, and its 2x CI gate.
+    run = _median_run(_time_loop_scaled_orbit)
+    _check_orbit_mix(run, SCALED_ORBIT)
+    stack = _scaled_orbit_median()
+    _report([_loop_line(f"1/{ORBIT_SCALE}-scale orbit", run, stack)], capsys)
+    _check_budget(
+        "the whole loop's orbit average", run.us_per_tick(), ORBIT_AVERAGE_BUDGET_US, capsys
+    )
+
+
+@pytest.mark.slow
+def test_a_full_reference_orbit_through_the_whole_loop(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # One whole orbit through the loop (about 5 s) and through the stack alone (about
+    # 4 s), in the same job: the check on the scaled figure, as the stack's full-orbit
+    # test is for the stack's.
+    run = _time_loop_orbit(FULL_ORBIT)
+    _check_orbit_mix(run, FULL_ORBIT)
+    stack = _time_orbit(FULL_ORBIT)
+    _report([_loop_line("full orbit", run, stack)], capsys)
+    _check_budget(
+        "the whole loop's full-orbit average", run.us_per_tick(), ORBIT_AVERAGE_BUDGET_US, capsys
+    )
+
+
+def _time_loop_worst_case(scenario: WorstCaseScenario) -> TimedRun:
+    """:func:`_time_worst_case` through the whole run loop, inside one pass."""
+    target = SilTarget(initial=scenario.initial, flight_computer_factory=FlightComputer)
+    loop = RunLoop(target, seed=SEED, geometry=_InSight(BOOT_TICKS + scenario.ticks // 2))
+    loop.schedule((BOOT_TICKS - 1) * TICK_US, scenario.mode_command)
+    for k in range(0, scenario.ticks, scenario.command_period_ticks):
+        loop.schedule((BOOT_TICKS + k) * TICK_US, Command.ping())
+    return _time_loop(loop, scenario.ticks)
+
+
+def test_whole_loop_worst_case_tick_is_reported(capsys: pytest.CaptureFixture[str]) -> None:
+    # Guidance: the worst-case budget is the stack's (#120). The station adds its decode
+    # of each frame and its uplink encode to the busiest pass tick.
+    lines: list[str] = []
+    worst: tuple[float, str] = (0.0, "")
+    for scenario in WORST_CASE_SCENARIOS:
+        runs = [_time_loop_worst_case(scenario) for _ in range(REPEATS)]
+        _check_worst_case_scenario(runs[0], scenario)
+        per_run = [_group_us(run) for run in runs]
+        groups = {
+            group: statistics.median(result[group] for result in per_run)
+            for group in sorted(scenario.groups, key=_group_name)
+        }
+        lines.append(
+            f"whole loop (#167) tick groups ({scenario.name}, median tick per group): "
+            + ", ".join(f"{_group_name(group)} {us:.1f} us" for group, us in groups.items())
+        )
+        for group, us in groups.items():
+            worst = max(worst, (us, f"{scenario.name}: {_group_name(group)}"))
+    us, what = worst
+    lines.append(
+        f"whole loop (#167) worst-case tick ({what}): {us:.1f} us "
+        f"(stack budget {WORST_CASE_BUDGET_US:.0f} us on CI Linux; guidance, never a failure)"
+    )
+    _report(lines, capsys)
 
 
 # --- Per subsystem --------------------------------------------------------------------
