@@ -16,6 +16,7 @@ decoding (#156), ACK/NACK correlation, timeouts and retries (#155), the telemetr
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Final
 
 from pocketsat.core.clock import check_us
 from pocketsat.core.rng import RngFactory
@@ -50,6 +51,11 @@ class Uplink:
 
     packets: tuple[Packet, ...] = ()
     events: tuple[StationEvent, ...] = ()
+
+
+_NO_UPLINK: Final = Uplink()
+"""What :meth:`GroundStation.begin_tick` returns in most ticks: shared, as it is
+immutable, to save building one every tick (#167)."""
 
 
 class GroundStation:
@@ -219,7 +225,7 @@ class GroundStation:
             raise TypeError(f"geometry must be a PassGeometry or None, got {geometry!r}")
         # Pass state (#161): AOS/LOS first, so later steps see this tick's pass.
         pass_events = self._passes.update(now_us, geometry)
-        if any(isinstance(event, Aos) for event in pass_events):
+        if pass_events and isinstance(pass_events[0], Aos):
             self._downlink.start_pass()
         timeout_events, retries = self._commands.expire(now_us)
         for retry in retries:
@@ -234,6 +240,8 @@ class GroundStation:
             elif isinstance(event, CommandFailed):
                 self._commands.discard(event.command_ref)
                 del self._submitted[event.command_ref]
+        if not (packets or pass_events or timeout_events or uplink_events):
+            return _NO_UPLINK  # the usual tick: nothing to send, nothing to report
         return Uplink(packets, pass_events + timeout_events + uplink_events)
 
     def end_tick(self, now_us: int, downlink: Sequence[Packet]) -> tuple[StationEvent, ...]:

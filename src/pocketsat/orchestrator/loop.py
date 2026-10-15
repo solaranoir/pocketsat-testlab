@@ -32,7 +32,7 @@ than replacing it.
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Final, Self
+from typing import Final, NamedTuple, Self
 
 from pocketsat.core.clock import DEFAULT_TICK_US, SimClock, check_us
 from pocketsat.core.rng import RngFactory
@@ -98,9 +98,12 @@ class IssuedCommand:
     issued_us: int
 
 
-@dataclass(frozen=True)
-class TickResult:
+class TickResult(NamedTuple):
     """What one tick of the loop did.
+
+    A named tuple rather than a frozen dataclass, the other records' form: it is built
+    every tick, and a named tuple is built in about half the time (#167's performance
+    figure, ``docs/spacecraft.md``). Immutable all the same.
 
     Attributes:
         tick_id: The tick's number since the start of the run, from 0; it runs from

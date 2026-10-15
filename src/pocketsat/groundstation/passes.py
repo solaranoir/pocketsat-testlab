@@ -63,11 +63,19 @@ class PassTracker:
     def __init__(self, elevation_mask_deg: float) -> None:
         self._mask_deg = elevation_mask_deg
         self._state = PassState()
+        self._max_elevation_deg = 0.0
+        """The pass's highest sample, kept as a float while in a pass and copied into
+        :attr:`state` when read, so a rising pass does not build a record every tick."""
 
     @property
     def state(self) -> PassState:
         """The current pass state."""
-        return self._state
+        state = self._state
+        if state.in_pass and state.max_elevation_deg != self._max_elevation_deg:
+            state = self._state = PassState(
+                in_pass=True, pass_id=state.pass_id, max_elevation_deg=self._max_elevation_deg
+            )
+        return state
 
     def update(self, now_us: int, geometry: PassGeometry | None) -> tuple[StationEvent, ...]:
         """Take one tick's geometry and return the AOS or LOS it causes, if any.
@@ -89,6 +97,7 @@ class PassTracker:
                 return ()
             pass_id = state.pass_id + 1
             self._state = PassState(in_pass=True, pass_id=pass_id, max_elevation_deg=elevation)
+            self._max_elevation_deg = elevation
             return (
                 Aos(
                     time_us=now_us,
@@ -97,12 +106,9 @@ class PassTracker:
                     elevation_deg=elevation,
                 ),
             )
-        assert state.max_elevation_deg is not None
         if above:
-            if elevation > state.max_elevation_deg:
-                self._state = PassState(
-                    in_pass=True, pass_id=state.pass_id, max_elevation_deg=elevation
-                )
+            if elevation > self._max_elevation_deg:
+                self._max_elevation_deg = elevation
             return ()
         self._state = PassState(in_pass=False, pass_id=state.pass_id)
         return (
@@ -111,6 +117,6 @@ class PassTracker:
                 pass_id=state.pass_id,
                 azimuth_deg=geometry.azimuth_deg,
                 elevation_deg=elevation,
-                max_elevation_deg=state.max_elevation_deg,
+                max_elevation_deg=self._max_elevation_deg,
             ),
         )

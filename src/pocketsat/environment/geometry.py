@@ -14,6 +14,8 @@ from dataclasses import dataclass
 
 def _finite(name: str, value: float) -> float:
     """Return ``value`` as a float, rejecting bools, non-numbers, NaN, and infinities."""
+    if type(value) is float and math.isfinite(value):
+        return value  # the common case, checked first: a record is built every tick (#167)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be a number, got {value!r}")
     if not math.isfinite(value):
