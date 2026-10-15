@@ -95,10 +95,11 @@ loop: its golden capture numbers the uplink from 1, the station from 0, so on th
 loop the capture's four ACK frames would change. `tests/sil/test_run_loop_sil.py` checks
 that this is the only difference (slow).
 
-**Cost.** The loop adds the pass geometry (about 6 µs per tick), the station's two calls
-and the link to the spacecraft stack's time per tick. `tests/sil/test_performance_budget.py`
-times the whole loop against the orbit-average budget; the figures are in
-[spacecraft.md](spacecraft.md#performance-budget-78).
+**Cost.** The loop adds the pass geometry, the station's two calls and their decoding,
+and the link to the spacecraft stack's time per tick: about 13 µs on a laptop, about 30%
+of the stack. `tests/sil/test_performance_budget.py` holds the whole loop to the
+orbit-average budget (about 95 µs against 100 on the slower CI ubuntu runners); the
+figures are in [spacecraft.md](spacecraft.md#performance-budget-78).
 
 ## Configuration
 
