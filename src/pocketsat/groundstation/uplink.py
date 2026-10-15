@@ -146,6 +146,8 @@ class CommandQueue:
             The uplink packets in transmission order, and the events: expiries first
             (in queue order), then one ``CommandSent`` per packet.
         """
+        if not self._queued:  # nothing queued: the usual tick, kept cheap (#167)
+            return (), ()
         events: list[StationEvent] = []
         kept: list[QueuedCommand] = []
         for queued in self._ordered():

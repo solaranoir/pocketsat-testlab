@@ -26,7 +26,7 @@ integer microseconds; there is no closed-form inverse trigonometry.
 
 Eclipse stays with ``NominalEnvironment`` (ADR-0011 §4, decision D1): the two share the
 orbit period (:data:`~pocketsat.environment.DEFAULT_ORBIT_PERIOD_US` by default), and the
-run loop (#167) checks they are equal.
+run loop (:class:`pocketsat.orchestrator.RunLoop`, #167) checks they are equal.
 """
 
 import math

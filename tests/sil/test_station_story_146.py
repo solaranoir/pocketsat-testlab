@@ -1,7 +1,7 @@
 """Story #146: downlink decoding over a SCIENCE period and a DOWNLINK pass (#158).
 
 The ground station, the ideal link (#153) and ``SilTarget`` with the real flight
-computer run in the run loop's step order (``docs/architecture.md`` §8), using only the
+computer run in the run loop (#167, ``docs/architecture.md`` §8), using only the
 ``TestTarget`` interface. The station commands the spacecraft itself (#154): SCIENCE
 after BOOT, then BEGIN_DOWNLINK after ten minutes of payload data. The run continues
 until telemetry shows the spacecraft back in SCIENCE (``DOWNLINK_COMPLETE``, #47).
@@ -17,7 +17,6 @@ The test compares what the station decoded with the raw downlink the target prod
 
 import pytest
 
-from pocketsat.core.rng import RngFactory
 from pocketsat.flight import Mode
 from pocketsat.frame import FrameType, decode_frame
 from pocketsat.groundstation import (
@@ -26,8 +25,8 @@ from pocketsat.groundstation import (
     StationEvent,
     TelemetryReceived,
 )
-from pocketsat.link import IdealLink
 from pocketsat.messages import Command, decode_data
+from pocketsat.orchestrator import RunLoop, TickResult
 from pocketsat.spacecraft import chunk_content
 from pocketsat.targets.sil import SilTarget
 
@@ -53,39 +52,26 @@ class Run:
         self.downlink_seen = False
         self.back_in_science = False
 
+    def tick(self, result: TickResult) -> bool:
+        """Record one tick; true once the downlink session has completed."""
+        self.raw.extend(result.downlink)
+        for event in result.events:
+            if isinstance(event, TelemetryReceived):
+                if event.telemetry.mode is Mode.DOWNLINK:
+                    self.downlink_seen = True
+                elif self.downlink_seen and event.telemetry.mode is Mode.SCIENCE:
+                    self.back_in_science = True
+        return self.back_in_science
+
 
 def _run() -> Run:
     run = Run()
-    station, link, target = run.station, IdealLink(), SilTarget()
-    rngs = RngFactory(SEED)
-    station.reset(rngs)
-    link.reset(rngs)
-    target.connect()
-    target.reset(SEED)
-    for tick in range(DOWNLINK_AT_TICK + MAX_DOWNLINK_TICKS):
-        start_us, end_us = tick * TICK_US, (tick + 1) * TICK_US
-        if tick == SCIENCE_AT_TICK:
-            station.submit(Command.set_mode(Mode.SCIENCE))
-        if tick == DOWNLINK_AT_TICK:
-            station.submit(Command.begin_downlink())
-        uplink = station.begin_tick(start_us, None)  # steps 3 and 4
-        run.events.extend(uplink.events)
-        for frame in link.carry_uplink(uplink.packets, start_us, None):
-            target.send(frame)
-        target.advance(TICK_US)  # step 6
-        raw = target.receive()  # step 7
-        run.raw.extend(raw)
-        events = station.end_tick(end_us, link.carry_downlink(raw, end_us, None))  # steps 8, 9
-        run.events.extend(events)
-        for event in events:
-            if isinstance(event, TelemetryReceived):
-                if event.telemetry.mode is Mode.DOWNLINK:
-                    run.downlink_seen = True
-                elif run.downlink_seen and event.telemetry.mode is Mode.SCIENCE:
-                    run.back_in_science = True
-        if run.back_in_science:
-            break
-    target.close()
+    loop = RunLoop(SilTarget(), seed=SEED, tick_us=TICK_US, station=run.station)
+    loop.schedule(SCIENCE_AT_TICK * TICK_US, Command.set_mode(Mode.SCIENCE))
+    loop.schedule(DOWNLINK_AT_TICK * TICK_US, Command.begin_downlink())
+    with loop:
+        loop.run((DOWNLINK_AT_TICK + MAX_DOWNLINK_TICKS) * TICK_US, stop_when=run.tick)
+    run.events = list(loop.events)
     return run
 
 

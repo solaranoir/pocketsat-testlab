@@ -169,6 +169,15 @@ GROUNDSTATION_MODULES = frozenset(
 """Every ground station module, listed by name (#152, ADR-0010). The station runs in
 simulated time, so it is held to the same rules as the spacecraft."""
 
+ORCHESTRATOR_MODULES = frozenset(
+    {
+        "orchestrator/__init__.py",
+        "orchestrator/loop.py",
+    }
+)
+"""Every orchestrator module, listed by name (#167, ADR-0010 §7). The run loop keeps the
+run's simulated clock and seeds, so it is held to the same rules."""
+
 
 def test_scan_covers_simulation_code() -> None:
     names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
@@ -183,6 +192,7 @@ def test_scan_covers_simulation_code() -> None:
         "flight/modes.py",
         "flight/safety.py",
         "link.py",
+        "orchestrator/loop.py",
         "targets/base.py",
         "targets/echo.py",
         "targets/sil.py",
@@ -208,6 +218,16 @@ def test_scan_covers_every_groundstation_module() -> None:
     assert scanned == GROUNDSTATION_MODULES, (
         f"missing from the scan: {sorted(GROUNDSTATION_MODULES - scanned)};"
         f" not listed in GROUNDSTATION_MODULES: {sorted(scanned - GROUNDSTATION_MODULES)}"
+    )
+
+
+def test_scan_covers_every_orchestrator_module() -> None:
+    # A new orchestrator module must be added to the list, as for the station.
+    names = {path.relative_to(PACKAGE_DIR).as_posix() for path in _simulation_modules()}
+    scanned = {name for name in names if name.startswith("orchestrator/")}
+    assert scanned == ORCHESTRATOR_MODULES, (
+        f"missing from the scan: {sorted(ORCHESTRATOR_MODULES - scanned)};"
+        f" not listed in ORCHESTRATOR_MODULES: {sorted(scanned - ORCHESTRATOR_MODULES)}"
     )
 
 

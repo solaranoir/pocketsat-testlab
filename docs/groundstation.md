@@ -14,8 +14,9 @@ them.
 
 `pocketsat.groundstation.GroundStation` takes simulated time, pass geometry and downlink
 packets, and returns uplink packets and events. It never calls the target, the link or a
-clock, and it draws no random numbers in Phase 2. The run loop (#167) moves packets
-between the station, the link (#153) and the target:
+clock, and it draws no random numbers in Phase 2. The run loop
+(`pocketsat.orchestrator.RunLoop`, #167, [below](#the-run-loop)) moves packets between
+the station, the link (#153) and the target:
 
 ```mermaid
 sequenceDiagram
@@ -55,6 +56,50 @@ sequenceDiagram
 flight computer), and the next `begin_tick` starts where the last tick ended. `geometry`
 is a `PassGeometry` (`pocketsat.environment.geometry`) or `None` when no geometry model
 runs; the station treats it as its pass prediction (ADR-0010 §6).
+
+## The run loop
+
+`pocketsat.orchestrator.RunLoop` (#167, ADR-0010 §7) runs the environment and geometry
+models, the station, a link and any `TestTarget` together, one tick at a time, in the
+step order of `docs/architecture.md` §8. It depends on `TestTarget` only, so the same
+run drives `SilTarget`, `EchoTarget` or a HIL target.
+
+```python
+from pocketsat.groundstation import DEFAULT_STATION_CONFIG
+from pocketsat.orchestrator import RunLoop, station_geometry
+
+loop = RunLoop(SilTarget(), seed=42, geometry=station_geometry(DEFAULT_STATION_CONFIG))
+loop.schedule(6_000_000, Command.set_mode(Mode.SCIENCE))
+with loop:                                   # start(): connect, reset everything
+    result = loop.run(until_us=3_600_000_000)
+result.events, result.telemetry, result.data, result.issued
+```
+
+| Call | Does |
+|---|---|
+| `RunLoop(target, *, seed, tick_us=100 ms, station=None, link=None, environment=None, geometry=None, commands=())` | Builds the loop. Defaults: `GroundStation()`, `IdealLink()`, `NominalEnvironment()`, and no geometry (the link treats the spacecraft as always visible, the station is never in a pass). Checks the station's timeout against the tick (`StationConfig.check_tick`), and that an `OrbitGeometry` has the `NominalEnvironment`'s orbit period (ADR-0011 §4) and is seen from the station's location |
+| `station_geometry(config, orbit=DEFAULT_ORBIT)` | An `OrbitGeometry` of `orbit` seen from the station `config` places (`station_location(config)`) |
+| `schedule(at_us, command)` | Issues `command` to the station at step 3 of the first tick that starts at or after `at_us` (a time already past: the next tick). Same-tick commands go in time order, then scheduling order. Works before or during the run; `commands=` takes `ScheduledCommand`s |
+| `start()`, `close()`; `with RunLoop(...) as loop` | `start` connects the target and resets target (`reset(seed)`), station and link (`reset(RngFactory(seed))`); `close` closes the target. Single use |
+| `step()` | Runs one tick and returns a `TickResult`: tick number (`tick_id`), start and end time, the environment and geometry, the commands issued (`IssuedCommand`: what was scheduled and its `CommandRef`), the frames sent up, the raw frames received, and the station's events (`begin_tick`'s, then `end_tick`'s) |
+| `run(until_us, *, stop_when=None)` | Steps until the clock reaches `until_us` (the first tick boundary at or after it), or until `stop_when(tick_result)` is true; returns a `RunResult` |
+| `result()` | The `RunResult` so far: master seed, tick length, tick count, end time, every event, every issued command, and the station's `telemetry` and `data` stores |
+| `events`, `issued`, `pending`, `station`, `link`, `rngs`, `master_seed`, `now_us`, `tick_count` | Read-only views of the run |
+
+Steps 1 (faults) and 10 (assertions) are no-ops until Phases 4 and 5; a test can still
+inject a target fault between two `step()` calls, as story #145's test does. The CLI
+(#166) and the milestone scenario (#168) build on this loop.
+
+The Phase 1 nominal harness (`tests/sil/_nominal_scenario.py`, #63) stays on its own
+loop: its golden capture numbers the uplink from 1, the station from 0, so on the run
+loop the capture's four ACK frames would change. `tests/sil/test_run_loop_sil.py` checks
+that this is the only difference (slow).
+
+**Cost.** The loop adds the pass geometry, the station's two calls and their decoding,
+and the link to the spacecraft stack's time per tick: about 13 µs on a laptop, about 30%
+of the stack. `tests/sil/test_performance_budget.py` holds the whole loop to the
+orbit-average budget (about 95 µs against 100 on the slower CI ubuntu runners); the
+figures are in [spacecraft.md](spacecraft.md#performance-budget-78).
 
 ## Configuration
 
@@ -361,3 +406,4 @@ The package is scanned by the determinism guard (`tests/unit/test_determinism_gu
 | #162, #163 | Doppler tuning and the SNR indicator |
 | #164 | Radio control: transmit permission and station identification |
 | #165, #166 | Mission console and the `pocketsat` CLI command |
+| #167 | The run loop, `pocketsat.orchestrator.RunLoop` |

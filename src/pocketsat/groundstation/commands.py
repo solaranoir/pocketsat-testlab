@@ -212,6 +212,8 @@ class CommandTracker:
             The events, in command reference order (each ``CommandTimedOut``, followed
             by ``CommandFailed`` when no retry follows), and the commands to resend.
         """
+        if not self._latest:  # nothing outstanding: the usual tick, kept cheap (#167)
+            return (), ()
         events: list[StationEvent] = []
         retries: list[Retry] = []
         for ref in self.outstanding:

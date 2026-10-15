@@ -1,13 +1,12 @@
 """Story #145: command uplink, closed loop, against ``SilTarget``.
 
 The station (uplink #154, decoding #156, correlation #155), the ideal link (#153) and
-``SilTarget`` run in the run loop's step order (``docs/architecture.md`` §8), using only
-the ``TestTarget`` interface. Every one of the five commands reaches a known outcome:
+``SilTarget`` run in the run loop (#167, ``docs/architecture.md`` §8), using only the
+``TestTarget`` interface. Every one of the five commands reaches a known outcome:
 NACKs while the spacecraft boots, ACKs once it is up, and timeouts with retries, then
 failure, while its transmitter is off.
 """
 
-from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.flight.modes import Mode, RejectReason
 from pocketsat.groundstation import (
@@ -25,8 +24,8 @@ from pocketsat.groundstation import (
     StationEvent,
     UnmatchedAck,
 )
-from pocketsat.link import IdealLink
 from pocketsat.messages import Command, CommandId
+from pocketsat.orchestrator import RunLoop
 from pocketsat.targets.base import TargetFault
 from pocketsat.targets.sil import SilTarget
 
@@ -51,33 +50,26 @@ SCHEDULE: dict[int, list[Command]] = {
 TICKS = 260
 
 
+class FixedGeometry:
+    """The spacecraft held at :data:`GEOMETRY`, in sight, for the whole run."""
+
+    def geometry_at(self, now_us: int) -> PassGeometry:
+        return GEOMETRY
+
+
 def _run() -> tuple[GroundStation, list[StationEvent], list[CommandRef]]:
     """Run the schedule and return the station, every event, and the refs in order."""
-    station = GroundStation()
-    DEFAULT_STATION_CONFIG.check_tick(TICK_US)
-    link = IdealLink()
     target = SilTarget()
-    rngs = RngFactory(SEED)
-    station.reset(rngs)
-    link.reset(rngs)
-    target.connect()
-    target.reset(SEED)
-    events: list[StationEvent] = []
-    refs: list[CommandRef] = []
-    for tick in range(TICKS):
-        start_us, end_us = tick * TICK_US, (tick + 1) * TICK_US
-        if tick == SILENT_FROM_TICK:
-            target.inject(TargetFault("transmitter_off"))  # step 1
-        refs.extend(station.submit(command) for command in SCHEDULE.get(tick, []))  # step 3
-        uplink = station.begin_tick(start_us, GEOMETRY)  # steps 3 and 4
-        events.extend(uplink.events)
-        for frame in link.carry_uplink(uplink.packets, start_us, GEOMETRY):
-            target.send(frame)
-        target.advance(TICK_US)  # step 6
-        downlink = link.carry_downlink(target.receive(), end_us, GEOMETRY)  # steps 7, 8
-        events.extend(station.end_tick(end_us, downlink))  # step 9
-    target.close()
-    return station, events, refs
+    loop = RunLoop(target, seed=SEED, tick_us=TICK_US, geometry=FixedGeometry())
+    for tick, commands in SCHEDULE.items():
+        for command in commands:
+            loop.schedule(tick * TICK_US, command)  # issued at step 3 of that tick
+    with loop:
+        for tick in range(TICKS):
+            if tick == SILENT_FROM_TICK:
+                target.inject(TargetFault("transmitter_off"))  # step 1, by hand until Phase 4
+            loop.step()
+    return loop.station, list(loop.events), [issued.command_ref for issued in loop.issued]
 
 
 def _outcome(events: list[StationEvent], ref: CommandRef) -> StationEvent:
