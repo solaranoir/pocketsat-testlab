@@ -32,6 +32,7 @@ from pocketsat.groundstation.events import (
     TelemetryReceived,
     UnmatchedAck,
 )
+from pocketsat.groundstation.passes import PassState
 from pocketsat.groundstation.station import GroundStation, Uplink
 from pocketsat.groundstation.telemetry import (
     TELEMETRY_QUANTITIES,
@@ -57,6 +58,7 @@ __all__ = [
     "GroundStation",
     "LinkStatistics",
     "Los",
+    "PassState",
     "RadioState",
     "RadioStateChanged",
     "RejectionReason",

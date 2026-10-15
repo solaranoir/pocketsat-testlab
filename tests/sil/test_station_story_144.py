@@ -13,6 +13,7 @@ from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.frame import FrameType, encode_frame_fields
 from pocketsat.groundstation import (
+    Aos,
     FrameRejected,
     GroundStation,
     RejectionReason,
@@ -67,9 +68,13 @@ def _run(
 def test_frame_sent_to_echo_target_comes_back_to_the_station() -> None:
     ping = _ping_packet(sequence=1)
     station, events = _run(EchoTarget(), {0: [ping]}, ticks=2)
-    # EchoTarget sends the COMMAND frame back unchanged; the station sees an uplink type
-    # on the downlink and rejects it with its bytes.
-    assert events == [FrameRejected(TICK_US, RejectionReason.WRONG_DIRECTION, ping.frame)]
+    # The geometry is above the mask, so the first tick starts a pass (#161). EchoTarget
+    # sends the COMMAND frame back unchanged; the station sees an uplink type on the
+    # downlink and rejects it with its bytes.
+    assert events == [
+        Aos(0, pass_id=1, azimuth_deg=180.0, elevation_deg=35.0),
+        FrameRejected(TICK_US, RejectionReason.WRONG_DIRECTION, ping.frame),
+    ]
     assert station.link_statistics.received_count == 1
 
 
