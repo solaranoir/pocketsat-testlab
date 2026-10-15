@@ -25,6 +25,7 @@ from typing import Protocol, runtime_checkable
 
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
+from pocketsat.link_budget import DEFAULT_LINK_BUDGET, LinkBudget
 from pocketsat.messages import Packet
 
 
@@ -60,14 +61,31 @@ class IdealLink:
 
     Every packet or frame is delivered in the same call, unchanged and in order, unless
     the spacecraft is below the horizon, when it is dropped and counted. Downlink
-    packets carry ``elevation_deg`` and ``range_km`` from the geometry when there is one;
-    every other link attribute stays ``None`` (the Doppler and SNR indicators come from
-    #162 and #163, loss and latency from Phase 3).
+    packets carry ``elevation_deg`` and ``range_km`` from the geometry when there is one,
+    and ``snr_db`` from the link budget at that range (#163). The SNR is an indicator
+    only: no packet is dropped for it (Phase 3 maps SNR to loss). The other link
+    attributes stay ``None`` (the Doppler indicator comes from #162, loss and latency
+    from Phase 3).
+
+    Args:
+        link_budget: The downlink budget the SNR comes from (#163). Default
+            :data:`~pocketsat.link_budget.DEFAULT_LINK_BUDGET`.
+
+    Raises:
+        TypeError: ``link_budget`` is not a :class:`~pocketsat.link_budget.LinkBudget`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, link_budget: LinkBudget = DEFAULT_LINK_BUDGET) -> None:
+        if not isinstance(link_budget, LinkBudget):
+            raise TypeError(f"link_budget must be a LinkBudget, got {link_budget!r}")
+        self._link_budget = link_budget
         self._uplink_dropped_count = 0
         self._downlink_dropped_count = 0
+
+    @property
+    def link_budget(self) -> LinkBudget:
+        """The downlink budget ``snr_db`` comes from (#163)."""
+        return self._link_budget
 
     @property
     def uplink_dropped_count(self) -> int:
@@ -96,17 +114,24 @@ class IdealLink:
     def carry_downlink(
         self, frames: Sequence[bytes], now_us: int, geometry: PassGeometry | None
     ) -> list[Packet]:
-        """Wrap each frame in a new packet, or drop them all below the horizon."""
+        """Wrap each frame in a new packet, or drop them all below the horizon.
+
+        With geometry, each packet carries the elevation, range and SNR of the tick.
+        """
         if not _visible(geometry):
             self._downlink_dropped_count += len(frames)
             return []
         if geometry is None:
             return [Packet(frame=bytes(frame)) for frame in frames]
+        if not frames:
+            return []
+        snr_db = self._link_budget.snr_db(geometry.range_km)  # once per tick (#163)
         return [
             Packet(
                 frame=bytes(frame),
                 elevation_deg=geometry.elevation_deg,
                 range_km=geometry.range_km,
+                snr_db=snr_db,
             )
             for frame in frames
         ]

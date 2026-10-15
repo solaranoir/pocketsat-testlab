@@ -200,13 +200,16 @@ class DataStore:
         """
         self._pass = _Span()
 
-    def receive(self, now_us: int, sequence: int, chunk: DataChunk) -> DataChunkReceived:
+    def receive(
+        self, now_us: int, sequence: int, chunk: DataChunk, *, snr_db: float | None = None
+    ) -> DataChunkReceived:
         """Check, store and count one decoded DATA chunk.
 
         Args:
             now_us: Simulated time stamped on the event.
             sequence: The DATA frame's downlink header sequence.
             chunk: The decoded chunk.
+            snr_db: The packet's SNR indicator (#163), carried on the event.
 
         Returns:
             The chunk's event: whether its content matched, and whether its ID was
@@ -225,4 +228,6 @@ class DataStore:
                 span.stored[chunk.chunk_id] = size_bytes
         if content_ok and not duplicate:
             self._chunks[chunk.chunk_id] = chunk.content
-        return DataChunkReceived(now_us, sequence, chunk.chunk_id, content_ok, duplicate)
+        return DataChunkReceived(
+            now_us, sequence, chunk.chunk_id, content_ok, duplicate, snr_db=snr_db
+        )
