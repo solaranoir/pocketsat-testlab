@@ -19,6 +19,7 @@ from pocketsat.groundstation import (
     SpacecraftRebooted,
     StationEvent,
     TelemetryReceived,
+    UnmatchedAck,
 )
 from pocketsat.groundstation.data import DataStore
 from pocketsat.groundstation.downlink import DownlinkDecoder, SequenceResult, SequenceTracker
@@ -66,8 +67,9 @@ class RecordingDecoder(DownlinkDecoder):
     def on_telemetry(self, now_us: int, telemetry: Telemetry) -> None:
         self.telemetry.append(telemetry)
 
-    def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> None:
+    def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> list[StationEvent]:
         self.acks.append((sequence, ack))
+        return super().on_ack(now_us, sequence, ack)
 
 
 def _packet(frame_type: FrameType, sequence: int, payload: bytes) -> Packet:
@@ -164,11 +166,23 @@ def test_invalid_data_payloads_are_rejected_as_payload(vector: dict[str, Any]) -
 # --- ACK and wrong direction ---------------------------------------------------------
 
 
-def test_acks_reach_the_ack_hook_without_events() -> None:
-    # Correlation and its events are #155.
+def test_acks_reach_the_ack_hook_without_events_when_no_handler() -> None:
     decoder = RecordingDecoder()
     assert decoder.decode(NOW_US, _ack(4)) == []
     assert decoder.acks == [(4, CommandAck(sequence=9, command_id=CommandId.PING, reason=None))]
+
+
+def test_acks_go_to_the_ack_handler_and_its_event_follows() -> None:
+    # The station's command tracker is the handler (#155).
+    answered: list[tuple[int, CommandAck]] = []
+
+    def handler(now_us: int, ack: CommandAck) -> StationEvent:
+        answered.append((now_us, ack))
+        return UnmatchedAck(now_us, ack.sequence, ack.command_id)
+
+    decoder = DownlinkDecoder(ack_handler=handler)
+    assert decoder.decode(NOW_US, _ack(4)) == [UnmatchedAck(NOW_US, 9, CommandId.PING)]
+    assert answered == [(NOW_US, CommandAck(sequence=9, command_id=CommandId.PING, reason=None))]
 
 
 def test_bad_ack_payload_is_rejected_as_payload() -> None:

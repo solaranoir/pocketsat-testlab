@@ -19,7 +19,7 @@ owns one and calls it from ``submit`` and ``begin_tick``.
   in one tick; the rest wait for the next.
 - **Sequence.** Every COMMAND frame takes the next uplink sequence number, starting at 0
   after each reset and wrapping ``0xFFFF`` → ``0x0000`` like the downlink counter
-  (``docs/protocol.md``). Retries (#155) will take new numbers the same way.
+  (``docs/protocol.md``). Retries (#155) take new numbers the same way.
 """
 
 from collections.abc import Callable
@@ -56,11 +56,14 @@ class QueuedCommand:
         command_ref: The command's reference.
         command: The command.
         due_us: Simulated time from which it may be sent.
+        retry_count: Retries before this attempt: 0 for a submitted command, more for a
+            retry queued by ACK correlation (#155).
     """
 
     command_ref: CommandRef
     command: Command
     due_us: int
+    retry_count: int = 0
 
 
 class CommandQueue:
@@ -110,15 +113,25 @@ class CommandQueue:
         self._queued = []
         self._next_sequence = 0
 
-    def add(self, command_ref: CommandRef, command: Command, due_us: int) -> None:
+    def add(
+        self, command_ref: CommandRef, command: Command, due_us: int, retry_count: int = 0
+    ) -> None:
         """Queue a command, to be sent from ``due_us``.
+
+        ``retry_count`` is carried into the attempt's ``CommandSent`` event; a retry
+        (#155) passes the attempt's number.
 
         Raises:
             TypeError: ``due_us`` is not an int.
             ValueError: ``due_us`` is negative.
         """
         check_us("due_us", due_us)
-        self._queued.append(QueuedCommand(command_ref, command, due_us))
+        self._queued.append(QueuedCommand(command_ref, command, due_us, retry_count))
+
+    def cancel(self, command_ref: CommandRef) -> None:
+        """Drop a queued command, if it is queued: a retry whose command was answered
+        late, before the retry went out (#155)."""
+        self._queued = [q for q in self._queued if q.command_ref != command_ref]
 
     def transmit(
         self, now_us: int, gate_open: bool
@@ -156,7 +169,7 @@ class CommandQueue:
                         queued.command_ref,
                         queued.command.command_id,
                         sequence,
-                        retry_count=0,
+                        retry_count=queued.retry_count,
                     )
                 )
             else:

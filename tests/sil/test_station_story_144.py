@@ -3,15 +3,17 @@
 The station, the ideal link (#153) and a target are wired in the run loop's step order
 (``docs/architecture.md`` §8), using only the ``TestTarget`` interface: a frame goes up
 and comes back from ``EchoTarget``, and ``SilTarget`` answers with downlink the station
-decodes (#156). Uplink encoding is #154, so the uplink COMMAND packet is built by hand
-here; ACK correlation (#155) is not yet an event, so the PING's ACK shows only as a
-frame decoded without rejection.
+decodes (#156). The uplink COMMAND packet is built by hand, outside the station's
+uplink (#154), so the PING's ACK answers no command the station sent: correlation (#155)
+reports it as an ``UnmatchedAck``, and it is decoded without rejection. The closed loop
+through the station's own uplink is story #145 (``test_station_story_145.py``).
 """
 
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.frame import FrameType, encode_frame_fields
 from pocketsat.groundstation import (
+    Aos,
     FrameRejected,
     GroundStation,
     RejectionReason,
@@ -66,9 +68,13 @@ def _run(
 def test_frame_sent_to_echo_target_comes_back_to_the_station() -> None:
     ping = _ping_packet(sequence=1)
     station, events = _run(EchoTarget(), {0: [ping]}, ticks=2)
-    # EchoTarget sends the COMMAND frame back unchanged; the station sees an uplink type
-    # on the downlink and rejects it with its bytes.
-    assert events == [FrameRejected(TICK_US, RejectionReason.WRONG_DIRECTION, ping.frame)]
+    # The geometry is above the mask, so the first tick starts a pass (#161). EchoTarget
+    # sends the COMMAND frame back unchanged; the station sees an uplink type on the
+    # downlink and rejects it with its bytes.
+    assert events == [
+        Aos(0, pass_id=1, azimuth_deg=180.0, elevation_deg=35.0),
+        FrameRejected(TICK_US, RejectionReason.WRONG_DIRECTION, ping.frame),
+    ]
     assert station.link_statistics.received_count == 1
 
 

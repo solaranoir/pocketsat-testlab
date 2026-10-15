@@ -133,11 +133,15 @@ def test_config_bounds_are_inclusive(changes: dict[str, object]) -> None:
     StationConfig(**changes)  # type: ignore[arg-type]
 
 
-def test_check_tick_requires_two_ticks_of_timeout() -> None:
+def test_check_tick_requires_the_longest_legitimate_answer() -> None:
+    # The bound is max_answer_latency_us (#155): 2 ticks at 100 ms, 1 tick at 2 s.
     DEFAULT_STATION_CONFIG.check_tick(100_000)
-    DEFAULT_STATION_CONFIG.check_tick(1_000_000)  # exactly two ticks
-    with pytest.raises(ValueError, match="two"):
-        DEFAULT_STATION_CONFIG.check_tick(1_000_001)
+    DEFAULT_STATION_CONFIG.check_tick(2_000_000)  # exactly one tick of timeout
+    with pytest.raises(ValueError, match="longest legitimate answer"):
+        DEFAULT_STATION_CONFIG.check_tick(2_000_001)
+    short = dataclasses.replace(DEFAULT_STATION_CONFIG, command_timeout_us=199_999)
+    with pytest.raises(ValueError, match="200000"):
+        short.check_tick(100_000)
     with pytest.raises(ValueError):
         DEFAULT_STATION_CONFIG.check_tick(0)
     with pytest.raises(TypeError):
@@ -175,12 +179,12 @@ def test_reset_restarts_references_and_time() -> None:
 
 
 def test_stubs_are_no_ops_until_their_tickets() -> None:
-    # Pass state (#161) and decoding (#156) are documented no-ops: with nothing
-    # queued (uplink is #154, tests/unit/test_groundstation_uplink.py) the uplink is
-    # empty, nothing is decoded, the store stays empty.
+    # With nothing queued (uplink is #154, tests/unit/test_groundstation_uplink.py) and
+    # no geometry (pass state is #161, tests/unit/test_pass_state.py) the uplink is empty;
+    # the telemetry store stays empty until #157.
     station = GroundStation()
-    assert station.begin_tick(0, GEOMETRY) == Uplink()
     assert station.begin_tick(0, None) == Uplink(packets=(), events=())
+    assert not station.pass_state.in_pass
     # Decoding is #156 (test_station_downlink.py); the telemetry store stays empty until #157.
     downlink = [Packet(frame=b"\xa5\x5a\x01\x02\x00\x00\x00\x00\x00\x00")]
     assert [type(e) for e in station.end_tick(100_000, downlink)] == [FrameRejected]
