@@ -8,6 +8,7 @@ target. See ``docs/groundstation.md``.
 
 from pocketsat.groundstation.commands import max_answer_latency_us
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.data import ChunkRange, DataStatistics, DataStore
 from pocketsat.groundstation.downlink import LinkStatistics
 from pocketsat.groundstation.events import (
     EVENT_TYPES,
@@ -46,6 +47,7 @@ __all__ = [
     "EVENT_TYPES",
     "TELEMETRY_QUANTITIES",
     "Aos",
+    "ChunkRange",
     "CommandAcked",
     "CommandFailed",
     "CommandNacked",
@@ -53,6 +55,8 @@ __all__ = [
     "CommandSent",
     "CommandTimedOut",
     "DataChunkReceived",
+    "DataStatistics",
+    "DataStore",
     "FailureReason",
     "FrameRejected",
     "GroundStation",

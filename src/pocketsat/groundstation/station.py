@@ -8,10 +8,10 @@ after it (steps 8 and 9: decoding). Commands are queued with
 :meth:`~GroundStation.submit` at step 3.
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
-stub below names its ticket: DATA (#158) and radio control (#164). Uplink encoding
-(#154), downlink decoding (#156), ACK/NACK correlation, timeouts and retries (#155), the
-telemetry store (#157) and pass state (#161, :mod:`pocketsat.groundstation.passes`) are
-in.
+stub below names its ticket: radio control (#164). Uplink encoding (#154), downlink
+decoding (#156), ACK/NACK correlation, timeouts and retries (#155), the telemetry store
+(#157), DATA reassembly (#158, the :attr:`~GroundStation.data` store) and pass state
+(#161, :mod:`pocketsat.groundstation.passes`) are in.
 """
 
 from collections.abc import Sequence
@@ -22,6 +22,7 @@ from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.groundstation.commands import Attempt, CommandTracker
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
+from pocketsat.groundstation.data import DataStore
 from pocketsat.groundstation.downlink import DownlinkDecoder, LinkStatistics
 from pocketsat.groundstation.events import (
     Aos,
@@ -93,7 +94,8 @@ class GroundStation:
         self._submitted: dict[CommandRef, Command] = {}
         self._now_us = 0
         self._telemetry = TelemetryStore(self._config.telemetry_retention_count)
-        self._downlink = DownlinkDecoder(self._telemetry, ack_handler=self._answer)
+        self._data = DataStore(self._config.data_chunk_size_bytes)
+        self._downlink = DownlinkDecoder(self._telemetry, ack_handler=self._answer, data=self._data)
         self._passes = PassTracker(self._config.elevation_mask_deg)
 
     @property
@@ -119,6 +121,12 @@ class GroundStation:
         """Downlink statistics for the current pass (#156). They restart at each AOS
         (#161); with no geometry the whole run is one pass."""
         return self._downlink.pass_statistics
+
+    @property
+    def data(self) -> DataStore:
+        """The payload data received, reassembled by chunk ID, with its statistics
+        (#158). Read it, never write it: only the station's decoder adds chunks."""
+        return self._data
 
     @property
     def pass_state(self) -> PassState:
@@ -234,9 +242,9 @@ class GroundStation:
         Each packet is decoded by :class:`~pocketsat.groundstation.downlink.DownlinkDecoder`
         (#156): frame-level events first (rejection, sequence gap), then the content
         (telemetry, and a reboot when the boot count went up). Nothing raises for any
-        frame bytes. Decoded telemetry is stored in :attr:`telemetry` (#157), and each
-        ACK/NACK is correlated with its command (#155). DATA (#158) is a hook in the
-        decoder until its ticket.
+        frame bytes. Decoded telemetry is stored in :attr:`telemetry` (#157), each
+        ACK/NACK is correlated with its command (#155), and DATA chunks are checked and
+        stored in :attr:`data` (#158).
 
         Args:
             now_us: Simulated time at the end of the tick.

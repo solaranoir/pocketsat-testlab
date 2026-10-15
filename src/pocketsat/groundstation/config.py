@@ -16,6 +16,7 @@ from pocketsat.groundstation.commands import (
     DEFAULT_DOWNLINK_RATE_BYTES_PER_S,
     max_answer_latency_us,
 )
+from pocketsat.spacecraft.config import MAX_CHUNK_SIZE_BYTES
 
 CALLSIGN_PATTERN: Final = re.compile(r"[A-Z0-9/]{3,16}")
 """A callsign: 3 to 16 uppercase letters, digits and ``/`` (portable suffixes such as
@@ -34,6 +35,9 @@ MAX_COMMAND_RETRY_COUNT: Final = 10
 DEFAULT_MAX_UPLINK_COMMAND_COUNT: Final = 4
 """Default for :attr:`StationConfig.max_uplink_command_count`; see its documentation."""
 
+DEFAULT_DATA_CHUNK_SIZE_BYTES: Final = 64
+"""Default for :attr:`StationConfig.data_chunk_size_bytes`: the spacecraft's default
+``PayloadConfig.chunk_size_bytes``."""
 DEFAULT_TELEMETRY_RETENTION_COUNT: Final = 20_000
 """Default for :attr:`StationConfig.telemetry_retention_count`; see its documentation."""
 
@@ -108,6 +112,12 @@ class StationConfig:
             (#154), simulated µs, or ``None`` to keep it queued until it is sent.
             Default ``None``: a command waits for the next pass, as an operator's queue
             does, unless a scenario asks for an expiry.
+        data_chunk_size_bytes: Size of every payload data chunk, bytes,
+            ``1..MAX_CHUNK_SIZE_BYTES`` (#158). The chunk size is not on the wire: both
+            ends are configured with it (ADR-0009 §6), so it must equal the spacecraft's
+            ``PayloadConfig.chunk_size_bytes``, and the station checks every DATA
+            chunk's content against ``chunk_content`` at this size. Default
+            :data:`DEFAULT_DATA_CHUNK_SIZE_BYTES` (64), the spacecraft's default.
         telemetry_retention_count: Most telemetry records the telemetry store keeps
             (#157); when full, the oldest is dropped and counted. Positive. Default
             :data:`DEFAULT_TELEMETRY_RETENTION_COUNT` (20 000): at the default 1 s
@@ -133,6 +143,7 @@ class StationConfig:
     identification_interval_us: int = 600_000_000
     max_uplink_command_count: int = DEFAULT_MAX_UPLINK_COMMAND_COUNT
     command_expiry_us: int | None = None
+    data_chunk_size_bytes: int = DEFAULT_DATA_CHUNK_SIZE_BYTES
     telemetry_retention_count: int = DEFAULT_TELEMETRY_RETENTION_COUNT
 
     def __post_init__(self) -> None:
@@ -174,6 +185,12 @@ class StationConfig:
         _positive_int("max_uplink_command_count", self.max_uplink_command_count)
         if self.command_expiry_us is not None:
             check_us("command_expiry_us", self.command_expiry_us)
+        _positive_int("data_chunk_size_bytes", self.data_chunk_size_bytes)
+        if self.data_chunk_size_bytes > MAX_CHUNK_SIZE_BYTES:
+            raise ValueError(
+                f"data_chunk_size_bytes must be at most {MAX_CHUNK_SIZE_BYTES}, "
+                f"got {self.data_chunk_size_bytes}"
+            )
         _positive_int("telemetry_retention_count", self.telemetry_retention_count)
 
     def check_tick(

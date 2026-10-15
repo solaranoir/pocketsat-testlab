@@ -10,6 +10,7 @@ import pytest
 from pocketsat.core.rng import RngFactory
 from pocketsat.frame import FrameType, encode_frame_fields
 from pocketsat.groundstation import (
+    DataChunkReceived,
     FrameRejected,
     GroundStation,
     LinkStatistics,
@@ -20,11 +21,11 @@ from pocketsat.groundstation import (
     TelemetryReceived,
     UnmatchedAck,
 )
+from pocketsat.groundstation.data import DataStore
 from pocketsat.groundstation.downlink import DownlinkDecoder, SequenceResult, SequenceTracker
 from pocketsat.messages import (
     CommandAck,
     CommandId,
-    DataChunk,
     Packet,
     Telemetry,
     decode_telemetry,
@@ -56,13 +57,12 @@ ERROR_REASONS = {
 
 
 class RecordingDecoder(DownlinkDecoder):
-    """A decoder whose hooks (#155, #157, #158) record what they are given."""
+    """A decoder whose hooks (#155, #157) record what they are given."""
 
     def __init__(self) -> None:
         super().__init__()
         self.telemetry: list[Telemetry] = []
         self.acks: list[tuple[int, CommandAck]] = []
-        self.chunks: list[tuple[int, DataChunk]] = []
 
     def on_telemetry(self, now_us: int, telemetry: Telemetry) -> None:
         self.telemetry.append(telemetry)
@@ -70,9 +70,6 @@ class RecordingDecoder(DownlinkDecoder):
     def on_ack(self, now_us: int, sequence: int, ack: CommandAck) -> list[StationEvent]:
         self.acks.append((sequence, ack))
         return super().on_ack(now_us, sequence, ack)
-
-    def on_data(self, now_us: int, sequence: int, chunk: DataChunk) -> None:
-        self.chunks.append((sequence, chunk))
 
 
 def _packet(frame_type: FrameType, sequence: int, payload: bytes) -> Packet:
@@ -112,13 +109,13 @@ def test_telemetry_vectors_decode(vector: dict[str, Any]) -> None:
 
 
 @pytest.mark.parametrize("vector", DATA["valid_data"], ids=lambda v: v["name"])
-def test_data_vectors_decode_and_reach_the_data_hook(vector: dict[str, Any]) -> None:
-    decoder = RecordingDecoder()
+def test_data_vectors_decode_into_data_chunk_events(vector: dict[str, Any]) -> None:
+    # Each vector has its own chunk size, which both ends are configured with (#158).
+    store = DataStore(vector["chunk_size"])
+    decoder = DownlinkDecoder(data=store)
     events = decoder.decode(NOW_US, Packet(frame=bytes.fromhex(vector["frame_hex"])))
-    # DataChunkReceived needs the chunk size for content_ok, so it is #158's to emit.
-    assert events == []
-    content = bytes.fromhex(vector["content_hex"])
-    assert decoder.chunks == [(vector["sequence"], DataChunk(vector["chunk_id"], content))]
+    assert events == [DataChunkReceived(NOW_US, vector["sequence"], vector["chunk_id"], True)]
+    assert store.chunk(vector["chunk_id"]) == bytes.fromhex(vector["content_hex"])
     assert decoder.statistics.rejected_count == 0
 
 
@@ -158,11 +155,12 @@ def test_invalid_telemetry_payloads_are_rejected_as_payload(vector: dict[str, An
 @pytest.mark.parametrize("vector", DATA["invalid_data"], ids=lambda v: v["name"])
 def test_invalid_data_payloads_are_rejected_as_payload(vector: dict[str, Any]) -> None:
     packet = _packet(FrameType.DATA, 0, bytes.fromhex(vector["payload_hex"]))
-    decoder = RecordingDecoder()
+    store = DataStore(64)
+    decoder = DownlinkDecoder(data=store)
     assert decoder.decode(NOW_US, packet) == [
         FrameRejected(NOW_US, RejectionReason.PAYLOAD, packet.frame)
     ]
-    assert decoder.chunks == []
+    assert store.statistics.received_count == 0
 
 
 # --- ACK and wrong direction ---------------------------------------------------------

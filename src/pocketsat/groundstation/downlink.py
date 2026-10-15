@@ -14,10 +14,11 @@ packet, in arrival order:
    :class:`TelemetryReceived` event, and a :class:`SpacecraftRebooted` event follows it
    when the boot count went up, and the telemetry is stored in the telemetry store
    (#157) when the decoder has one; an ACK/NACK is correlated with its command by the
-   station's command tracker (#155), whose event follows; DATA payloads are decoded and
-   handed to a hook that #158 (DATA reassembly and content checks) fills in. A payload
-   that does not decode for its type becomes ``FrameRejected`` with reason ``PAYLOAD``;
-   its sequence was already tracked, because the CRC vouched for the header.
+   station's command tracker (#155), whose event follows; DATA is decoded and handed to
+   the :class:`~pocketsat.groundstation.data.DataStore` (#158), which checks, stores and
+   counts the chunk and returns its :class:`DataChunkReceived` event. A payload that
+   does not decode for its type becomes ``FrameRejected`` with reason ``PAYLOAD``; its
+   sequence was already tracked, because the CRC vouched for the header.
 
 So per packet the events are frame-level first (``SequenceGap`` or ``FrameRejected``),
 then content. Nothing raises for any received bytes.
@@ -42,6 +43,8 @@ from pocketsat.frame import (
     FrameType,
     decode_frame,
 )
+from pocketsat.groundstation.config import DEFAULT_DATA_CHUNK_SIZE_BYTES
+from pocketsat.groundstation.data import DataStore
 from pocketsat.groundstation.events import (
     FrameRejected,
     RejectionReason,
@@ -54,7 +57,6 @@ from pocketsat.groundstation.telemetry import TelemetryRecord, TelemetryStore
 from pocketsat.messages import (
     AckDecodeError,
     CommandAck,
-    DataChunk,
     DataDecodeError,
     Packet,
     Telemetry,
@@ -206,13 +208,20 @@ class DownlinkDecoder:
             keeps none.
         ack_handler: Receives every decoded ACK/NACK (#155); the station passes its
             command tracker's ``answer``. ``None`` decodes ACKs and emits nothing for them.
+        data: Where DATA chunks go (#158). Default: a new store at the default chunk
+            size.
     """
 
     def __init__(
-        self, telemetry: TelemetryStore | None = None, ack_handler: AckHandler | None = None
+        self,
+        telemetry: TelemetryStore | None = None,
+        ack_handler: AckHandler | None = None,
+        *,
+        data: DataStore | None = None,
     ) -> None:
         self._telemetry_store = telemetry
         self._ack_handler = ack_handler
+        self._data = DataStore(DEFAULT_DATA_CHUNK_SIZE_BYTES) if data is None else data
         self._pass_id = 0
         self._sequence = SequenceTracker()
         self._total = _Counts()
@@ -234,8 +243,10 @@ class DownlinkDecoder:
 
         Called by the pass state machine at AOS (#161). Until #161 nothing calls it, so
         the whole run is one pass and :attr:`pass_statistics` equals :attr:`statistics`.
+        The DATA store's pass begins too.
         """
         self._pass = _Counts()
+        self._data.start_pass()
         self._pass_id += 1
 
     @property
@@ -283,8 +294,7 @@ class DownlinkDecoder:
                 return self._telemetry(now_us, frame.sequence, decode_telemetry(frame.payload))
             if frame.frame_type is FrameType.ACK:
                 return self.on_ack(now_us, frame.sequence, decode_ack(frame.payload))
-            self.on_data(now_us, frame.sequence, decode_data(frame.payload))
-            return []
+            return [self._data.receive(now_us, frame.sequence, decode_data(frame.payload))]
         except (TelemetryDecodeError, AckDecodeError, DataDecodeError):
             return [self._reject(now_us, RejectionReason.PAYLOAD, raw)]
 
@@ -317,13 +327,6 @@ class DownlinkDecoder:
         if self._ack_handler is None:
             return []
         return [self._ack_handler(now_us, ack)]
-
-    def on_data(self, now_us: int, sequence: int, chunk: DataChunk) -> None:
-        """Hook for a decoded DATA chunk: reassembly and content checks are #158.
-
-        A no-op until #158, which emits ``DataChunkReceived`` (its ``content_ok`` needs
-        the configured chunk size, ADR-0009 §6).
-        """
 
     def _count_received(self) -> None:
         self._total.received_count += 1
