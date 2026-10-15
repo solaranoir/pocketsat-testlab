@@ -25,6 +25,7 @@ from pocketsat.groundstation import (
     Los,
     RadioState,
     RadioStateChanged,
+    RadioTuned,
     RejectionReason,
     SequenceGap,
     SpacecraftRebooted,
@@ -256,6 +257,15 @@ EVENTS: list[StationEvent] = [
     SpacecraftRebooted(12, sequence=0, boot_count=2),
     RadioStateChanged(13, state=RadioState.TRANSMIT),
     StationIdentified(14, callsign="N0CALL"),
+    RadioTuned(
+        15,
+        uplink_doppler_hz=1702.8,
+        downlink_doppler_hz=5084.4,
+        uplink_frequency_hz=145_848_300,
+        downlink_frequency_hz=435_505_080,
+        uplink_residual_hz=2.8,
+        downlink_residual_hz=4.4,
+    ),
 ]
 
 

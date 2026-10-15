@@ -314,6 +314,35 @@ class StationIdentified(_Event):
     callsign: str
 
 
+@dataclass(frozen=True)
+class RadioTuned(_Event):
+    """The station tuned its radio for the predicted Doppler shift (#162).
+
+    Emitted at the start of every tick of a pass (AOS included, LOS not), after the
+    pass events. The shifts are the station's prediction from its geometry (ADR-0010
+    §6); the residuals are what the tuning leaves uncorrected: at most half
+    ``tuning_step_hz`` with ``doppler_correction`` on, the full shift with it off.
+
+    Attributes:
+        uplink_doppler_hz: Predicted shift of the uplink carrier at the spacecraft.
+        downlink_doppler_hz: Predicted shift of the downlink carrier at the station.
+        uplink_frequency_hz: Tuned transmit frequency, pre-compensated so the
+            spacecraft hears the nominal uplink frequency.
+        downlink_frequency_hz: Tuned receive frequency.
+        uplink_residual_hz: Offset from the nominal uplink frequency at which the
+            spacecraft hears the station.
+        downlink_residual_hz: Offset of the received downlink carrier from the tuned
+            receive frequency.
+    """
+
+    uplink_doppler_hz: float
+    downlink_doppler_hz: float
+    uplink_frequency_hz: int
+    downlink_frequency_hz: int
+    uplink_residual_hz: float
+    downlink_residual_hz: float
+
+
 StationEvent = (
     Aos
     | Los
@@ -330,6 +359,7 @@ StationEvent = (
     | SpacecraftRebooted
     | RadioStateChanged
     | StationIdentified
+    | RadioTuned
 )
 """Every event the ground station emits (ADR-0010 §4)."""
 
@@ -349,5 +379,7 @@ EVENT_TYPES: tuple[type[StationEvent], ...] = (
     SpacecraftRebooted,
     RadioStateChanged,
     StationIdentified,
+    RadioTuned,
 )
-"""The members of :data:`StationEvent`, in the order of ADR-0010 §4's table."""
+"""The members of :data:`StationEvent`, in the order of ADR-0010 §4's table, then the
+events later tickets added (``docs/groundstation.md``, "Events")."""

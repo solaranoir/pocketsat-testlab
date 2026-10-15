@@ -10,8 +10,9 @@ after it (steps 8 and 9: decoding). Commands are queued with
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
 stub below names its ticket: radio control (#164). Uplink encoding (#154), downlink
 decoding (#156), ACK/NACK correlation, timeouts and retries (#155), the telemetry store
-(#157), DATA reassembly (#158, the :attr:`~GroundStation.data` store) and pass state
-(#161, :mod:`pocketsat.groundstation.passes`) are in.
+(#157), DATA reassembly (#158, the :attr:`~GroundStation.data` store), pass state
+(#161, :mod:`pocketsat.groundstation.passes`) and Doppler tuning (#162,
+:mod:`pocketsat.groundstation.tuning`) are in.
 """
 
 from collections.abc import Sequence
@@ -35,6 +36,7 @@ from pocketsat.groundstation.events import (
 )
 from pocketsat.groundstation.passes import PassState, PassTracker
 from pocketsat.groundstation.telemetry import TelemetryStore
+from pocketsat.groundstation.tuning import DopplerTuner
 from pocketsat.groundstation.uplink import CommandQueue, TransmitGate, always_open
 from pocketsat.messages import Command, CommandAck, Packet
 
@@ -97,6 +99,12 @@ class GroundStation:
         self._data = DataStore(self._config.data_chunk_size_bytes)
         self._downlink = DownlinkDecoder(self._telemetry, ack_handler=self._answer, data=self._data)
         self._passes = PassTracker(self._config.elevation_mask_deg)
+        self._tuner = DopplerTuner(
+            self._config.uplink_frequency_hz,
+            self._config.downlink_frequency_hz,
+            self._config.tuning_step_hz,
+            self._config.doppler_correction,
+        )
 
     @property
     def config(self) -> StationConfig:
@@ -193,8 +201,10 @@ class GroundStation:
 
         First, the pass state follows ``geometry`` against the elevation mask: AOS and
         LOS events, and the per-pass link statistics restart at AOS (#161,
-        :mod:`pocketsat.groundstation.passes`). Then attempts unanswered for
-        ``config.command_timeout_us`` time out and their retries are queued (#155,
+        :mod:`pocketsat.groundstation.passes`). In a pass, the radio is tuned for the
+        predicted Doppler shift and a :class:`~pocketsat.groundstation.events.RadioTuned`
+        event reports it (#162, :mod:`pocketsat.groundstation.tuning`). Then attempts
+        unanswered for ``config.command_timeout_us`` time out and their retries are queued (#155,
         :mod:`pocketsat.groundstation.commands`). Then queued commands that are due are
         encoded into COMMAND frames while the transmit gate is open, at most
         ``config.max_uplink_command_count`` per tick, and stale ones expire (#154,
@@ -221,6 +231,9 @@ class GroundStation:
         pass_events = self._passes.update(now_us, geometry)
         if any(isinstance(event, Aos) for event in pass_events):
             self._downlink.start_pass()
+        # Doppler tuning (#162): every tick of a pass, after its AOS.
+        if geometry is not None and self._passes.state.in_pass:
+            pass_events += (self._tuner.tune(now_us, geometry),)
         timeout_events, retries = self._commands.expire(now_us)
         for retry in retries:
             self._uplink.add(retry.command_ref, retry.command, now_us, retry.retry_count)

@@ -63,10 +63,14 @@ def test_uplink_unwraps_packets_to_their_frames_unchanged() -> None:
     assert carried == frames
 
 
-def test_downlink_fills_elevation_and_range_from_geometry_only() -> None:
+def test_downlink_fills_elevation_range_and_doppler_from_geometry_only() -> None:
     (packet,) = IdealLink().carry_downlink([_command_frame(3)], TICK_US, ABOVE)
-    assert packet == Packet(frame=_command_frame(3), elevation_deg=35.5, range_km=812.25)
-    assert packet.doppler_hz is None
+    assert packet == Packet(
+        frame=_command_frame(3),
+        elevation_deg=35.5,
+        range_km=812.25,
+        doppler_hz=5084.350721057833,  # 435.5 MHz approaching at 3.5 km/s (#162)
+    )
     assert packet.snr_db is None
     assert packet.loss_probability is None
 

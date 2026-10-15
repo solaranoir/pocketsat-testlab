@@ -75,6 +75,8 @@ spacecraft settings (ADR-0005). Change single values with `dataclasses.replace()
 | `max_uplink_command_count` | 4 | Most COMMAND frames per tick (#154). Each command's 14-byte ACK comes down in the same tick, and the default downlink carries 120 bytes per 100 ms tick, so four ACKs (56 bytes) still leave room for a 36-byte TELEMETRY frame |
 | `command_expiry_us` | `None` | How long after its due time an unsent command is dropped as `CommandFailed` (`EXPIRED`) (#154). `None` keeps it queued for the next pass |
 | `data_chunk_size_bytes` | 64 | Payload chunk size (#158). Not on the wire: both ends are configured with it (ADR-0009 §6), so it must equal the spacecraft's `PayloadConfig.chunk_size_bytes`, whose default it matches |
+| `doppler_correction` | `True` | Tune the radio for the predicted Doppler shift each tick of a pass (#162, [Doppler and radio tuning](#doppler-and-radio-tuning)). `False` leaves the radio on the nominal frequencies: the switch Phase 4's Doppler tracking error uses (`docs/architecture.md` §9) |
+| `tuning_step_hz` | 10 | The radio's tuning resolution (#162): corrections are whole steps, so the residual is at most half a step. 10 Hz is a common CAT frequency resolution of amateur transceivers |
 
 `StationConfig.check_tick(tick_us)` rejects a timeout shorter than the longest
 legitimate answer (`max_answer_latency_us`, see [Command outcomes](#command-outcomes)),
@@ -202,6 +204,7 @@ telemetry store, so a new observable is a new event type.
 | `SpacecraftRebooted` | decoding (#156) | `sequence`, `boot_count` |
 | `RadioStateChanged` | radio control (#164) | `state` (`RadioState`) |
 | `StationIdentified` | radio control (#164) | `callsign` |
+| `RadioTuned` | Doppler tuning (#162) | `uplink_doppler_hz`, `downlink_doppler_hz` (predicted shifts), `uplink_frequency_hz`, `downlink_frequency_hz` (tuned transmit and receive, whole Hz), `uplink_residual_hz`, `downlink_residual_hz` |
 
 A COMMAND frame received on the downlink, as `EchoTarget` produces, is a
 `FrameRejected` with reason `WRONG_DIRECTION` and its bytes. Frames the link drops are
@@ -305,6 +308,49 @@ orbit and station (#160): AOS and LOS within one tick of the predicted crossings
 (`OrbitGeometry.next_pass`), maximum elevations matching, and, with the mask at 0° so
 that passes and link visibility coincide, frames delivered only during passes. The fast
 suite runs the day at a 10 s tick; a slow test repeats the AOS/LOS check at 100 ms.
+
+## Doppler and radio tuning
+
+Doppler shift (#162) is `Δf = -f · ṙ / c` (ADR-0011 §6): first order, arithmetic only,
+with `c` = 299 792.458 km/s. It is positive while the spacecraft approaches (range rate
+`ṙ < 0`), zero at closest approach and negative while it recedes; in LEO it reaches about
+±10 kHz on the 435.5 MHz downlink and ±3.4 kHz on the 145.85 MHz uplink.
+`pocketsat.doppler.doppler_shift_hz(frequency_hz, range_rate_km_per_s)` computes it. It
+sits beside `pocketsat.link` because both sides use it and it depends on neither (the
+`pocketsat.rf` package is Phase 3's).
+
+- **On packets.** `IdealLink` puts the true downlink shift on every downlink packet it
+  delivers with geometry, `Packet.doppler_hz`: the shift of
+  `IdealLink(downlink_frequency_hz=...)`, which the run loop sets to the station's
+  `downlink_frequency_hz` (default 435 500 000, the station default). Uplink packets
+  leave the link as frame bytes, so the uplink shift is reported in `RadioTuned`.
+- **Tuning.** In `begin_tick`, on every tick of a pass (from the AOS tick, after the
+  `Aos`; not on the LOS tick), the station predicts both shifts from its geometry (its
+  pass prediction, ADR-0010 §6) and retunes (`pocketsat.groundstation.tuning`): it
+  receives on `downlink_frequency_hz + correction` and transmits on
+  `uplink_frequency_hz - correction`, so the spacecraft hears the nominal uplink. Each
+  correction is the shift rounded to whole `tuning_step_hz` (ties up). A `RadioTuned`
+  event reports the shifts, the tuned frequencies and the **residuals** (shift minus
+  correction): for the uplink, the offset from nominal at which the spacecraft hears the
+  station; for the downlink, the received carrier's offset from the tuned frequency.
+- **Tolerance.** With `doppler_correction` on, both residuals are at most
+  `tuning_step_hz / 2` (5 Hz by default), against a shift of up to about 10 kHz. In
+  Phase 2 the station's geometry is the link's, so this holds against the packets'
+  `doppler_hz` too.
+- **Correction off.** With `doppler_correction=False` the radio stays on the nominal
+  frequencies and each residual is the full shift. Phase 4's Doppler tracking error uses
+  this switch, or gives the station a perturbed geometry; the true residual is then the
+  packets' `doppler_hz` against the tuned receive frequency.
+- **Not tuned outside a pass.** Between the geometric horizon and the elevation mask the
+  link still delivers frames, with their `doppler_hz`, but the station is not operating
+  and emits no `RadioTuned`. A run at the default 100 ms tick emits one `RadioTuned` per
+  tick of each pass (about 6 000 for a 10-minute pass).
+
+`tests/sil/test_doppler_story.py` runs a 60° pass of the default orbit at 100 ms: the
+shift falls from positive to negative through the pass and changes sign within a tick of
+closest approach, the residuals stay within half a step (and the packets' shift within
+half a step of the tuned receive frequency), and with correction off the residual is the
+full shift.
 
 ## DATA
 
