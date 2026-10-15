@@ -120,6 +120,14 @@ the link budget.
 **Milestone:** telemetry quality naturally improves and deteriorates over a simulated
 LEO pass.
 
+Review point: at the start of Phase 3, before the RF channel replaces `IdealLink`,
+evaluate the whole run loop's speed against the performance budgets (#188). Phase 2's
+loop (#167) measures about 95 µs per tick averaged over an orbit on CI ubuntu (budget
+100 µs) and about 182 µs for the worst-case tick. The 150 µs worst-case budget
+currently applies to the flight software stack only (maintainer decision, 2026-10-15).
+Decide whether the whole loop is held to it, and set a per-tick cost for the RF
+channel before building it (`docs/spacecraft.md`, "Performance budget (#78)").
+
 ### Phase 4 — RF Fault Injection
 
 Add packet loss, corruption, latency, jitter, interference, complete outage, frequency
