@@ -340,6 +340,110 @@ and a DOWNLINK pass against `SilTarget` through the ideal link, with the station
 the commands, and checks every telemetry frame decoded, every chunk stored once, in
 order, verified and none missing, and no frame errors or gaps.
 
+## Mission console
+
+`pocketsat.groundstation.console` (#165) turns events into a text log for people and a
+JSON-lines log for reporting (Phase 6) and assertions. It is the station's presentation
+layer (ADR-0010 §4, `docs/architecture.md` §4.2): it reads nothing but events, writes
+to injected text streams, and never imports a target, the link or a clock.
+
+```python
+console = MissionConsole(text=sys.stdout, log=log_file)   # either stream may be None
+console.emit_all(uplink.events)                           # after begin_tick
+console.emit_all(station.end_tick(now_us, downlink))      # after end_tick
+```
+
+| Name | Does |
+|---|---|
+| `MissionConsole(text, log)` | `emit(event)` writes one text line and one JSON line (each ending in `\n`) and returns the text line; `emit_all(events)`; `reset()` forgets earlier events (after a station reset) |
+| `format_event(event, state)` | One text line, without the newline |
+| `event_record(event)`, `event_json(event)` | The structured record as a dict, and as one compact JSON line |
+| `format_time(time_us)` | `T+HH:MM:SS.t` |
+| `ConsoleState` | What the console remembers: the command ID of each command not yet resolved, and the count of DATA chunks stored |
+
+### Text lines
+
+```
+T+HH:MM:SS.t  TAG    detail
+```
+
+The time is the event's `time_us`, truncated to the tenth of a second with integer
+arithmetic; hours grow past 99. The tag is padded to six characters. Angles are
+written to 0.1°, telemetry values to their wire resolution (`TELEMETRY_QUANTITIES`:
+volts to 0.001, SOC to 0.001, °C and pointing error to 0.01), modes, states and
+reasons by enum name, and flags by name in bit order (`none` when clear). Units are
+ASCII (`deg`, `V`, `C`, `B`).
+
+| Event | Tag | Detail |
+|---|---|---|
+| `Aos` | `AOS` | `pass 1 az 213.4 deg el 10.0 deg` |
+| `Los` | `LOS` | `pass 1 az 45.2 deg el 10.0 deg max el 62.3 deg` |
+| `CommandSent` | `CMD` | `#3 PING sent seq 12`; a retry adds `retry 2`; an unassigned ID is hex (`0x7F`) |
+| `CommandAcked` | `CMD` | `#3 PING ACK seq 12` |
+| `CommandNacked` | `CMD` | `#3 SET_MODE NACK BOOT_IN_PROGRESS seq 12` |
+| `CommandTimedOut` | `CMD` | `#3 PING timed out attempt 1, retrying` or `..., no retry` |
+| `CommandFailed` | `CMD` | `#3 RESET FAILED NOT_RETRYABLE` |
+| `UnmatchedAck` | `CMD` | `unmatched ACK RESET seq 9` |
+| `TelemetryReceived` | `TLM` | `seq 77 SCIENCE boot 2 soc 0.500 bus 7.200 V batt -3.50 C elec 21.07 C radio RX_TX att STABILIZED point 1.25 deg payload ACQUIRING buf 4096 B flags low_battery,over_temp` |
+| `DataChunkReceived` | `DATA` | `chunk 12 seq 345 stored, 13 chunks stored`; or `duplicate`, `CORRUPT`, `CORRUPT duplicate` |
+| `FrameRejected` | `FRAME` | `rejected CRC 22 bytes` |
+| `SequenceGap` | `GAP` | `seq 2 missing 3 (expected 65535)` |
+| `SpacecraftRebooted` | `REBOOT` | `boot 3 seq 0` |
+| `RadioStateChanged` | `RADIO` | `TRANSMIT` |
+| `StationIdentified` | `ID` | `W1AW/3` |
+| any other event type | `EVENT` | `TypeName field=value ...`: every field but `time_us`, in declaration order |
+
+Command lines name the command once its `CommandSent` has been seen (the ACK, NACK,
+timeout and failure events carry only the `CommandRef`); the name is forgotten when the
+command is resolved, so the state stays bounded. The DATA tally counts chunks stored
+(good and not a duplicate) since the console was built or reset. Both come from earlier
+events, so the text is a function of the event sequence alone.
+
+The generic line writes booleans as `true`/`false`, `None` as `none`, enums by name,
+flags joined by `|`, a `CommandRef` as `#n`, bytes as hex, floats as Python's
+shortest round-trip `repr`, and a string as is, or JSON-quoted if it is empty or
+contains whitespace. A value with no deterministic form (a set, for example)
+raises `TypeError` rather than print something that could vary.
+
+**Adding an event type** (#162, #163, #164 and later): until it has a formatter, its
+events print the generic line and a full JSON record, so nothing is lost. To give it a
+line, add one function `(event, state) -> (tag, detail)` decorated with
+`@_formats(NewEvent)` in `console.py` and an expected line in
+`tests/unit/test_mission_console.py`, whose test checks that every member of
+`EVENT_TYPES` has both. Doppler and SNR indicators arrive with #162 and #163; `Packet`
+link attributes are not on any event yet, so the console shows none. #164 emits
+`RadioStateChanged` and `StationIdentified`, which already have lines.
+
+### JSON lines
+
+One compact object per event, in the same order as the text lines:
+
+```json
+{"event":"CommandNacked","time_us":754512345,"command_ref":3,"sequence":12,"reason":"BOOT_IN_PROGRESS"}
+```
+
+- `event`: the event's type name. Then every field of the event in declaration order,
+  starting with `time_us` (integer µs).
+- Enums by name (`"SCIENCE"`, `"RX_TX"`, `"CRC"`); flags as a list of names in bit
+  order (`[]` when clear); a field declared `int` is always a number, even when it
+  holds an `IntEnum` member (`command_id`); `command_ref` as its number; bytes
+  (`FrameRejected.frame`) as lowercase hex; floats as Python's shortest round-trip
+  `repr`, so they read back exactly; `TelemetryReceived.telemetry` as a nested object
+  with every `Telemetry` field in payload order and engineering units.
+- No spaces, ASCII only (`ensure_ascii`), and non-finite floats are refused, so every
+  line is strict JSON.
+
+### Determinism
+
+The output is a pure function of the events: no clock, no random numbers, fixed key
+order and float formatting that does not depend on the platform (CPython formats floats
+itself, correctly rounded). Two runs with the same seed give byte-identical text and
+JSON lines; `tests/sil/test_console_sil.py` checks that over a short pass against
+`SilTarget` (AOS, command ACKs and NACKs, telemetry, DATA, a RESET and the reboot, LOS).
+Streams opened by a caller should use UTF-8 and `newline="\n"` so the bytes are the same
+on every operating system. The `pocketsat` command that prints the console (#166) and its
+byte-for-byte story test (#149) build on this.
+
 ## Determinism
 
 The package is scanned by the determinism guard (`tests/unit/test_determinism_guard.py`,

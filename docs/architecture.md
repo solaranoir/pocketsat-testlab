@@ -368,6 +368,7 @@ The schema is formalized in Phase 5. The orchestrator interprets scenarios, so a
 | Spacecraft model | `pocketsat.spacecraft` |
 | Flight computer (modes: [spacecraft-modes.md](spacecraft-modes.md)) | `pocketsat.flight` |
 | Ground station (`GroundStation`, `StationConfig`, events) | `pocketsat.groundstation` |
+| Mission console (`MissionConsole`, #165) | `pocketsat.groundstation.console` |
 | Link protocol, ideal link (`Link`, `IdealLink`, #153) | `pocketsat.link` |
 | Pass geometry record (`PassGeometry`) | `pocketsat.environment.geometry` |
 | Pass geometry provider (`OrbitGeometry`) | `pocketsat.environment.orbit` |
