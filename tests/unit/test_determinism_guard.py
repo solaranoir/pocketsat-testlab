@@ -155,6 +155,7 @@ SPACECRAFT_MODULES = frozenset(
 GROUNDSTATION_MODULES = frozenset(
     {
         "groundstation/__init__.py",
+        "groundstation/commands.py",
         "groundstation/config.py",
         "groundstation/downlink.py",
         "groundstation/events.py",

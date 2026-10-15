@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import Final
 
 from pocketsat.core.clock import check_us
+from pocketsat.groundstation.commands import (
+    DEFAULT_DOWNLINK_RATE_BYTES_PER_S,
+    max_answer_latency_us,
+)
 
 CALLSIGN_PATTERN: Final = re.compile(r"[A-Z0-9/]{3,16}")
 """A callsign: 3 to 16 uppercase letters, digits and ``/`` (portable suffixes such as
@@ -29,6 +33,9 @@ MAX_COMMAND_RETRY_COUNT: Final = 10
 
 DEFAULT_MAX_UPLINK_COMMAND_COUNT: Final = 4
 """Default for :attr:`StationConfig.max_uplink_command_count`; see its documentation."""
+
+DEFAULT_TELEMETRY_RETENTION_COUNT: Final = 20_000
+"""Default for :attr:`StationConfig.telemetry_retention_count`; see its documentation."""
 
 
 def _number(name: str, value: float) -> float:
@@ -101,6 +108,13 @@ class StationConfig:
             (#154), simulated µs, or ``None`` to keep it queued until it is sent.
             Default ``None``: a command waits for the next pass, as an operator's queue
             does, unless a scenario asks for an expiry.
+        telemetry_retention_count: Most telemetry records the telemetry store keeps
+            (#157); when full, the oldest is dropped and counted. Positive. Default
+            :data:`DEFAULT_TELEMETRY_RETENTION_COUNT` (20 000): at the default 1 s
+            telemetry cadence that is about 5.5 hours of continuous reception, or
+            several days of passes, which covers any Phase 2 scenario, in about 10 MB
+            (about 520 bytes per record, measured), so a campaign of many runs stays
+            bounded.
 
     Raises:
         TypeError: A field has the wrong type.
@@ -119,6 +133,7 @@ class StationConfig:
     identification_interval_us: int = 600_000_000
     max_uplink_command_count: int = DEFAULT_MAX_UPLINK_COMMAND_COUNT
     command_expiry_us: int | None = None
+    telemetry_retention_count: int = DEFAULT_TELEMETRY_RETENTION_COUNT
 
     def __post_init__(self) -> None:
         if not isinstance(self.callsign, str):
@@ -159,30 +174,35 @@ class StationConfig:
         _positive_int("max_uplink_command_count", self.max_uplink_command_count)
         if self.command_expiry_us is not None:
             check_us("command_expiry_us", self.command_expiry_us)
+        _positive_int("telemetry_retention_count", self.telemetry_retention_count)
 
-    def check_tick(self, tick_us: int) -> None:
+    def check_tick(
+        self, tick_us: int, downlink_rate_bytes_per_s: int = DEFAULT_DOWNLINK_RATE_BYTES_PER_S
+    ) -> None:
         """Check that this configuration can run at a tick of ``tick_us``.
 
-        A command is answered in the tick it is sent at the default tick, and later at
-        ticks shorter than one frame's airtime (ADR-0008 §6a). The timeout must
-        therefore cover at least two ticks, so an answer in the next tick is never a
-        timeout. This is the provisional bound; #155 states the full one.
+        The command timeout must cover the longest legitimate answer
+        (:func:`~pocketsat.groundstation.commands.max_answer_latency_us`, #155), so a
+        command answered as late as the protocol allows never times out: one tick in
+        every whole-frame tick (ADR-0004, "command → ACK, same tick"; 100 ms at the
+        default tick), and up to the airtime of the frame in transmission, the held ACKs
+        and the answer itself in streaming ticks (ADR-0008 §5), rounded up to whole
+        ticks. The run loop calls this with the run's tick (#167).
 
         Args:
             tick_us: The run's tick length, simulated microseconds.
+            downlink_rate_bytes_per_s: The spacecraft's transmit rate (default 1200).
 
         Raises:
-            TypeError: ``tick_us`` is not an int.
-            ValueError: ``tick_us`` is not positive, or ``command_timeout_us`` is
-                shorter than two ticks.
+            TypeError: An argument is not an int.
+            ValueError: An argument is not positive, or ``command_timeout_us`` is
+                shorter than the longest legitimate answer.
         """
-        check_us("tick_us", tick_us)
-        if tick_us == 0:
-            raise ValueError("tick_us must be positive, got 0")
-        if self.command_timeout_us < 2 * tick_us:
+        bound_us = max_answer_latency_us(tick_us, downlink_rate_bytes_per_s)
+        if self.command_timeout_us < bound_us:
             raise ValueError(
-                f"command_timeout_us ({self.command_timeout_us}) must be at least two "
-                f"ticks ({2 * tick_us} µs at a {tick_us} µs tick)"
+                f"command_timeout_us ({self.command_timeout_us}) must be at least the "
+                f"longest legitimate answer, {bound_us} µs at a {tick_us} µs tick"
             )
 
 

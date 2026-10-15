@@ -47,6 +47,7 @@ sequenceDiagram
 | `end_tick(now_us, downlink)` | steps 8-9, tick end | Decodes each packet in arrival order (#156, #155, #158) and returns the events: per packet, frame-level events first, then the content |
 | `telemetry` | any time | Read-only `TelemetryStore` of decoded telemetry (#157) |
 | `link_statistics`, `pass_link_statistics` | any time | Downlink `LinkStatistics` since the last reset and for the current pass (#156) |
+| `outstanding_commands`, `unmatched_ack_count` | any time | Commands sent and not yet answered, and ACKs that answered none, since the last reset (#155) |
 
 `now_us` is integer simulated microseconds (ADR-0003) and never goes back:
 `begin_tick` gets the tick's start, `end_tick` its end (the time `SilTarget` gives the
@@ -73,9 +74,9 @@ spacecraft settings (ADR-0005). Change single values with `dataclasses.replace()
 | `max_uplink_command_count` | 4 | Most COMMAND frames per tick (#154). Each command's 14-byte ACK comes down in the same tick, and the default downlink carries 120 bytes per 100 ms tick, so four ACKs (56 bytes) still leave room for a 36-byte TELEMETRY frame |
 | `command_expiry_us` | `None` | How long after its due time an unsent command is dropped as `CommandFailed` (`EXPIRED`) (#154). `None` keeps it queued for the next pass |
 
-`StationConfig.check_tick(tick_us)` rejects a timeout shorter than two ticks, so an
-answer in the next tick is never a timeout. This is a provisional bound; #155 states the
-full one.
+`StationConfig.check_tick(tick_us)` rejects a timeout shorter than the longest
+legitimate answer (`max_answer_latency_us`, see [Command outcomes](#command-outcomes)),
+so a command answered as late as the protocol allows never times out.
 
 ## Commands, references and retries
 
@@ -117,7 +118,63 @@ wraps `0xFFFF` → `0x0000`. `Uplink.events` lists expiries first, then one
 `CommandSent` per packet in transmission order. Uplink packets carry only the frame;
 the link fills any link attributes.
 
-Retries and timeouts are #155: until then a sent command is never sent again.
+Retries are queued by ACK correlation (below) with the attempt's `retry_count`, and
+then go through the same expiry, gate and per-tick limit.
+
+## Command outcomes
+
+`pocketsat.groundstation.commands` (#155) closes the loop on every command sent. Every
+command ends in exactly one of `CommandAcked`, `CommandNacked` or `CommandFailed`;
+`outstanding_commands` lists those still waiting.
+
+- **Correlation.** Each decoded ACK/NACK (`decode_ack`, #156) answers the attempt whose
+  uplink sequence it names, if it also echoes that attempt's command ID (ADR-0009 §4).
+  The first answer resolves the command: `CommandAcked`, or `CommandNacked` with the
+  reason as a `DecodeReason` or `RejectReason` member (reported by name). The event
+  follows the ACK frame's frame-level events in `end_tick`.
+- **Late answers.** A command's earlier attempts stay matchable until it is resolved: an
+  ACK for an attempt that timed out still answers the command, since the spacecraft did
+  execute it. If the retry is still queued (gate closed), it is cancelled.
+- **Unmatched answers.** An ACK for an unknown sequence, with a mismatched command ID,
+  or for a command already resolved (a duplicate, or an answer after the command
+  failed) is an `UnmatchedAck` event and counted in `unmatched_ack_count`. Never an
+  error.
+- **Timeouts.** An attempt sent in `begin_tick` at `t` times out in the first
+  `begin_tick` at or after `t + command_timeout_us` with no answer decoded.
+  `end_tick` runs before the next `begin_tick`, so an answer decoded at exactly the
+  timeout is not a timeout. Only a command's latest attempt can time out.
+- **Retries** (ADR-0010 §2). A timed-out command gets `CommandTimedOut` with
+  `will_retry`. A retry is queued due at the timeout, so with the gate open it goes out
+  in the same `begin_tick`, as a new COMMAND frame with a new uplink sequence and the
+  next `retry_count`. After `command_retry_count` retries the command fails with
+  `RETRIES_EXHAUSTED`. `RESET` is never retried (`NON_RETRYABLE_COMMANDS`): it fails
+  with `NOT_RETRYABLE` after its first timeout. A retry that expires in the queue fails
+  with `EXPIRED` (#154) and its command is forgotten.
+- **Order.** `begin_tick` returns timeouts (and failures) first, in command reference
+  order, then the uplink queue's expiries and `CommandSent` events.
+
+**The timeout bound.** `max_answer_latency_us(tick_us, downlink_rate_bytes_per_s=1200)`
+is the longest a legitimate answer takes from `begin_tick` to `end_tick`, and
+`StationConfig.check_tick` requires `command_timeout_us` to be at least that:
+
+- A command sent at `t` reaches the flight computer in the tick starting at `t`. In a
+  whole-frame tick its answer comes down in the same tick and is decoded at `t + tick`
+  (ADR-0004, "command → ACK, same tick").
+- In streaming ticks the answer can wait behind the rest of a frame in transmission (at
+  most 77 bytes), up to 8 held ACK/NACK frames, and its own 14 bytes: 203 bytes
+  (ADR-0008 §5), plus one byte for the fraction of a byte the tick capacity carries.
+  That airtime, rounded up to whole ticks and never less than one tick, is the bound.
+- A RESET's deferred reboot (ADR-0008 §6a) waits for its ACK, so it adds nothing.
+
+| Tick | Bound at 1200 bytes/s |
+|---|---|
+| 100 ms (default) | 200 ms (2 ticks; the worst case needs 170 ms of airtime) |
+| 30 ms | 180 ms (6 ticks) |
+| 2 s | 2 s (1 tick) |
+
+The default timeout, 2 s, satisfies every tick up to 2 s. An ACK suppressed because a
+ninth is due while eight are held, or lost while the transmitter is off, is a timeout:
+the protocol never delivers it.
 
 ## Events
 
@@ -174,18 +231,43 @@ counted by the link, not the station, which never sees them.
 3. **Content**, by frame type. TELEMETRY decodes into `TelemetryReceived`, followed by
    `SpacecraftRebooted` when its `boot_count` is higher than the previous telemetry's.
    The reboot is confirmed by the boot count, not the header, so it is reported even if
-   the restart itself was hidden by a gap. ACK and DATA payloads are decoded and passed
-   to hooks that are no-ops until #155 (ACK/NACK correlation) and #158 (DATA
-   reassembly and content checks; `DataChunkReceived` needs the configured chunk size).
-   Decoded telemetry likewise goes to a hook that #157 fills with the telemetry store.
+   the restart itself was hidden by a gap. Each ACK/NACK is correlated with its
+   command, and its outcome event follows (#155, "Command outcomes"). DATA payloads are
+   decoded and passed to a hook that is a no-op until #158 (DATA reassembly and content
+   checks; `DataChunkReceived` needs the configured chunk size). Decoded telemetry is
+   also stored in the telemetry store (#157, below).
    A payload that does not decode for its type is `FrameRejected` with reason
    `PAYLOAD`; its sequence was already tracked, because the CRC vouched for the header.
 
 **Link statistics** (`LinkStatistics`): packets received, rejected (in total and per
 reason), frames missing, and sequence restarts. `GroundStation.link_statistics` counts
-since the last reset and `pass_link_statistics` since the current pass began. Until the
-pass state machine (#161) calls `DownlinkDecoder.start_pass()` at each AOS, the whole
-run is one pass.
+since the last reset and `pass_link_statistics` since the current pass began: the pass
+state machine (#161, "Pass state" below) calls `DownlinkDecoder.start_pass()` at each
+AOS. A station never given geometry stays in one pass for the whole run.
+
+## Telemetry store
+
+`GroundStation.telemetry` is a `TelemetryStore` (`pocketsat.groundstation.telemetry`,
+#157). The downlink decoder appends one `TelemetryRecord` per decoded TELEMETRY frame;
+everyone else only reads it, and `reset` empties it.
+
+- **Record:** the decoded `Telemetry`, `time_us` (receive time: the end of the tick,
+  integer µs), `sequence` (the frame's downlink sequence) and `pass_id` (0 before the
+  first AOS, then the pass number: the pass state machine, #161, calls
+  `DownlinkDecoder.start_pass()` at each AOS).
+- **Queries:** `latest`, `latest_value(name)`, `window(start_us, end_us)` (half-open,
+  receive time), `pass_ids` and `by_pass(pass_id)`, `history`, iteration and `len`.
+- **Engineering units:** `Telemetry` already holds each value in its unit at wire
+  resolution. `TELEMETRY_QUANTITIES` is the one table of units and resolutions, one row
+  per wire field in payload order, and a test checks it against `docs/protocol.md`
+  ("Layout and mapping"): `bus_v` in V (0.001), `soc` as a fraction (0.001),
+  temperatures in °C (0.01), `pointing_error_deg` in ° (0.01), counters as is.
+  `record.value(name)` returns a value, `record.state_name(name)` the name of a mode or
+  state (for example `"NOMINAL"`), and `record.flag_names` the flags set, in bit order.
+- **Retention:** at most `StationConfig.telemetry_retention_count` records (default
+  20 000: about 5.5 hours of continuous reception at the default 1 s telemetry cadence,
+  or several days of passes, in about 10 MB). When full, the oldest record is dropped and counted in
+  `dropped_count`; queries see only retained records.
 
 ## Pass state
 

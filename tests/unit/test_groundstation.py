@@ -133,11 +133,15 @@ def test_config_bounds_are_inclusive(changes: dict[str, object]) -> None:
     StationConfig(**changes)  # type: ignore[arg-type]
 
 
-def test_check_tick_requires_two_ticks_of_timeout() -> None:
+def test_check_tick_requires_the_longest_legitimate_answer() -> None:
+    # The bound is max_answer_latency_us (#155): 2 ticks at 100 ms, 1 tick at 2 s.
     DEFAULT_STATION_CONFIG.check_tick(100_000)
-    DEFAULT_STATION_CONFIG.check_tick(1_000_000)  # exactly two ticks
-    with pytest.raises(ValueError, match="two"):
-        DEFAULT_STATION_CONFIG.check_tick(1_000_001)
+    DEFAULT_STATION_CONFIG.check_tick(2_000_000)  # exactly one tick of timeout
+    with pytest.raises(ValueError, match="longest legitimate answer"):
+        DEFAULT_STATION_CONFIG.check_tick(2_000_001)
+    short = dataclasses.replace(DEFAULT_STATION_CONFIG, command_timeout_us=199_999)
+    with pytest.raises(ValueError, match="200000"):
+        short.check_tick(100_000)
     with pytest.raises(ValueError):
         DEFAULT_STATION_CONFIG.check_tick(0)
     with pytest.raises(TypeError):

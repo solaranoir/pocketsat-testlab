@@ -8,9 +8,10 @@ after it (steps 8 and 9: decoding). Commands are queued with
 :meth:`~GroundStation.submit` at step 3.
 
 This module is the framework (#152). The behaviour arrives ticket by ticket, and each
-stub below names its ticket: uplink encoding (#154), ACK/NACK correlation, timeouts and
-retries (#155), the telemetry store (#157), DATA (#158) and radio control (#164). Pass
-state (#161) is :mod:`pocketsat.groundstation.passes`.
+stub below names its ticket: DATA (#158) and radio control (#164). Uplink encoding
+(#154), downlink decoding (#156), ACK/NACK correlation, timeouts and retries (#155), the
+telemetry store (#157) and pass state (#161, :mod:`pocketsat.groundstation.passes`) are
+in.
 """
 
 from collections.abc import Sequence
@@ -19,13 +20,22 @@ from dataclasses import dataclass
 from pocketsat.core.clock import check_us
 from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
+from pocketsat.groundstation.commands import Attempt, CommandTracker
 from pocketsat.groundstation.config import DEFAULT_STATION_CONFIG, StationConfig
 from pocketsat.groundstation.downlink import DownlinkDecoder, LinkStatistics
-from pocketsat.groundstation.events import Aos, CommandRef, StationEvent
+from pocketsat.groundstation.events import (
+    Aos,
+    CommandAcked,
+    CommandFailed,
+    CommandNacked,
+    CommandRef,
+    CommandSent,
+    StationEvent,
+)
 from pocketsat.groundstation.passes import PassState, PassTracker
 from pocketsat.groundstation.telemetry import TelemetryStore
 from pocketsat.groundstation.uplink import CommandQueue, TransmitGate, always_open
-from pocketsat.messages import Command, Packet
+from pocketsat.messages import Command, CommandAck, Packet
 
 
 @dataclass(frozen=True)
@@ -77,9 +87,13 @@ class GroundStation:
         self._uplink = CommandQueue(
             self._config.max_uplink_command_count, self._config.command_expiry_us
         )
+        self._commands = CommandTracker(
+            self._config.command_timeout_us, self._config.command_retry_count
+        )
+        self._submitted: dict[CommandRef, Command] = {}
         self._now_us = 0
-        self._telemetry = TelemetryStore()
-        self._downlink = DownlinkDecoder()
+        self._telemetry = TelemetryStore(self._config.telemetry_retention_count)
+        self._downlink = DownlinkDecoder(self._telemetry, ack_handler=self._answer)
         self._passes = PassTracker(self._config.elevation_mask_deg)
 
     @property
@@ -89,7 +103,10 @@ class GroundStation:
 
     @property
     def telemetry(self) -> TelemetryStore:
-        """The decoded telemetry (#157). Empty until #157."""
+        """The decoded telemetry, bounded by ``config.telemetry_retention_count`` (#157).
+
+        Read-only to callers: the downlink decoder fills it in :meth:`end_tick`, and
+        :meth:`reset` empties it."""
         return self._telemetry
 
     @property
@@ -107,6 +124,18 @@ class GroundStation:
     def pass_state(self) -> PassState:
         """Whether the station is in a pass, its number and maximum elevation (#161)."""
         return self._passes.state
+
+    @property
+    def outstanding_commands(self) -> tuple[CommandRef, ...]:
+        """Commands sent and waiting for an answer (#155), in reference order. A
+        command whose retry is still queued is not listed until the retry goes out."""
+        return self._commands.outstanding
+
+    @property
+    def unmatched_ack_count(self) -> int:
+        """ACK/NACK frames that answered no outstanding attempt since the last reset
+        (#155): duplicates, late answers to resolved commands, unknown sequences."""
+        return self._commands.unmatched_ack_count
 
     def reset(self, rngs: RngFactory) -> None:
         """Return to the configured initial state at simulated time 0.
@@ -148,18 +177,21 @@ class GroundStation:
         ref = CommandRef(self._next_ref_id)
         self._next_ref_id += 1
         self._uplink.add(ref, command, due)
+        self._submitted[ref] = command
         return ref
 
     def begin_tick(self, now_us: int, geometry: PassGeometry | None) -> Uplink:
         """Start a tick (steps 3 and 4): pass state, timeouts and retries, then uplink.
 
-        Queued commands that are due are encoded into COMMAND frames while the transmit
-        gate is open, at most ``config.max_uplink_command_count`` per tick, and stale
-        ones expire (#154, :mod:`pocketsat.groundstation.uplink`). First, the pass state
-        follows ``geometry`` against the elevation mask: AOS and LOS events, and the
-        per-pass link statistics restart at AOS (#161,
-        :mod:`pocketsat.groundstation.passes`). Stubs until their tickets land: timeouts
-        and retries (#155), and the radio's gate (#164).
+        First, the pass state follows ``geometry`` against the elevation mask: AOS and
+        LOS events, and the per-pass link statistics restart at AOS (#161,
+        :mod:`pocketsat.groundstation.passes`). Then attempts unanswered for
+        ``config.command_timeout_us`` time out and their retries are queued (#155,
+        :mod:`pocketsat.groundstation.commands`). Then queued commands that are due are
+        encoded into COMMAND frames while the transmit gate is open, at most
+        ``config.max_uplink_command_count`` per tick, and stale ones expire (#154,
+        :mod:`pocketsat.groundstation.uplink`). A stub until its ticket lands: the
+        radio's gate (#164).
 
         Args:
             now_us: Simulated time at the start of the tick.
@@ -181,8 +213,20 @@ class GroundStation:
         pass_events = self._passes.update(now_us, geometry)
         if any(isinstance(event, Aos) for event in pass_events):
             self._downlink.start_pass()
-        packets, events = self._uplink.transmit(now_us, self._transmit_gate(now_us))
-        return Uplink(packets, pass_events + events)
+        timeout_events, retries = self._commands.expire(now_us)
+        for retry in retries:
+            self._uplink.add(retry.command_ref, retry.command, now_us, retry.retry_count)
+        packets, uplink_events = self._uplink.transmit(now_us, self._transmit_gate(now_us))
+        for event in (*timeout_events, *uplink_events):
+            if isinstance(event, CommandSent):
+                command = self._submitted[event.command_ref]
+                self._commands.sent(
+                    Attempt(event.command_ref, command, event.sequence, event.retry_count, now_us)
+                )
+            elif isinstance(event, CommandFailed):
+                self._commands.discard(event.command_ref)
+                del self._submitted[event.command_ref]
+        return Uplink(packets, pass_events + timeout_events + uplink_events)
 
     def end_tick(self, now_us: int, downlink: Sequence[Packet]) -> tuple[StationEvent, ...]:
         """End a tick (steps 8 and 9): decode the downlink, in arrival order.
@@ -190,8 +234,9 @@ class GroundStation:
         Each packet is decoded by :class:`~pocketsat.groundstation.downlink.DownlinkDecoder`
         (#156): frame-level events first (rejection, sequence gap), then the content
         (telemetry, and a reboot when the boot count went up). Nothing raises for any
-        frame bytes. ACK correlation (#155), the telemetry store (#157) and DATA (#158)
-        are hooks in the decoder until their tickets.
+        frame bytes. Decoded telemetry is stored in :attr:`telemetry` (#157), and each
+        ACK/NACK is correlated with its command (#155). DATA (#158) is a hook in the
+        decoder until its ticket.
 
         Args:
             now_us: Simulated time at the end of the tick.
@@ -213,6 +258,15 @@ class GroundStation:
         for packet in downlink:
             events.extend(self._downlink.decode(now_us, packet))
         return tuple(events)
+
+    def _answer(self, now_us: int, ack: CommandAck) -> StationEvent:
+        """Correlate a decoded ACK/NACK (#155). An answered command's retry, if one is
+        still queued, is cancelled."""
+        event = self._commands.answer(now_us, ack)
+        if isinstance(event, CommandAcked | CommandNacked):
+            self._uplink.cancel(event.command_ref)
+            del self._submitted[event.command_ref]
+        return event
 
     def _advance_to(self, now_us: int) -> None:
         """Validate and record the simulated time of a call. Time never goes back."""

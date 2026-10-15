@@ -114,6 +114,7 @@ def test_frames_are_delivered_only_during_passes() -> None:
     target.reset(1)
 
     delivered_ticks = 0
+    sent_outside_passes = 0
     for tick in range(DAY_US // COARSE_TICK_US):
         start_us, end_us = tick * COARSE_TICK_US, (tick + 1) * COARSE_TICK_US
         sample = geometry.geometry_at(start_us)
@@ -128,8 +129,13 @@ def test_frames_are_delivered_only_during_passes() -> None:
         # something exactly in the ticks the link carries frames.
         assert bool(downlink) == station.pass_state.in_pass, f"tick {tick}"
         delivered_ticks += bool(downlink)
+        if not downlink:
+            sent_outside_passes += len(uplink.packets)
     target.close()
 
     assert station.pass_state.pass_id >= 4
     assert delivered_ticks > 0
-    assert link.uplink_dropped_count == DAY_US // COARSE_TICK_US - delivered_ticks
+    # EchoTarget never ACKs, so unanswered PINGs are retried (#155) and a tick can send
+    # more than one frame: every frame sent outside a pass, and only those, is dropped.
+    assert sent_outside_passes > 0
+    assert link.uplink_dropped_count == sent_outside_passes
