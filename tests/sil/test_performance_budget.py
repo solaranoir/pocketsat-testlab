@@ -50,7 +50,7 @@ import statistics
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
 import pytest
@@ -575,10 +575,18 @@ class _InSight:
         self._geometry = OrbitGeometry.with_pass(LOOP_PASS_ELEVATION_DEG, peak_tick * TICK_US)
 
     def geometry_at(self, now_us: int) -> PassGeometry:
+        # The real geometry is computed every tick, so its cost is in the figure; below
+        # the horizon a fixed record stands in for it, built once (building a record per
+        # tick here would add a cost a real run does not have).
         geometry = self._geometry.geometry_at(now_us)
-        if geometry.elevation_deg < 0.0:
-            return replace(geometry, elevation_deg=0.0)
-        return geometry
+        return geometry if geometry.elevation_deg >= 0.0 else _HORIZON
+
+
+_HORIZON: Final = PassGeometry(
+    azimuth_deg=0.0, elevation_deg=0.0, range_km=2_300.0, range_rate_km_per_s=0.0
+)
+"""Where :class:`_InSight` holds the spacecraft while the real one is below the
+horizon: on it, at about the range of a LEO spacecraft on the horizon."""
 
 
 def _time_loop_orbit(profile: OrbitProfile) -> TimedRun:
