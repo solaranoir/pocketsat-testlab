@@ -163,6 +163,7 @@ GROUNDSTATION_MODULES = frozenset(
         "groundstation/passes.py",
         "groundstation/station.py",
         "groundstation/telemetry.py",
+        "groundstation/tuning.py",
         "groundstation/uplink.py",
     }
 )
@@ -176,6 +177,7 @@ def test_scan_covers_simulation_code() -> None:
         "core/clock.py",
         "core/portable.py",
         "core/rng.py",
+        "doppler.py",
         "environment/nominal.py",
         "flight/__init__.py",
         "flight/boot.py",

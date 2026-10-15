@@ -16,6 +16,7 @@ from pocketsat.groundstation import (
     Aos,
     FrameRejected,
     GroundStation,
+    RadioTuned,
     RejectionReason,
     StationEvent,
     TelemetryReceived,
@@ -54,7 +55,8 @@ def _run(
     for tick in range(ticks):
         start_us, end_us = tick * TICK_US, (tick + 1) * TICK_US
         uplink = station.begin_tick(start_us, GEOMETRY)  # steps 3 and 4
-        events.extend(uplink.events)
+        # Doppler tuning (#162) is checked in test_doppler_story; leave it out here.
+        events.extend(e for e in uplink.events if not isinstance(e, RadioTuned))
         packets = [*uplink.packets, *uplink_by_tick.get(tick, [])]
         for frame in link.carry_uplink(packets, start_us, GEOMETRY):
             target.send(frame)

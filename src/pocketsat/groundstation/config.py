@@ -41,6 +41,9 @@ DEFAULT_DATA_CHUNK_SIZE_BYTES: Final = 64
 DEFAULT_TELEMETRY_RETENTION_COUNT: Final = 20_000
 """Default for :attr:`StationConfig.telemetry_retention_count`; see its documentation."""
 
+DEFAULT_TUNING_STEP_HZ: Final = 10
+"""Default for :attr:`StationConfig.tuning_step_hz`; see its documentation."""
+
 
 def _number(name: str, value: float) -> float:
     """Return ``value`` as a float, rejecting bools, non-numbers, NaN, and infinities."""
@@ -125,6 +128,18 @@ class StationConfig:
             several days of passes, which covers any Phase 2 scenario, in about 10 MB
             (about 520 bytes per record, measured), so a campaign of many runs stays
             bounded.
+        doppler_correction: Whether the station tunes its radio for the predicted
+            Doppler shift each tick (#162, :mod:`pocketsat.groundstation.tuning`). With
+            it off the radio stays on the nominal frequencies and the residual tuning
+            error is the full shift: the switch Phase 4's Doppler tracking error fault
+            uses (``docs/architecture.md`` §9). Default ``True``, as a satellite station
+            runs with its tracking software correcting Doppler.
+        tuning_step_hz: The radio's tuning resolution, Hz, positive (#162): each
+            Doppler correction is rounded to a whole number of steps, so with
+            correction on the residual tuning error is at most half a step. Default
+            :data:`DEFAULT_TUNING_STEP_HZ` (10), a common CAT frequency resolution of
+            amateur transceivers; the 5 Hz worst-case residual is three orders of
+            magnitude below the shift it corrects (about ±10 kHz at 435.5 MHz).
 
     Raises:
         TypeError: A field has the wrong type.
@@ -145,6 +160,8 @@ class StationConfig:
     command_expiry_us: int | None = None
     data_chunk_size_bytes: int = DEFAULT_DATA_CHUNK_SIZE_BYTES
     telemetry_retention_count: int = DEFAULT_TELEMETRY_RETENTION_COUNT
+    doppler_correction: bool = True
+    tuning_step_hz: int = DEFAULT_TUNING_STEP_HZ
 
     def __post_init__(self) -> None:
         if not isinstance(self.callsign, str):
@@ -192,6 +209,9 @@ class StationConfig:
                 f"got {self.data_chunk_size_bytes}"
             )
         _positive_int("telemetry_retention_count", self.telemetry_retention_count)
+        if not isinstance(self.doppler_correction, bool):
+            raise TypeError(f"doppler_correction must be a bool, got {self.doppler_correction!r}")
+        _positive_int("tuning_step_hz", self.tuning_step_hz)
 
     def check_tick(
         self, tick_us: int, downlink_rate_bytes_per_s: int = DEFAULT_DOWNLINK_RATE_BYTES_PER_S

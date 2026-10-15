@@ -21,11 +21,16 @@ injected visibility function (ADR-0010 §5).
 """
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 from pocketsat.core.rng import RngFactory
+from pocketsat.doppler import doppler_shift_hz
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.messages import Packet
+
+DEFAULT_DOWNLINK_FREQUENCY_HZ: Final = 435_500_000
+"""Default downlink carrier of :class:`IdealLink`, Hz: the default
+``StationConfig.downlink_frequency_hz``. The run loop passes the station's value."""
 
 
 @runtime_checkable
@@ -60,12 +65,24 @@ class IdealLink:
 
     Every packet or frame is delivered in the same call, unchanged and in order, unless
     the spacecraft is below the horizon, when it is dropped and counted. Downlink
-    packets carry ``elevation_deg`` and ``range_km`` from the geometry when there is one;
-    every other link attribute stays ``None`` (the Doppler and SNR indicators come from
-    #162 and #163, loss and latency from Phase 3).
+    packets carry ``elevation_deg``, ``range_km`` and ``doppler_hz`` from the geometry
+    when there is one; every other link attribute stays ``None`` (the SNR indicator comes
+    from #163, loss and latency from Phase 3). ``doppler_hz`` is the true shift of the
+    downlink carrier, :func:`~pocketsat.doppler.doppler_shift_hz` of
+    ``downlink_frequency_hz`` and the geometry's range rate (#162).
+
+    Args:
+        downlink_frequency_hz: The spacecraft's downlink carrier, Hz; the station's
+            ``StationConfig.downlink_frequency_hz``. Default
+            :data:`DEFAULT_DOWNLINK_FREQUENCY_HZ`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, downlink_frequency_hz: int = DEFAULT_DOWNLINK_FREQUENCY_HZ) -> None:
+        if isinstance(downlink_frequency_hz, bool) or not isinstance(downlink_frequency_hz, int):
+            raise TypeError(f"downlink_frequency_hz must be an int, got {downlink_frequency_hz!r}")
+        if downlink_frequency_hz <= 0:
+            raise ValueError(f"downlink_frequency_hz must be positive, got {downlink_frequency_hz}")
+        self._downlink_frequency_hz = downlink_frequency_hz
         self._uplink_dropped_count = 0
         self._downlink_dropped_count = 0
 
@@ -102,11 +119,13 @@ class IdealLink:
             return []
         if geometry is None:
             return [Packet(frame=bytes(frame)) for frame in frames]
+        doppler_hz = doppler_shift_hz(self._downlink_frequency_hz, geometry.range_rate_km_per_s)
         return [
             Packet(
                 frame=bytes(frame),
                 elevation_deg=geometry.elevation_deg,
                 range_km=geometry.range_km,
+                doppler_hz=doppler_hz,
             )
             for frame in frames
         ]

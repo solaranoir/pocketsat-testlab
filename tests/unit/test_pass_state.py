@@ -9,9 +9,11 @@ from pocketsat.environment.geometry import PassGeometry
 from pocketsat.frame import FrameType, encode_frame_fields
 from pocketsat.groundstation import (
     Aos,
+    CommandSent,
     GroundStation,
     Los,
     PassState,
+    RadioTuned,
     StationConfig,
     StationEvent,
 )
@@ -103,7 +105,9 @@ def test_station_reports_aos_and_los_in_begin_tick_events() -> None:
     station = GroundStation(StationConfig(elevation_mask_deg=MASK_DEG))
     assert station.begin_tick(0, _at(-1.0)).events == ()
     aos = station.begin_tick(TICK_US, _at(25.0)).events
-    assert aos == (Aos(TICK_US, pass_id=1, azimuth_deg=90.0, elevation_deg=25.0),)
+    # In a pass the radio is also tuned for Doppler (#162), right after the AOS.
+    assert aos[0] == Aos(TICK_US, pass_id=1, azimuth_deg=90.0, elevation_deg=25.0)
+    assert [type(event) for event in aos] == [Aos, RadioTuned]
     assert station.pass_state == PassState(in_pass=True, pass_id=1, max_elevation_deg=25.0)
     los = station.begin_tick(2 * TICK_US, _at(3.0)).events
     assert los == (
@@ -121,8 +125,7 @@ def test_pass_events_come_before_uplink_events() -> None:
     station = GroundStation()
     station.submit(Command.ping())
     events = station.begin_tick(0, _at(45.0)).events
-    assert type(events[0]) is Aos
-    assert len(events) == 2
+    assert [type(event) for event in events] == [Aos, RadioTuned, CommandSent]
 
 
 def test_per_pass_link_statistics_restart_at_aos() -> None:
