@@ -284,23 +284,32 @@ class DownlinkDecoder:
             self._total.missing_count += result.missing_count
             self._pass.missing_count += result.missing_count
             events.append(SequenceGap(now_us, frame.sequence, result.missing_count))
-        events.extend(self._content(now_us, frame, packet.frame))
+        events.extend(self._content(now_us, frame, packet.frame, packet.snr_db))
         return events
 
-    def _content(self, now_us: int, frame: Frame, raw: bytes) -> list[StationEvent]:
-        """Decode a valid downlink frame's payload by type (step 3 of the module doc)."""
+    def _content(
+        self, now_us: int, frame: Frame, raw: bytes, snr_db: float | None
+    ) -> list[StationEvent]:
+        """Decode a valid downlink frame's payload by type (step 3 of the module doc).
+
+        Telemetry and DATA events carry the packet's ``snr_db`` (#163).
+        """
         try:
             if frame.frame_type is FrameType.TELEMETRY:
-                return self._telemetry(now_us, frame.sequence, decode_telemetry(frame.payload))
+                telemetry = decode_telemetry(frame.payload)
+                return self._telemetry(now_us, frame.sequence, telemetry, snr_db)
             if frame.frame_type is FrameType.ACK:
                 return self.on_ack(now_us, frame.sequence, decode_ack(frame.payload))
-            return [self._data.receive(now_us, frame.sequence, decode_data(frame.payload))]
+            chunk = decode_data(frame.payload)
+            return [self._data.receive(now_us, frame.sequence, chunk, snr_db=snr_db)]
         except (TelemetryDecodeError, AckDecodeError, DataDecodeError):
             return [self._reject(now_us, RejectionReason.PAYLOAD, raw)]
 
-    def _telemetry(self, now_us: int, sequence: int, telemetry: Telemetry) -> list[StationEvent]:
+    def _telemetry(
+        self, now_us: int, sequence: int, telemetry: Telemetry, snr_db: float | None
+    ) -> list[StationEvent]:
         """A TELEMETRY event, then a reboot event if the boot count went up."""
-        events: list[StationEvent] = [TelemetryReceived(now_us, sequence, telemetry)]
+        events: list[StationEvent] = [TelemetryReceived(now_us, sequence, telemetry, snr_db)]
         if self._telemetry_store is not None:
             self._telemetry_store.append(
                 TelemetryRecord(now_us, sequence, self._pass_id, telemetry)

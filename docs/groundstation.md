@@ -195,8 +195,8 @@ telemetry store, so a new observable is a new event type.
 | `CommandTimedOut` | ACK correlation (#155) | `command_ref`, `retry_count`, `will_retry` |
 | `CommandFailed` | ACK correlation (#155), uplink expiry (#154) | `command_ref`, `reason` (`FailureReason`: `RETRIES_EXHAUSTED`, `NOT_RETRYABLE`, `EXPIRED`) |
 | `UnmatchedAck` | ACK correlation (#155) | `sequence`, `command_id` |
-| `TelemetryReceived` | decoding (#156) | `sequence`, `telemetry` |
-| `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok`, `duplicate` |
+| `TelemetryReceived` | decoding (#156) | `sequence`, `telemetry`, `snr_db` (the packet's SNR indicator, #163; `None` without geometry) |
+| `DataChunkReceived` | DATA (#158) | `sequence`, `chunk_id`, `content_ok`, `duplicate`, `snr_db` (as for `TelemetryReceived`) |
 | `FrameRejected` | decoding (#156) | `reason` (`RejectionReason`: sync, length, CRC, type, payload, wrong direction), `frame` |
 | `SequenceGap` | decoding (#156) | `sequence` (received), `missing_count`; the expected sequence is `(sequence - missing_count) mod 65536` |
 | `SpacecraftRebooted` | decoding (#156) | `sequence`, `boot_count` |
@@ -339,6 +339,81 @@ Story #146's test (`tests/sil/test_station_story_146.py`) runs ten minutes of SC
 and a DOWNLINK pass against `SilTarget` through the ideal link, with the station sending
 the commands, and checks every telemetry frame decoded, every chunk stored once, in
 order, verified and none missing, and no frame errors or gaps.
+
+## SNR indicator
+
+The link attaches a signal-to-noise ratio to every downlink packet it delivers with
+geometry (`Packet.snr_db`, #163), and the station copies it onto the `TelemetryReceived`
+and `DataChunkReceived` events of that packet, so the console and assertions see how
+strong the signal was for each frame. It is an indicator only: **no packet is dropped
+for a low SNR** in Phase 2. Phase 3's RF channel maps SNR to loss behind the same `Link`
+protocol (ADR-0010 §5). Uplink frames carry no SNR. Without geometry `snr_db` is `None`.
+
+**Where it lives.** `pocketsat.link_budget.LinkBudget`, beside `pocketsat.link`. The
+budget describes the radio path (the spacecraft's transmitter, both antennas, the
+station's receiver), so it belongs to the link, not to `StationConfig`: the link does
+not depend on the station (ADR-0010 §5), and on HIL it cannot read the spacecraft's
+settings across the `TestTarget` boundary. `IdealLink(link_budget=...)` takes one and
+defaults to `DEFAULT_LINK_BUDGET`; Phase 3's channel (`pocketsat.rf`) reuses it rather
+than introducing the `rf` package early. Change a value with `dataclasses.replace()`.
+
+**The budget** (ADR-0011 §6), all in decibels:
+
+```
+SNR = P_tx + G_tx + G_rx - FSPL(d) - L - N
+FSPL(d) = 20 log₁₀(4π d f / c)
+N = -174 dBm/Hz + 10 log₁₀(B) + NF
+```
+
+Only the range `d` changes from tick to tick. Everything else, including
+`20 log₁₀(4π · 1 km · f / c)`, `10 log₁₀(B)` and `P_tx` in dBm, is folded into one
+constant when the budget is built, so `snr_db(range_km)` is that constant minus
+`20 log₁₀(d / 1 km)`: one `portable_db` call (about 1 µs), made once per tick that
+delivers downlink frames, whatever their number. Decibels come from the portable,
+`frexp`-based `portable_db` (ADR-0006 as amended by ADR-0011 §6), so values are
+byte-identical on every platform; the tests pin them exactly. Ranges below 1 km
+(`MIN_RANGE_KM`, only reachable with a hand-built `PassGeometry`) are evaluated at 1 km,
+where the free-space formula already makes little sense.
+
+**Defaults**: a typical amateur UHF small-satellite downlink, the kind of 1 W, 9600
+bit/s 70 cm CubeSat beacon an amateur station with a tracked Yagi receives.
+
+| Field | Default | Why |
+|---|---|---|
+| `frequency_hz` | 435 500 000 | The station's default `downlink_frequency_hz`, in the 70 cm amateur-satellite sub-band. A test keeps the two defaults equal; a scenario that changes one changes the other |
+| `tx_power_w` | 1.0 (30 dBm) | CubeSat UHF transceivers typically transmit 0.5 to 2 W, limited by the bus power budget |
+| `tx_antenna_gain_db` | 0.0 dBi | A deployable monopole or dipole on a small satellite is close to omnidirectional (about 0 to 2 dBi); the spacecraft is not pointed at the station |
+| `rx_antenna_gain_db` | 12.0 dBi | A circularly polarised 70 cm crossed Yagi on an azimuth-elevation rotator, the common amateur satellite antenna (about 10 to 16 dBic depending on length) |
+| `losses_db` | 8.0 | 3 dB polarisation mismatch (a linearly polarised spacecraft antenna into a circular station antenna, which also absorbs Faraday rotation), about 2 dB of feed line and connectors at 435 MHz, about 3 dB for the spacecraft antenna pattern and tumbling (attitude toward the station is not modelled). Atmospheric absorption at UHF (under 0.5 dB) is folded in |
+| `bandwidth_hz` | 15 000 | The IF bandwidth of a receiver for 9600 bit/s G3RUH FSK, the usual amateur satellite data mode at that rate; the spacecraft downlink is 1200 bytes/s (9600 bit/s) |
+| `noise_figure_db` | 3.0 | An effective system noise figure: a mast-mounted preamplifier (about 0.5 to 1 dB) plus the feed-line loss before the receiver and the antenna noise temperature (sky and warm ground in the beam at low elevation) |
+
+The thermal noise density is the conventional -174 dBm/Hz (kT₀ at 290 K is -173.98);
+the speed of light is exact (299 792 458 m/s).
+
+**Typical values.** With the defaults, the noise floor is -129.2 dBm and:
+
+| Range | Where | SNR |
+|---|---|---|
+| 380 km | overhead (zenith of the default 380 km orbit) | 26.4 dB |
+| 460 km | the default orbit's first pass, 54° peak | 24.8 dB |
+| 1 000 km | about 18° elevation | 18.0 dB |
+| 1 400 km | about 10° elevation (the default mask) | 15.1 dB |
+| 2 230 km | the geometric horizon | 11.0 dB |
+
+So the SNR rises by about 14 dB from the horizon to the peak of a high pass and falls
+again as the spacecraft sets, the shape Phase 3's loss model needs ("telemetry quality
+naturally improves and deteriorates over a simulated LEO pass", `docs/roadmap.md`). The
+numbers are the budget's, not a real mission's; scenarios that need a marginal link
+lower `tx_power_w` or raise `losses_db`.
+
+**Accuracy.** `snr_db` is within 1e-10 dB of the same budget evaluated with
+`math.log10` (measured: 3.6e-14 dB over 1 to 5000 km), and the free-space loss is within
+0.01 dB of the textbook `20 log₁₀(d/km) + 20 log₁₀(f/MHz) + 32.45`. Story test
+`tests/sil/test_snr_story.py` checks that over the default orbit's first pass the SNR
+rises strictly to the peak and falls strictly after it, falls strictly with range, and
+pins its values; and that against `SilTarget` every telemetry frame of a 60° pass
+arrives, the weakest included, carrying the SNR of its tick.
 
 ## Determinism
 

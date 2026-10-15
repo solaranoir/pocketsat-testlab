@@ -226,10 +226,13 @@ class TelemetryReceived(_Event):
     Attributes:
         sequence: The frame's downlink header sequence.
         telemetry: The decoded payload.
+        snr_db: The packet's ``snr_db`` as the link delivered it (#163), or ``None``
+            when the link attached none (no geometry).
     """
 
     sequence: int
     telemetry: Telemetry
+    snr_db: float | None = None
 
 
 @dataclass(frozen=True)
@@ -243,12 +246,15 @@ class DataChunkReceived(_Event):
             configured chunk size. A chunk that does not is corrupted and not stored.
         duplicate: Whether a chunk with this ID was already stored; the stored copy is
             kept.
+        snr_db: The packet's ``snr_db`` as the link delivered it (#163), or ``None``
+            when the link attached none (no geometry).
     """
 
     sequence: int
     chunk_id: int
     content_ok: bool
     duplicate: bool = False
+    snr_db: float | None = None
 
 
 @dataclass(frozen=True)

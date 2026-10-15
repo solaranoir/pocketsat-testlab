@@ -6,6 +6,7 @@ from pocketsat.core.rng import RngFactory
 from pocketsat.environment.geometry import PassGeometry
 from pocketsat.frame import FrameType, encode_frame_fields
 from pocketsat.link import IdealLink, Link
+from pocketsat.link_budget import DEFAULT_LINK_BUDGET, LinkBudget
 from pocketsat.messages import Command, Packet, encode_command
 from pocketsat.targets.echo import EchoTarget
 
@@ -63,12 +64,41 @@ def test_uplink_unwraps_packets_to_their_frames_unchanged() -> None:
     assert carried == frames
 
 
-def test_downlink_fills_elevation_and_range_from_geometry_only() -> None:
+def test_downlink_fills_elevation_range_and_snr_from_geometry() -> None:
     (packet,) = IdealLink().carry_downlink([_command_frame(3)], TICK_US, ABOVE)
-    assert packet == Packet(frame=_command_frame(3), elevation_deg=35.5, range_km=812.25)
+    assert packet == Packet(
+        frame=_command_frame(3),
+        elevation_deg=35.5,
+        range_km=812.25,
+        snr_db=19.81774660034577,  # DEFAULT_LINK_BUDGET at 812.25 km, pinned (#163)
+    )
     assert packet.doppler_hz is None
-    assert packet.snr_db is None
     assert packet.loss_probability is None
+    assert packet.latency_us is None
+
+
+def test_downlink_snr_comes_from_the_link_budget_at_the_tick_range() -> None:
+    budget = LinkBudget(tx_power_w=5.0, rx_antenna_gain_db=16.0)
+    link = IdealLink(budget)
+    assert link.link_budget is budget
+    assert IdealLink().link_budget is DEFAULT_LINK_BUDGET
+    packets = link.carry_downlink([_command_frame(1), _command_frame(2)], TICK_US, HORIZON)
+    assert [packet.snr_db for packet in packets] == [budget.snr_db(2_500.0)] * 2
+
+
+def test_a_low_snr_drops_nothing() -> None:
+    # Phase 2's SNR is an indicator only; Phase 3 maps it to loss (#163, ADR-0010 §5).
+    link = IdealLink(LinkBudget(tx_power_w=1e-9, losses_db=40.0))
+    frames = [_command_frame(sequence) for sequence in range(3)]
+    packets = link.carry_downlink(frames, TICK_US, HORIZON)
+    assert [packet.frame for packet in packets] == frames
+    assert all(packet.snr_db is not None and packet.snr_db < -80.0 for packet in packets)
+    assert link.downlink_dropped_count == 0
+
+
+def test_link_budget_of_the_wrong_type_is_rejected() -> None:
+    with pytest.raises(TypeError, match="link_budget"):
+        IdealLink("default")  # type: ignore[arg-type]
 
 
 def test_downlink_without_geometry_has_no_link_attributes() -> None:

@@ -183,6 +183,7 @@ def test_scan_covers_simulation_code() -> None:
         "flight/modes.py",
         "flight/safety.py",
         "link.py",
+        "link_budget.py",
         "targets/base.py",
         "targets/echo.py",
         "targets/sil.py",

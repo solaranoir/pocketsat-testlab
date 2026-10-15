@@ -1,5 +1,6 @@
 """Downlink decoding, sequence tracking and link statistics (#156)."""
 
+import dataclasses
 import json
 import random
 from pathlib import Path
@@ -161,6 +162,27 @@ def test_invalid_data_payloads_are_rejected_as_payload(vector: dict[str, Any]) -
         FrameRejected(NOW_US, RejectionReason.PAYLOAD, packet.frame)
     ]
     assert store.statistics.received_count == 0
+
+
+# --- SNR on events (#163) --------------------------------------------------------------
+
+
+def test_telemetry_and_data_events_carry_the_packet_snr() -> None:
+    vector = DATA["valid_data"][0]
+    decoder = DownlinkDecoder(data=DataStore(vector["chunk_size"]))
+    telemetry_packet = dataclasses.replace(_telemetry(0), snr_db=21.5)
+    data_packet = Packet(frame=bytes.fromhex(vector["frame_hex"]), snr_db=-3.25)
+    (telemetry_event,) = decoder.decode(NOW_US, telemetry_packet)
+    events = decoder.decode(NOW_US, data_packet)
+    assert isinstance(telemetry_event, TelemetryReceived)
+    assert telemetry_event.snr_db == 21.5
+    assert [e.snr_db for e in events if isinstance(e, DataChunkReceived)] == [-3.25]
+
+
+def test_events_have_no_snr_when_the_packet_has_none() -> None:
+    (event,) = DownlinkDecoder().decode(NOW_US, _telemetry(0))
+    assert isinstance(event, TelemetryReceived)
+    assert event.snr_db is None
 
 
 # --- ACK and wrong direction ---------------------------------------------------------
